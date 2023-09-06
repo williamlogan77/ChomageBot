@@ -1,7 +1,7 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
-from discord.utils import get
+import glob
 
 
 class Sync(commands.Cog):
@@ -10,13 +10,14 @@ class Sync(commands.Cog):
         self.bot = bot
 
     @app_commands.command(name="sync")
-    async def sync(self, interaction: discord.Interaction):
-        user_roles = [x.name for x in interaction.user.roles]
+    async def sync(self, ctx: discord.Interaction):
+        user_roles = [x.name for x in ctx.user.roles]  # type: ignore
         if "Keeper of Chomage" in user_roles:
             await self.bot.tree.sync()
-            await interaction.response.send_message("sucessfully synced.")
+            await ctx.response.send_message("sucessfully synced.")
+            print("synced cogs")
         else:
-            await interaction.response.send_message(
+            await ctx.response.send_message(
                 "You need the 'Keeper of Chomage' Role to use this command")
 
 

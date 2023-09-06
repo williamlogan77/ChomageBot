@@ -3,16 +3,15 @@ import glob
 import os
 import sqlite3 as sq
 from pprint import pprint
-import time
 
+from riotwatcher import LolWatcher
 import aiosqlite as sqa
 import discord
-from discord import app_commands
 from discord.ext.commands import Bot
 from dotenv import load_dotenv
 
-os.chdir("Bot/")
 load_dotenv(".env")
+os.chdir("Bot/")
 
 
 class MyDiscordBot(Bot):
@@ -22,6 +21,8 @@ class MyDiscordBot(Bot):
         super().__init__(command_prefix, intents=intents)
         self.db_path = db_path
         self.guildid = serverid
+        self.lolapi = LolWatcher(os.environ.get("riot_key"))
+
         print("chommage is starting")
 
     async def sync_discord(self) -> None:
@@ -48,9 +49,6 @@ class MyDiscordBot(Bot):
                     (int(channel.id), str(channel.name), str(channel.type)))
             await db.commit()
         return
-
-    async def db_connect(self) -> sqa.Connection:
-        return await sqa.connect(self.db_path)
 
     async def on_connect(self) -> None:
         await self.wait_until_ready()
@@ -103,7 +101,7 @@ async def main(my_token: str) -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main(os.environ.get("token")))
+    asyncio.run(main(os.environ.get("token")))  # type: ignore
 
 #
 # bot.start(token)

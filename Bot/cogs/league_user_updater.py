@@ -11,7 +11,7 @@ class LeagueUsers(commands.Cog):
 
     @app_commands.command(name="add_player",
                           description="Add user to the table")
-    async def temp_name(self, ctx: discord.Interaction, league_name: str,
+    async def add_to_db(self, ctx: discord.Interaction, league_name: str,
                         user: discord.User):
 
         puuid = self.bot.lolapi.summoner.by_name("EUW1", league_name)["puuid"]
@@ -19,10 +19,56 @@ class LeagueUsers(commands.Cog):
         async with sqa.connect(self.bot.db_path) as db:  # type: ignore
             await db.execute(
                 "REPLACE INTO league_players (discord_user_id, puuid, league_username) VALUES (?, ?, ?)",
-                (ctx.user.id, puuid, league_name))
+                (user.id, puuid, league_name))
             await db.commit()
-        print("put into db")
+        print(
+            f"put {user.id, user.name, puuid, league_name} into db for {ctx.user}"
+        )
+        await ctx.response.send_message(f"Added {league_name} into the db")
         return
+
+    @app_commands.command(
+        name="remove_player",
+        description="Remove a player from the league history database")
+    async def remove_from_db(self,
+                             ctx: discord.Interaction,
+                             user: discord.User,
+                             league_name: str = ""):
+        if league_name != "":
+            names = league_name.split(" ")
+            async with sqa.connect(self.bot.db_path) as db:
+                for name in names:
+                    await db.execute(
+                        "DELETE FROM league_players WHERE league_username = ?",
+                        (name, ))
+                    await db.commit()
+                    await ctx.response.send_message(f"{name} removed from list"
+                                                    )
+
+        else:
+            async with sqa.connect(self.bot.db_path) as db:
+                await db.execute(
+                    "DELETE FROM league_players WHERE discord_user_id = ?",
+                    (user.id, ))
+                await db.commit()
+                await ctx.response.send_message(
+                    f"successfully removed all accounts associated with {user.name}"
+                )
+
+        return
+
+    @app_commands.command(
+        name="show_players",
+        description="Shows all player currently stored in the league database")
+    async def show_all(self, ctx: discord.Interaction):
+        async with sqa.connect(self.bot.db_path) as db:
+            to_show = await db.execute_fetchall(
+                "SELECT league_username FROM league_players")
+        to_print = ""
+        for name in to_show:
+            to_print += str(name[0]) + "\n"
+
+        await ctx.response.send_message(to_print)
 
 
 async def setup(bot: commands.Bot):

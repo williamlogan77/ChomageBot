@@ -37,13 +37,10 @@ class MyDiscordBot(Bot):
                 await db.commit()
 
             channels = await guild.fetch_channels()
-            pprint(channels)
 
             for channel in channels:
-                print(channel, channel.id, channel.name, channel.type)
                 if str(channel.type) == "category":
                     continue
-                print(f"Putting {channel.name} into db")
                 await db.execute(
                     "REPLACE INTO discord_channels (channel_id, name, type) VALUES (?, ?, ?)",
                     (int(channel.id), str(channel.name), str(channel.type)))
@@ -83,6 +80,14 @@ def setup_db() -> None:
             cursor.executescript(sql_code)
     else:
         print("Database exists, setup done.")
+
+
+import logging
+
+handler = logging.FileHandler(filename='discord.log',
+                              encoding='utf-8',
+                              mode='w')
+discord.utils.setup_logging()
 
 
 async def main(my_token: str) -> None:

@@ -10,8 +10,7 @@ import discord
 from discord.ext.commands import Bot
 from dotenv import load_dotenv
 
-load_dotenv(".env")
-os.chdir("Bot/")
+load_dotenv("../.env")
 
 
 class MyDiscordBot(Bot):

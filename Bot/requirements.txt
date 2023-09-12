@@ -1,0 +1,6 @@
+setuptools
+discord.py
+asyncio
+aiosqlite
+riotwatcher
+python-dotenv

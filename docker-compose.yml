@@ -1,0 +1,6 @@
+version: '3'
+services:
+  myapp:
+    image: chomagebot
+    env_file:
+      - .env

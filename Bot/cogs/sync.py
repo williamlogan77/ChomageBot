@@ -19,7 +19,7 @@ class Sync(commands.Cog):
                 if not cog.startswith("sync"):
                     print(os.getcwd())
                     print(cog)
-                    await self.bot.reload_extension(f"{cog[:-3]}")
+                    await self.bot.reload_extension(f"cogs.{cog[:-3]}")
                     print("done", cog)
             os.chdir("../")
             await self.bot.tree.sync()

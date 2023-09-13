@@ -1,6 +1,8 @@
 version: '3'
 services:
   myapp:
-    image: chomagebot
+    build: .
     env_file:
       - .env
+    volumes:
+      - ./Bot:/Bot

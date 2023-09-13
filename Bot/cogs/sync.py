@@ -12,22 +12,28 @@ class Sync(commands.Cog):
 
     @app_commands.command(name="sync")
     async def sync(self, ctx: discord.Interaction):
+        await ctx.response.defer()
+        msg = await ctx.followup.send("Syncing cogs...",
+                                      wait=True,
+                                      ephemeral=True)
         user_roles = [x.name for x in ctx.user.roles]  # type: ignore
         if "Keeper of Chomage" in user_roles:
+            print("updating cogs", flush=True)
             os.chdir("cogs/")
             for cog in glob.glob("*.py"):
                 if not cog.startswith("sync"):
-                    print(os.getcwd())
-                    print(cog)
+                    print("Reloading", cog, flush=True)
                     await self.bot.reload_extension(f"cogs.{cog[:-3]}")
-                    print("done", cog)
             os.chdir("../")
             await self.bot.tree.sync()
-            await ctx.response.send_message("sucessfully synced.")
-            print("synced cogs")
+            print("done", flush=True)
+            await msg.edit(content="Sucessfully synced and reloaded all cogs.")
+            self.bot.logging.info("Synced and reloaded all cogs")
         else:
-            await ctx.response.send_message(
+            msg.edit(
+                content=
                 "You need the 'Keeper of Chomage' Role to use this command")
+            self.bot.logging.warning("Cogs have not reloaded")
 
 
 async def setup(bot: commands.Bot):

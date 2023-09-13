@@ -2,13 +2,13 @@ import asyncio
 import glob
 import os
 import sqlite3 as sq
-from pprint import pprint
 
 from riotwatcher import LolWatcher
 import aiosqlite as sqa
 import discord
 from discord.ext.commands import Bot
 from dotenv import load_dotenv
+import logging
 
 load_dotenv("../.env")
 
@@ -21,6 +21,7 @@ class MyDiscordBot(Bot):
         self.db_path = db_path
         self.guildid = serverid
         self.lolapi = LolWatcher(os.environ.get("riot_key"))
+        self.logging = logging.getLogger()
 
         print("chommage is starting")
 
@@ -80,8 +81,6 @@ def setup_db() -> None:
     else:
         print("Database exists, setup done.")
 
-
-import logging
 
 handler = logging.FileHandler(filename='discord.log',
                               encoding='utf-8',

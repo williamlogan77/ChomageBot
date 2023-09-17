@@ -26,7 +26,6 @@ class Sync(commands.Cog):
                     await self.bot.reload_extension(f"cogs.{cog[:-3]}")
             os.chdir("../")
             await self.bot.tree.sync()
-            print("done", flush=True)
             await msg.edit(content="Sucessfully synced and reloaded all cogs.")
             self.bot.logging.info("Synced and reloaded all cogs")
         else:

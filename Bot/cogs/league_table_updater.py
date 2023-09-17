@@ -51,6 +51,7 @@ class FetchFromRiot(commands.Cog):
         await self.bot.wait_until_ready()
         await self.fetch_ranks()
         if self.ranked_dict != self.previous_ranks:
+            self.bot.logging.info("Posting ranks")
             self.previous_ranks = self.ranked_dict
             to_post = filter(lambda x: type(x) == type({}),
                              [data for data in self.ranked_dict.values()])

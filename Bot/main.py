@@ -9,6 +9,7 @@ import discord
 from discord.ext.commands import Bot
 from dotenv import load_dotenv
 import logging
+from pantheon import pantheon
 
 load_dotenv("../.env")
 
@@ -20,7 +21,9 @@ class MyDiscordBot(Bot):
         super().__init__(command_prefix, intents=intents)
         self.db_path = db_path
         self.guildid = serverid
-        self.lolapi = LolWatcher(os.environ.get("riot_key"))
+        self.lolapi = pantheon.Pantheon("euw1",
+                                        os.environ.get("riot_key"),
+                                        debug=True)
         self.logging = logging.getLogger()
 
         print("chommage is starting")

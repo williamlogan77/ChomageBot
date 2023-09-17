@@ -14,13 +14,14 @@ class FetchFromRiot(commands.Cog):
 
     def fetch_users_rank(self, users):
         users_ranks = {}
-        for user in users:
+        for user, name in users:
             user_rank = self.bot.lolapi.league.by_summoner("EUW1", user)
             fivev5 = list(
                 filter(lambda x: x["queueType"] == "RANKED_SOLO_5x5",
                        user_rank))
             if len(fivev5) > 0:
                 fivev5 = fivev5[0]
+                fivev5["discord_name"] = name
                 fivev5["sorted_rank"] = Ranker(fivev5["tier"], fivev5["rank"],
                                                fivev5["leaguePoints"])
                 fivev5["GamesPlayed"] = fivev5["wins"] + fivev5["losses"]
@@ -29,7 +30,6 @@ class FetchFromRiot(commands.Cog):
 
                 users_ranks[fivev5["summonerName"]] = fivev5
             else:
-                print(fivev5, flush=True)
                 fivev5 = []
 
         return users_ranks
@@ -38,13 +38,11 @@ class FetchFromRiot(commands.Cog):
         self.bot.logging.info("fetching ranks")
         # fetch from db
         async with sqa.connect(self.bot.db_path) as connection:
-            connection.row_factory = lambda cursor, row: row[0]
-            async with connection.execute(
-                    "SELECT puuid FROM league_players") as cursor:
-                uuids = [row async for row in cursor]
-
-        # Fetch current ranks and store them in a dict with updated values
-        self.ranked_dict = self.fetch_users_rank(uuids)
+            async with connection.execute_fetchall(
+                    "SELECT puuid, IIF(nickname='', discord_tag, nickname) FROM (SELECT * FROM league_players LEFT JOIN users ON user_id = discord_user_id)"
+            ) as cursor:
+                # Fetch current ranks and store them in a dict with updated values
+                self.ranked_dict = self.fetch_users_rank(cursor)
 
         return
 
@@ -63,16 +61,24 @@ class FetchFromRiot(commands.Cog):
             output_list = []
             for index, posting in enumerate(sorted_results):
                 if posting["tier"].title() == "Master":
-                    post = str(index + 1) + ". " + posting["summonerName"] + "\n" + "Rank: " + \
-                        posting["tier"].title() + " " + str(posting["leaguePoints"]) + "lp" + \
-                        "\n" + "Played: " + str(posting["GamesPlayed"]) + " with a " + \
-                        str("{:.2f}".format(
-                            posting["WinRate"])) + "% winrate" + "\n"
+                    post = str(index + 1) + ". " + posting[
+                        "summonerName"] + "\n" + "Rank: " + posting[
+                            "tier"].title() + " " + str(
+                                posting["leaguePoints"]
+                            ) + "lp" + "\n" + "Played: " + str(
+                                posting["GamesPlayed"]) + " with a " + str(
+                                    "{:.2f}".format(posting["WinRate"]
+                                                    )) + "% winrate" + "\n"
                 else:
-                    post = str(index + 1) + ". " + posting["summonerName"] + "\n" + "Rank: " + \
-                        posting["tier"].title() + " " + posting["rank"] + " " + \
-                        str(posting["leaguePoints"]) + "lp" + "\n" + "Played: " + str(posting["GamesPlayed"]) + " games with a " + \
-                        str("{:.2f}".format(posting["WinRate"])) + "% winrate" + "\n"
+                    post = str(index + 1) + ". " + posting[
+                        "summonerName"] + f" - {posting['discord_name']}" + "\n" + "Rank: " + posting[
+                            "tier"].title(
+                            ) + " " + posting["rank"] + " " + str(
+                                posting["leaguePoints"]
+                            ) + "lp" + "\n" + "Played: " + str(
+                                posting["GamesPlayed"]
+                            ) + " games with a " + str("{:.2f}".format(
+                                posting["WinRate"])) + "% winrate" + "\n"
                 output_list.append(post)
 
             paste = self.bot.get_channel(919981835428179988)

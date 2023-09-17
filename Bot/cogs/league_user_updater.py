@@ -11,6 +11,8 @@ class LeagueUsers(commands.Cog):
 
     @app_commands.command(name="add_player",
                           description="Add user to the table")
+    @app_commands.describe(league_name='The league name',
+                           user='The discord account attached')
     async def add_to_db(self, ctx: discord.Interaction, league_name: str,
                         user: discord.User):
 
@@ -30,6 +32,8 @@ class LeagueUsers(commands.Cog):
     @app_commands.command(
         name="remove_player",
         description="Remove a player from the league history database")
+    @app_commands.describe(user="Clear all accounts associated with this user",
+                           league_name="Specify account to remove")
     async def remove_from_db(self,
                              ctx: discord.Interaction,
                              user: discord.User,

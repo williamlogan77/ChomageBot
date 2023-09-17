@@ -16,8 +16,7 @@ class LeagueUsers(commands.Cog):
     async def add_to_db(self, ctx: discord.Interaction, league_name: str,
                         user: discord.User):
 
-        puuid = self.bot.lolapi.summoner.by_name("EUW1", league_name)["id"]
-        print(puuid)
+        puuid = (await self.bot.lolapi.get_summoner_by_name(league_name))["id"]
         async with sqa.connect(self.bot.db_path) as db:  # type: ignore
             await db.execute(
                 "REPLACE INTO league_players (discord_user_id, puuid, league_username) VALUES (?, ?, ?)",

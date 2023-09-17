@@ -12,10 +12,10 @@ class FetchFromRiot(commands.Cog):
         self.previous_ranks = None
         self.ranked_dict = None
 
-    def fetch_users_rank(self, users):
+    async def fetch_users_rank(self, users):
         users_ranks = {}
         for user, name in users:
-            user_rank = self.bot.lolapi.league.by_summoner("EUW1", user)
+            user_rank = await self.bot.lolapi.get_league_position(user)
             fivev5 = list(
                 filter(lambda x: x["queueType"] == "RANKED_SOLO_5x5",
                        user_rank))
@@ -42,7 +42,7 @@ class FetchFromRiot(commands.Cog):
                     "SELECT puuid, IIF(nickname='', discord_tag, nickname) FROM (SELECT * FROM league_players LEFT JOIN users ON user_id = discord_user_id)"
             ) as cursor:
                 # Fetch current ranks and store them in a dict with updated values
-                self.ranked_dict = self.fetch_users_rank(cursor)
+                self.ranked_dict = await self.fetch_users_rank(cursor)
 
         return
 

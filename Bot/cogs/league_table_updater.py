@@ -26,10 +26,12 @@ class FetchFromRiot(commands.Cog):
                 fivev5["GamesPlayed"] = fivev5["wins"] + fivev5["losses"]
                 fivev5["WinRate"] = (fivev5["wins"] /
                                      fivev5["GamesPlayed"]) * 100
+
+                users_ranks[fivev5["summonerName"]] = fivev5
             else:
+                print(fivev5, flush=True)
                 fivev5 = []
 
-            users_ranks[fivev5["summonerName"]] = fivev5
         return users_ranks
 
     async def fetch_ranks(self):

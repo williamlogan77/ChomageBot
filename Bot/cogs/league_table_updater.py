@@ -1,6 +1,8 @@
 from discord.ext import commands, tasks
 import aiosqlite as sqa
 from utils.rank_sorting_class import Ranker  # pylint: disable=E0401
+from pantheon.utils.exceptions import RateLimit
+import asyncio
 
 
 class FetchFromRiot(commands.Cog):
@@ -14,8 +16,18 @@ class FetchFromRiot(commands.Cog):
 
     async def fetch_users_rank(self, users):
         users_ranks = {}
+        looked_up_users = []
         for user, name in users:
-            user_rank = await self.bot.lolapi.get_league_position(user)
+            while user not in looked_up_users:
+                try:
+                    user_rank = await self.bot.lolapi.get_league_position(user)
+                    looked_up_users.append(user)
+                except RateLimit as Limited:
+                    self.bot.logging.warning(
+                        f"Rate limited on {user, name}, waiting {Limited.timeToWait} seconds"
+                    )
+                    await asyncio.sleep(Limited.timeToWait)
+
             fivev5 = list(
                 filter(lambda x: x["queueType"] == "RANKED_SOLO_5x5",
                        user_rank))

@@ -1,7 +1,28 @@
+import typing
+from typing import Any
 import discord
+from discord.app_commands.models import Choice
 from discord.ext import commands
 from discord import app_commands
 import aiosqlite as sqa
+from discord.interactions import Interaction
+
+
+class attachedDiscord(app_commands.Transformer):
+
+    async def transform(self, interaction: discord.Interaction, value: Any):
+        return value
+
+    async def autocomplete(self, interaction: discord.Interaction, value):
+        async with sqa.connect(interaction.client.db_path) as db:
+            db.row_factory = lambda cursor, row: row[0]
+            attached_accounts = await db.execute_fetchall(
+                "SELECT league_username FROM league_players WHERE discord_user_id = ?",
+                (interaction.namespace.user.id, ))
+        return [
+            app_commands.Choice(name=league_name, value=league_name)
+            for league_name in attached_accounts
+        ]
 
 
 class LeagueUsers(commands.Cog):
@@ -22,7 +43,7 @@ class LeagueUsers(commands.Cog):
                 "REPLACE INTO league_players (discord_user_id, puuid, league_username) VALUES (?, ?, ?)",
                 (user.id, puuid, league_name))
             await db.commit()
-        print(
+        self.bot.logging.info(
             f"put {user.id, user.name, puuid, league_name} into db for {ctx.user}"
         )
         await ctx.response.send_message(f"Added {league_name} into the db")
@@ -33,10 +54,11 @@ class LeagueUsers(commands.Cog):
         description="Remove a player from the league history database")
     @app_commands.describe(user="Clear all accounts associated with this user",
                            league_name="Specify account to remove")
-    async def remove_from_db(self,
-                             ctx: discord.Interaction,
-                             user: discord.User,
-                             league_name: str = ""):
+    async def remove_from_db(
+            self,
+            ctx: discord.Interaction,
+            user: discord.User,
+            league_name: app_commands.Transform[str, attachedDiscord] = ""):
         if league_name != "":
             names = league_name.split(" ")
             async with sqa.connect(self.bot.db_path) as db:
@@ -55,7 +77,7 @@ class LeagueUsers(commands.Cog):
                     (user.id, ))
                 await db.commit()
                 await ctx.response.send_message(
-                    f"successfully removed all accounts associated with {user.name}"
+                    f"successfully removed all accounts awwssociated with {user.name}"
                 )
 
         return

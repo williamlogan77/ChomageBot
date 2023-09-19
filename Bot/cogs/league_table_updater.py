@@ -26,7 +26,8 @@ class FetchFromRiot(commands.Cog):
                     self.bot.logging.warning(
                         f"Rate limited on {user, name}, waiting {Limited.timeToWait} seconds"
                     )
-                    await asyncio.sleep(Limited.timeToWait)
+                    print(Limited.timeToWait, flush=True)
+                    await asyncio.sleep(int(Limited.timeToWait))
 
             fivev5 = list(
                 filter(lambda x: x["queueType"] == "RANKED_SOLO_5x5",

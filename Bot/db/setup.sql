@@ -27,7 +27,7 @@ create table if not exists league_history (
     puuid TEXT not null,
     timestamp DATETIME not null DEFAULT CURRENT_TIMESTAMP,
     lp INTEGER,
-    division INTEGER,
+    division TEXT,
     tier TEXT
 );
 create unique index if not exists discord_events_event_id_uindex on discord_events (event_id);

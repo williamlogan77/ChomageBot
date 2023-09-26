@@ -1,8 +1,10 @@
 from discord.ext import commands, tasks
 import aiosqlite as sqa
 from utils.rank_sorting_class import Ranker  # pylint: disable=E0401
-from pantheon.utils.exceptions import RateLimit
+from pantheon.utils.exceptions import RateLimit, Timeout
+from discord import app_commands
 import asyncio
+import discord
 
 
 class FetchFromRiot(commands.Cog):
@@ -11,7 +13,7 @@ class FetchFromRiot(commands.Cog):
         self.bot = bot
         self.bot.logging.info(f"{__name__} loaded")
         self.post_ranks.start()  # pylint: disable=E1101
-        self.previous_ranks = None
+        self.previous_ranks = {}
         self.ranked_dict = None
 
     async def fetch_users_rank(self, users):
@@ -22,12 +24,16 @@ class FetchFromRiot(commands.Cog):
                 try:
                     user_rank = await self.bot.lolapi.get_league_position(user)
                     looked_up_users.append(user)
-                except RateLimit as Limited:
-                    self.bot.logging.warning(
-                        f"Rate limited on {user, name}, waiting {Limited.timeToWait} seconds"
-                    )
-                    print(Limited.timeToWait, flush=True)
-                    await asyncio.sleep(int(Limited.timeToWait))
+                except (RateLimit, Timeout) as Limited:
+                    if isinstance(Limited, RateLimit):
+                        self.bot.logging.warning(
+                            f"Rate limited on {user, name}, waiting {Limited.timeToWait} seconds"
+                        )
+                        print(Limited.timeToWait, flush=True)
+                        await asyncio.sleep(int(Limited.timeToWait))
+                    else:
+                        print(f"Timedout", flush=True)
+                        await asyncio.sleep(10)
 
             fivev5 = list(
                 filter(lambda x: x["queueType"] == "RANKED_SOLO_5x5",
@@ -47,15 +53,34 @@ class FetchFromRiot(commands.Cog):
 
         return users_ranks
 
+    async def fetch_ranks_from_db(self):
+
+        async with sqa.connect(self.bot.db_path) as connection:
+            async with connection.execute_fetchall(
+                    "SELECT league_username, lp, division, tier FROM (SELECT DISTINCT puuid, MAX(timestamp), lp, division, tier FROM league_history GROUP BY puuid) as history, (SELECT * FROM league_players) as players WHERE history.puuid = players.puuid"
+            ) as cursor:
+                db_dict = {}
+                for user in cursor:
+                    current_user, lp, tier, div = user
+                    db_dict[current_user] = {}
+                    db_dict[current_user]["queueType"] = "RANKED_SOLO_5x5"
+                    db_dict[current_user]["leaguePoints"] = lp
+                    db_dict[current_user]["tier"] = tier
+                    db_dict[current_user]["rank"] = div
+
+            return db_dict
+
     async def fetch_ranks(self):
         self.bot.logging.info("fetching ranks")
         # fetch from db
+        # await self.fetch_ranks_from_db()
         async with sqa.connect(self.bot.db_path) as connection:
             async with connection.execute_fetchall(
                     "SELECT puuid, IIF(nickname='', discord_tag, nickname) FROM (SELECT * FROM league_players LEFT JOIN users ON user_id = discord_user_id)"
             ) as cursor:
                 # Fetch current ranks and store them in a dict with updated values
                 self.ranked_dict = await self.fetch_users_rank(cursor)
+                # print(self.ranked_dict, flush=True)
 
         return
 
@@ -63,7 +88,24 @@ class FetchFromRiot(commands.Cog):
     async def post_ranks(self):
         await self.bot.wait_until_ready()
         await self.fetch_ranks()
+        print("fetching ranks in func", flush=True)
+        latest_db = await self.fetch_ranks_from_db()
+        print("fetching ranks complete", flush=True)
+        if len(self.previous_ranks) == 0:
+            self.previous_ranks = self.ranked_dict
+            return
+
         if self.ranked_dict != self.previous_ranks:
+
+            for user in self.ranked_dict.keys():
+
+                if (self.ranked_dict[user]["leaguePoints"]
+                        != self.previous_ranks[user]["leaguePoints"]) or (
+                            user not in latest_db.keys()):
+                    print(f"{user} updated", flush=True)
+                    await self.update_table(user, self.ranked_dict[user])
+                    # print(self.ranked_dict[user], flush=True)
+
             self.bot.logging.info("Posting ranks")
             self.previous_ranks = self.ranked_dict
             to_post = filter(lambda x: type(x) == type({}),
@@ -103,6 +145,29 @@ class FetchFromRiot(commands.Cog):
                 to_send = '\n'.join(output_list)
                 await paste.send(to_send)
 
+        return
+
+    @app_commands.command(
+        name="refresh_ranks",
+        description="Refreshes the league ranking discord channel")
+    async def refresh_ranks(self, ctx: discord.Interaction):
+        await ctx.response.defer()
+        msg = await ctx.followup.send("Refreshing ranks...",
+                                      wait=True,
+                                      ephemeral=True)
+        await self.post_ranks()
+        await msg.edit(content="Sucessfully refreshed rank leaderboard")
+
+    # Needs updating to grab last match from the table
+    async def update_table(self, user, user_stats_dict):
+        async with sqa.connect(self.bot.db_path) as connection:
+            await connection.execute(
+                "INSERT INTO league_history (puuid, lp, division, tier, wins, losses) VALUES (?, ?, ?, ?, ?, ?)",
+                (user_stats_dict["summonerId"],
+                 str(user_stats_dict["leaguePoints"]), user_stats_dict["rank"],
+                 user_stats_dict["tier"], user_stats_dict["wins"],
+                 user_stats_dict["losses"]))
+            await connection.commit()
         return
 
 

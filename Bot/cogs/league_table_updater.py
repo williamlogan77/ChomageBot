@@ -24,15 +24,15 @@ class FetchFromRiot(commands.Cog):
                 try:
                     user_rank = await self.bot.lolapi.get_league_position(user)
                     looked_up_users.append(user)
-                except (RateLimit, Timeout) as Limited:
-                    if isinstance(Limited, RateLimit):
+                except (RateLimit, Timeout) as limited:
+                    if isinstance(limited, RateLimit):
                         self.bot.logging.warning(
-                            f"Rate limited on {user, name}, waiting {Limited.timeToWait} seconds"
+                            f"Rate limited on {user, name}, waiting {limited.timeToWait} seconds"
                         )
-                        print(Limited.timeToWait, flush=True)
-                        await asyncio.sleep(int(Limited.timeToWait))
+                        print(limited.timeToWait, flush=True)
+                        await asyncio.sleep(int(limited.timeToWait))
                     else:
-                        print(f"Timedout", flush=True)
+                        print("Timed out", flush=True)
                         await asyncio.sleep(10)
 
             fivev5 = list(
@@ -85,7 +85,7 @@ class FetchFromRiot(commands.Cog):
         return
 
     async def check_name(self, puuid, name):
-        async with sqa.connect(self.bot.db_bath) as connection:
+        async with sqa.connect(self.bot.db_path) as connection:
             async with connection.execute_fetchall(
                     "SELECT puuid, league_username FROM league_players WHERE puuid = ?",
                 (puuid, )) as cursor:

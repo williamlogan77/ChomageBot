@@ -84,13 +84,24 @@ class FetchFromRiot(commands.Cog):
 
         return
 
+    async def check_name(self, puuid, name):
+        async with sqa.connect(self.bot.db_bath) as connection:
+            async with connection.execute_fetchall(
+                    "SELECT puuid, league_username FROM league_players WHERE puuid = ?",
+                (puuid, )) as cursor:
+                puuid, stored_name = cursor[0]
+            if name != stored_name:
+                print(f"updating {stored_name} to {name}", flush=True)
+                await connection.execute(
+                    "REPLACE INTO league_players (league_username) VALUES ?",
+                    (name, ))
+                await connection.commit
+
     @tasks.loop(seconds=30)
     async def post_ranks(self):
         await self.bot.wait_until_ready()
         await self.fetch_ranks()
-        print("fetching ranks in func", flush=True)
         latest_db = await self.fetch_ranks_from_db()
-        print("fetching ranks complete", flush=True)
         if len(self.previous_ranks) == 0:
             self.previous_ranks = self.ranked_dict
             return
@@ -98,6 +109,9 @@ class FetchFromRiot(commands.Cog):
         if self.ranked_dict != self.previous_ranks:
 
             for user in self.ranked_dict.keys():
+
+                await self.check_name(self.ranked_dict[user]["summonerId"],
+                                      self.ranked_dict[user]["summonerName"])
 
                 if (self.ranked_dict[user]["leaguePoints"]
                         != self.previous_ranks[user]["leaguePoints"]) or (

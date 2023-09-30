@@ -93,32 +93,34 @@ class FetchFromRiot(commands.Cog):
             if name != stored_name:
                 print(f"updating {stored_name} to {name}", flush=True)
                 await connection.execute(
-                    "REPLACE INTO league_players (league_username) VALUES ?",
-                    (name, ))
-                await connection.commit
+                    "UPDATE league_players SET league_username = ? WHERE puuid = ?",
+                    (name, puuid))
+                await connection.commit()
 
     @tasks.loop(seconds=30)
     async def post_ranks(self):
         await self.bot.wait_until_ready()
         await self.fetch_ranks()
         latest_db = await self.fetch_ranks_from_db()
-        if len(self.previous_ranks) == 0:
-            self.previous_ranks = self.ranked_dict
-            return
+        # if len(self.previous_ranks) == 0:
+        #     self.previous_ranks = self.ranked_dict
+        #     return
 
-        if self.ranked_dict != self.previous_ranks:
+        if (self.ranked_dict
+                != self.previous_ranks) or (not self.previous_ranks):
 
             for user in self.ranked_dict.keys():
 
                 await self.check_name(self.ranked_dict[user]["summonerId"],
                                       self.ranked_dict[user]["summonerName"])
 
-                if (self.ranked_dict[user]["leaguePoints"]
-                        != self.previous_ranks[user]["leaguePoints"]) or (
-                            user not in latest_db.keys()):
-                    print(f"{user} updated", flush=True)
-                    await self.update_table(user, self.ranked_dict[user])
-                    # print(self.ranked_dict[user], flush=True)
+                if self.previous_ranks:
+                    if (self.ranked_dict[user]["leaguePoints"]
+                            != self.previous_ranks[user]["leaguePoints"]) or (
+                                user not in latest_db.keys()):
+                        print(f"{user} updated", flush=True)
+                        await self.update_table(user, self.ranked_dict[user])
+                        # print(self.ranked_dict[user], flush=True)
 
             self.bot.logging.info("Posting ranks")
             self.previous_ranks = self.ranked_dict

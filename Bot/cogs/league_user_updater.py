@@ -1,28 +1,8 @@
-import typing
-from typing import Any
 import discord
-from discord.app_commands.models import Choice
 from discord.ext import commands
 from discord import app_commands
 import aiosqlite as sqa
-from discord.interactions import Interaction
-
-
-class attachedDiscord(app_commands.Transformer):
-
-    async def transform(self, interaction: discord.Interaction, value: Any):
-        return value
-
-    async def autocomplete(self, interaction: discord.Interaction, value):
-        async with sqa.connect(interaction.client.db_path) as db:
-            db.row_factory = lambda cursor, row: row[0]
-            attached_accounts = await db.execute_fetchall(
-                "SELECT league_username FROM league_players WHERE discord_user_id = ?",
-                (interaction.namespace.user.id, ))
-        return [
-            app_commands.Choice(name=league_name, value=league_name)
-            for league_name in attached_accounts
-        ]
+from utils.autocomplete import DiscordAttachedLeagueNames  # pylint: disable=E0401
 
 
 class LeagueUsers(commands.Cog):
@@ -55,10 +35,11 @@ class LeagueUsers(commands.Cog):
     @app_commands.describe(user="Clear all accounts associated with this user",
                            league_name="Specify account to remove")
     async def remove_from_db(
-            self,
-            ctx: discord.Interaction,
-            user: discord.User,
-            league_name: app_commands.Transform[str, attachedDiscord] = ""):
+        self,
+        ctx: discord.Interaction,
+        user: discord.User,
+        league_name: app_commands.Transform[str,
+                                            DiscordAttachedLeagueNames] = ""):
         if league_name != "":
             names = league_name.split(" ")
             async with sqa.connect(self.bot.db_path) as db:

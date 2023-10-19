@@ -1,7 +1,7 @@
 from discord.ext import commands, tasks
 import aiosqlite as sqa
 from utils.rank_sorting_class import Ranker  # pylint: disable=E0401
-from pantheon.utils.exceptions import RateLimit, Timeout
+from pantheon.utils.exceptions import RateLimit, Timeout, ServerError
 from discord import app_commands
 import asyncio
 import discord
@@ -29,7 +29,6 @@ class FetchFromRiot(commands.Cog):
                         self.bot.logging.warning(
                             f"Rate limited on {user, name}, waiting {limited.timeToWait} seconds"
                         )
-                        print(limited.timeToWait, flush=True)
                         await asyncio.sleep(int(limited.timeToWait))
                     else:
                         print("Timed out", flush=True)
@@ -79,7 +78,12 @@ class FetchFromRiot(commands.Cog):
                     "SELECT puuid, IIF(nickname='', discord_tag, nickname) FROM (SELECT * FROM league_players LEFT JOIN users ON user_id = discord_user_id)"
             ) as cursor:
                 # Fetch current ranks and store them in a dict with updated values
-                self.ranked_dict = await self.fetch_users_rank(cursor)
+                try:
+                    self.ranked_dict = await self.fetch_users_rank(cursor)
+                except ServerError as exc:
+                    self.bot.logger.error(
+                        f"Error of: {exc}, trying again in 10 seconds")
+                    asyncio.sleep(10)
                 # print(self.ranked_dict, flush=True)
 
         return
@@ -91,7 +95,8 @@ class FetchFromRiot(commands.Cog):
                 (puuid, )) as cursor:
                 puuid, stored_name = cursor[0]
             if name != stored_name:
-                print(f"updating {stored_name} to {name}", flush=True)
+                self.bot.logger.info(f"updating {stored_name} to {name}",
+                                     flush=True)
                 await connection.execute(
                     "UPDATE league_players SET league_username = ? WHERE puuid = ?",
                     (name, puuid))
@@ -114,7 +119,7 @@ class FetchFromRiot(commands.Cog):
                 await self.check_name(self.ranked_dict[user]["summonerId"],
                                       self.ranked_dict[user]["summonerName"])
 
-                if self.previous_ranks:
+                if self.previous_ranks and user in self.previous_ranks.keys():
                     if (self.ranked_dict[user]["leaguePoints"]
                             != self.previous_ranks[user]["leaguePoints"]) or (
                                 user not in latest_db.keys()):
@@ -126,9 +131,15 @@ class FetchFromRiot(commands.Cog):
             self.previous_ranks = self.ranked_dict
             to_post = filter(lambda x: type(x) == type({}),
                              [data for data in self.ranked_dict.values()])
+            # Sort by rank
             sorted_results = sorted(to_post,
                                     key=lambda d: d["sorted_rank"],
                                     reverse=True)
+
+            # Sort by winrate
+            # sorted_results = sorted(to_post,
+            #                         key=lambda d: d["WinRate"],
+            #                         reverse=True)
 
             output_list = []
             for index, posting in enumerate(sorted_results):
@@ -173,6 +184,27 @@ class FetchFromRiot(commands.Cog):
                                       ephemeral=True)
         await self.post_ranks()
         await msg.edit(content="Sucessfully refreshed rank leaderboard")
+
+    @app_commands.command(
+        name="stop_rank_refresh",
+        description="Pauses the league ranking table refreshing")
+    async def stop_ranks(self, ctx: discord.Interaction):
+        await ctx.response.defer()
+        msg = await ctx.followup.send("Stopping...", wait=True, ephemeral=True)
+        self.post_ranks.stop()  # pylint: disable=E1101
+        await msg.edit(content="Stopped refreshing of ranks")
+
+    @app_commands.command(
+        name="start_rank_refresh",
+        description="Restarts the league ranking table refreshing")
+    async def start_ranks(self, ctx: discord.Interaction):
+        await ctx.response.defer()
+        msg = await ctx.followup.send("Starting...", wait=True, ephemeral=True)
+        if self.post_ranks.is_running():  # pylint: disable=E1101
+            await msg.edit(content="Already running, cannot start")
+        else:
+            self.post_ranks.start()  # pylint: disable=E1101
+            await msg.edit(content="Started refreshing of ranks")
 
     # Needs updating to grab last match from the table
     async def update_table(self, user, user_stats_dict):

@@ -2,14 +2,13 @@ import asyncio
 import glob
 import os
 import sqlite3 as sq
-
+import pantheon
 from riotwatcher import LolWatcher
 import aiosqlite as sqa
 import discord
 from discord.ext.commands import Bot
 from dotenv import load_dotenv
 import logging
-from pantheon import pantheon
 
 load_dotenv("../.env")
 
@@ -26,7 +25,7 @@ class MyDiscordBot(Bot):
                                         debug=True)
         self.logging = logging.getLogger()
 
-        print("chommage is starting")
+        self.logging.info("chommage is starting")
 
     async def sync_discord(self) -> None:
         print("Syncing users")
@@ -52,28 +51,21 @@ class MyDiscordBot(Bot):
 
     async def on_connect(self) -> None:
         await self.wait_until_ready()
-        print("Connected to discord, syncing users and channels")
+        self.logging.info("Connected to discord, syncing users and channels")
         await self.sync_discord()
-        print("Bot is ready")
-
-    # async def on_message(self, message: discord.Message, /) -> None:
-    #     print(f'{message.channel, message.author, message.id}')
-    #     if message.author.name != 'testchomage':
-    #         await message.channel.send("Hello?")
+        self.logging.info("Bot is ready")
 
     async def on_voice_state_update(self, member: discord.Member,
                                     before: discord.VoiceState,
                                     after: discord.VoiceState) -> None:
-        # async with sqa.connect(self.db_path) as db:
-        #     await db.execute(
-        #         "INSERT INTO discord_events (user_id, channel_id, type, metadata) VALUES (?, ?, ?, ?)",
-        #         (member.id, ))
         return
 
 
 def setup_db() -> None:
+    my_logger = logging.getLogger()
+
     if not os.path.isfile("./db/database.sqlite"):
-        print("Setting up database")
+        MyDiscordBot.info("Setting up database")
         with open("./db/database.sqlite", "x", encoding="utf-8") as f:
             pass
         with sq.connect("./db/database.sqlite") as connection:
@@ -82,7 +74,7 @@ def setup_db() -> None:
                 sql_code = f.read()
             cursor.executescript(sql_code)
     else:
-        print("Database exists, setup done.")
+        my_logger.info("Database exists, setup done.")
 
 
 handler = logging.FileHandler(filename='discord.log',

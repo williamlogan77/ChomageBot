@@ -16,9 +16,20 @@ class LeagueGraphs(commands.Cog):
         self.bot.logging.info(f"{__name__} loaded")
 
     # @app_commands.command(name="graph_user")
-    async def generate_singular(self, user: discord.User, league_name: str):
+    async def generate_singular(
+            self, ctx: discord.Interaction,
+            league_name: app_commands.Transform[str,
+                                                DiscordAttachedLeagueNames]):
         async with sqa.connect(self.bot.db_path) as connection:
-            connection.execute("SELECT * FROM ")
+            summonerid = await connection.execute_fetchall(
+                "SELECT * FROM league_players WHERE league_username = ?",
+                (league_name, ))
+            if summonerid is None:
+                await ctx.response.send_message(
+                    f"{league_name} does not exist in the database")
+
+            await connection.execute(
+                "SELECT * FROM league_history WHERE puuid = ?", (summonerid, ))
 
 
 async def setup(bot: commands.Bot):

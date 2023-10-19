@@ -95,6 +95,7 @@ async def main(my_token: str) -> None:
         for file in glob.glob("*.py"):
             await bot.load_extension(f"cogs.{file[:-3]}")
         os.chdir("../")
+        print(my_token)
         await bot.start(my_token)
 
 

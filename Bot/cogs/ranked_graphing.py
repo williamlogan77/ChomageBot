@@ -17,7 +17,8 @@ class LeagueGraphs(commands.Cog):
         self.bot = bot
         self.bot.logging.info(f"{__name__} loaded")
 
-    # @app_commands.command(name="graph_user")
+    @app_commands.command(name="graph_user",
+                          description="Plots a graph of users elo")
     async def generate_singular(
             self, ctx: discord.Interaction, user: discord.User,
             league_name: app_commands.Transform[str,

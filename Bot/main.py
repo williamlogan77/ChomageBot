@@ -95,13 +95,11 @@ async def main(my_token: str) -> None:
         for file in glob.glob("*.py"):
             await bot.load_extension(f"cogs.{file[:-3]}")
         os.chdir("../")
-        print(my_token, flush=True)
         await bot.start(my_token)
 
 
 if __name__ == "__main__":
-    print(os.environ.get("token"), flush=True)
-    print(os.environ, flush=True)
+
     asyncio.run(main(os.environ.get("token")))  # type: ignore
 
 #

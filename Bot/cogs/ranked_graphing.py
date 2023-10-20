@@ -25,7 +25,7 @@ class LeagueGraphs(commands.Cog):
                                                 DiscordAttachedLeagueNames]):
         async with sqa.connect(self.bot.db_path) as connection:
             summonerid = await connection.execute_fetchall(
-                "SELECT * FROM league_players WHERE league_username = ?",
+                "SELECT puuid FROM league_players WHERE league_username = ?",
                 (league_name, ))
             if summonerid is None:
                 await ctx.response.send_message(
@@ -33,16 +33,18 @@ class LeagueGraphs(commands.Cog):
                 return
             else:
                 await ctx.response.defer()
-            msg = await ctx.followup.send("Refreshing ranks...",
-                                          wait=True,
-                                          ephemeral=True)
+            # msg = await ctx.followup.send("Refreshing ranks...",
+            #                               wait=True,
+            #                               ephemeral=True)
 
             with open("utils/my_fig.pickle", "rb") as f:
                 fig = pickle.load(f)
 
+            # plt._backend_mod.new_figure_manager_given_figure(1, fig)
+
             async with connection.execute(
                     "SELECT * FROM league_history WHERE puuid = ?",
-                (summonerid, )) as cursor:
+                (summonerid[0][0], )) as cursor:
                 x_to_plot = []
                 y_to_plot = []
                 async for point in cursor:
@@ -52,7 +54,7 @@ class LeagueGraphs(commands.Cog):
                     y_to_plot.append(Ranker(*point[3:6][::-1])._score)
                 user = await connection.execute_fetchall(
                     "SELECT league_username FROM league_players WHERE puuid = ?",
-                    (summonerid, ))
+                    (summonerid[0][0], ))
         plt.title(user[0][0])
         plt.scatter(x_to_plot, y_to_plot, marker="x", color="black")
         plt.plot(x_to_plot,
@@ -61,10 +63,12 @@ class LeagueGraphs(commands.Cog):
                  color="black",
                  linestyle=":",
                  alpha=0.2)
-        plt.ylim((min(y_to_plot) - 100), (max(y_to_plot) + 100))
+        plt.ylim((min(y_to_plot) - 50), (max(y_to_plot) + 50))
+        plt.tight_layout()
         plt.savefig("tmp/fig_to_send.jpg")
 
-        await msg.edit(file="tmp/fig_to_send.jpg")
+        await ctx.followup.send(
+            file=discord.File(open("tmp/fig_to_send.jpg", "rb")))
         os.remove("tmp/fig_to_send.jpg")
 
 

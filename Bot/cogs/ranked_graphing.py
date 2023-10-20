@@ -32,7 +32,7 @@ class LeagueGraphs(commands.Cog):
                     f"{league_name} does not exist in the database")
                 return
             else:
-                ctx.response.defer()
+                await ctx.response.defer()
             msg = await ctx.followup.send("Refreshing ranks...",
                                           wait=True,
                                           ephemeral=True)

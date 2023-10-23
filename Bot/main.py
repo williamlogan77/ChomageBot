@@ -13,6 +13,7 @@ import logging
 load_dotenv("../.env")
 
 
+
 class MyDiscordBot(Bot):
 
     def __init__(self, command_prefix: str, intents: discord.Intents,

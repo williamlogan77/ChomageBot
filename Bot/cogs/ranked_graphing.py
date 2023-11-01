@@ -8,12 +8,11 @@ import pickle
 import matplotlib.pyplot as plt
 import datetime as dt
 import os
-from Bot.main import MyDiscordBot
 
 
 class LeagueGraphs(commands.Cog):
 
-    def __init__(self, bot: MyDiscordBot):
+    def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.bot.logging.info(f"{__name__} loaded")
 

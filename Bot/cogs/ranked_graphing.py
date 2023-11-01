@@ -8,11 +8,12 @@ import pickle
 import matplotlib.pyplot as plt
 import datetime as dt
 import os
+from Bot.main import MyDiscordBot
 
 
 class LeagueGraphs(commands.Cog):
 
-    def __init__(self, bot: commands.Bot):
+    def __init__(self, bot: MyDiscordBot):
         self.bot = bot
         self.bot.logging.info(f"{__name__} loaded")
 
@@ -118,17 +119,18 @@ class LeagueGraphs(commands.Cog):
             fig = pickle.load(f)
 
         # plt._backend_mod.new_figure_manager_given_figure(1, fig)
-
-        async with connection.execute(
-                "SELECT * FROM league_history WHERE puuid = ?",
-            (summonerid[0][0], )) as cursor:
-            x_to_plot = []
-            y_to_plot = []
-            async for point in cursor:
-                x_to_plot.append(
-                    dt.datetime.strptime(point[2], "%Y-%m-%d %H:%M:%S"))
-                # lp, division, tier = point[3:6]
-                y_to_plot.append(Ranker(*point[3:6][::-1])._score)
+        async with sqa.connect(self.bot.db_path) as connection:
+            async with connection.execute(
+                    "SELECT * FROM league_history WHERE puuid = ?",
+                (summonerid[0][0], )) as cursor:
+                x_to_plot = []
+                y_to_plot = []
+                async for point in cursor:
+                    x_to_plot.append(
+                        dt.datetime.strptime(point[2], "%Y-%m-%d %H:%M:%S"))
+                    # lp, division, tier = point[3:6]
+                    y_to_plot.append(Ranker(*point[3:6][::-1])._score)
+        async with sqa.connect(self.bot.db_path) as connection:
             user = await connection.execute_fetchall(
                 "SELECT league_username FROM league_players WHERE puuid = ?",
                 (summonerid[0][0], ),

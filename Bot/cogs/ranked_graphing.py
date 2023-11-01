@@ -122,32 +122,26 @@ class LeagueGraphs(commands.Cog):
             async with connection.execute(
                     "SELECT * FROM league_history WHERE puuid = ?",
                 (summonerid[0][0], )) as cursor:
-                x_to_plot = []
-                y_to_plot = []
+                score_dict = {}
                 async for point in cursor:
-                    x_to_plot.append(
-                        dt.datetime.strptime(point[2], "%Y-%m-%d %H:%M:%S"))
-                    # lp, division, tier = point[3:6]
-                    y_to_plot.append(Ranker(*point[3:6][::-1])._score)
+                    key = dt.datetime.strptime(point[2][:10], '%Y-%m-%d')
+                    value = Ranker(*point[3:6][::-1])._score
+                    if key not in score_dict.keys():
+                        score_dict[key] = []
+                    score_dict[key].append(value)
+
         async with sqa.connect(self.bot.db_path) as connection:
             user = await connection.execute_fetchall(
                 "SELECT league_username FROM league_players WHERE puuid = ?",
-                (summonerid[0][0], ),
-            )
+                (summonerid[0][0], ))
+
         plt.title(user[0][0])
 
-        for idx in range(len(y_to_plot) - 1):
-            try:
-                if y_to_plot[idx] > y_to_plot[idx + 1]:
-                    tmp_col = "red"
-                else:
-                    tmp_col = "green"
-            except IndexError:
-                tmp_col = "black"
-            plt.scatter(x_to_plot[idx],
-                        y_to_plot[idx],
-                        marker="x",
-                        color=tmp_col)
+        x_to_plot = []
+        y_to_plot = []
+        for key, value in score_dict.items():
+            x_to_plot.append(key)
+            y_to_plot.append(sum(value) / len(value))
         plt.plot(x_to_plot,
                  y_to_plot,
                  linewidth=2,

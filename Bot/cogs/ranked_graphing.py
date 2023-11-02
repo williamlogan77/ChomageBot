@@ -134,7 +134,7 @@ class LeagueGraphs(commands.Cog):
             user = await connection.execute_fetchall(
                 "SELECT league_username FROM league_players WHERE puuid = ?",
                 (summonerid[0][0], ))
-
+    
         plt.title(user[0][0])
 
         x_to_plot = []

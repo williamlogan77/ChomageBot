@@ -44,5 +44,3 @@ plt.xticks(rotation=45)
 import pickle
 with open("utils/my_fig.pickle", "wb") as f: 
     pickle.dump(fig, file=f)
-
-print("generating graph done", flush = True)

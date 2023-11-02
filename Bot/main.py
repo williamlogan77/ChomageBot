@@ -3,7 +3,6 @@ import glob
 import os
 import sqlite3 as sq
 import pantheon
-from riotwatcher import LolWatcher
 import aiosqlite as sqa
 import discord
 from discord.ext.commands import Bot

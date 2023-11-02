@@ -9,6 +9,6 @@ COPY ./Bot .
 
 RUN python3 -m pip install --no-cache-dir -r  requirements.txt --user
 
-RUN python3 utils/create_ranked_graph.py
+# CMD ["python3", "utils/create_ranked_graph.py", "&&", "python3", "main.py"]
 
-CMD ["python3", "main.py"]
+CMD ["sh", "startup.sh"]

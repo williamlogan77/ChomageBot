@@ -12,7 +12,7 @@ class FetchFromRiot(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.bot.logging.info(f"{__name__} loaded")
-        self.post_ranks.start()  # pylint: disable=E1101
+        # self.post_ranks.start()  # pylint: disable=E1101
         self.previous_ranks = {}
         self.ranked_dict = None
 

@@ -10,7 +10,7 @@ for league in Ranker.LEAGUES.keys():
         current_ticks.append((x._score + 50))
         new_ticks.append(str(x).split(" - ")[0])
 
-fig, ax = plt.subplots(figsize=(15, 15))
+fig, ax = plt.subplots(figsize=(5, 5))
 
 y_lim = plt.gca().get_ylim()[1]
 
@@ -20,7 +20,7 @@ colours = [
     "#a19d94", "#CD7F32", "#C0C0C0", "#FFD700", "#E5E4E2", "#50C878", "#b9f2ff"
 ]
 
-ax.set_yticks(current_ticks, new_ticks, rotation = 90, fontsize =20, va = "center")
+ax.set_yticks(current_ticks, new_ticks, rotation = 90, fontsize =10, va = "center")
 
 for idx, colour in enumerate(colours):
     ax.axhspan(ymin=current_ticks[idx * 4] - 50,
@@ -36,9 +36,9 @@ for idx, tick in enumerate(current_ticks):
             dashes=(5, 10))
 
 
-ax.xaxis.set_major_locator(mdates.DayLocator(interval=1))
+ax.xaxis.set_major_locator(mdates.DayLocator(interval=7))
 ax.xaxis.set_major_formatter(mdates.DateFormatter('%0d/%m/%y'))
-plt.xticks(rotation=45)
+plt.xticks(rotation=45, ha="center")
 
 
 import pickle

@@ -146,9 +146,10 @@ class LeagueGraphs(commands.Cog):
                  y_to_plot,
                  linewidth=2,
                  color="black",
-                 linestyle=":",
-                 alpha=0.2)
+                 linestyle="-.",
+                 alpha=1)
         plt.ylim((min(y_to_plot) - 50), (max(y_to_plot) + 50))
+        plt.xticks(rotation=45, ha="center")
         plt.tight_layout()
         plt.savefig("tmp/fig_to_send.jpg")
 

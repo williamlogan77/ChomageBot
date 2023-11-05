@@ -1,15 +1,20 @@
 import cv2
 import numpy as np
+import os
 
 
 class ChegClass:
     @staticmethod
-    def add_my_cheg():
-        background = cv2.imread("tmp/fig_to_send.jpg", cv2.IMREAD_UNCHANGED)
+    def add_my_cheg(root_path=None):
+        if root_path is None:
+            root_path = ""
+
+        background = cv2.imread(root_path + "tmp/fig_to_send.jpg", cv2.IMREAD_UNCHANGED)
         foreground = cv2.imread(
-            "utils/cheggers-removebg-preview.png", cv2.IMREAD_UNCHANGED
+            root_path + "utils/cheggers-removebg-preview.png", cv2.IMREAD_UNCHANGED
         )
-        factor = np.random.uniform(0.1, 1)
+        factor = np.random.uniform(5, 9)
+        # factor = 10
         foreground = cv2.resize(foreground, (0, 0), fx=factor, fy=factor)
 
         def rotate_image(image, angle):
@@ -70,4 +75,4 @@ class ChegClass:
             y=np.random.randint(0, background.shape[1] - foreground.shape[1]),
         )
 
-        cv2.imwrite("tmp/to_send_cheg.jpg", img)
+        cv2.imwrite(root_path + "tmp/to_send_cheg.jpg", img)

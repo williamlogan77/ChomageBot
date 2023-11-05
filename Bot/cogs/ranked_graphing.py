@@ -4,6 +4,7 @@ from utils.rank_sorting_class import Ranker  # pylint: disable=E0401
 from discord import app_commands
 import discord
 from utils.autocomplete import DiscordAttachedLeagueNames  # pylint: disable=E0401
+from utils.add_a_cheg import ChegClass  # pylint: disable=E0401
 import pickle
 import matplotlib.pyplot as plt
 import datetime as dt
@@ -11,7 +12,6 @@ import os
 
 
 class LeagueGraphs(commands.Cog):
-
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.bot.logging.info(f"{__name__} loaded")
@@ -29,11 +29,12 @@ class LeagueGraphs(commands.Cog):
         async with sqa.connect(self.bot.db_path) as connection:
             summonerid = await connection.execute_fetchall(
                 "SELECT puuid FROM league_players WHERE league_username = ?",
-                (league_name, ),
+                (league_name,),
             )
             if summonerid is None:
                 await ctx.response.send_message(
-                    f"{league_name} does not exist in the database")
+                    f"{league_name} does not exist in the database"
+                )
                 return
             else:
                 await ctx.response.defer()
@@ -47,19 +48,20 @@ class LeagueGraphs(commands.Cog):
             # plt._backend_mod.new_figure_manager_given_figure(1, fig)
         async with sqa.connect(self.bot.db_path) as connection:
             async with connection.execute(
-                    "SELECT * FROM league_history WHERE puuid = ?",
-                (summonerid[0][0], )) as cursor:
+                "SELECT * FROM league_history WHERE puuid = ?", (summonerid[0][0],)
+            ) as cursor:
                 x_to_plot = []
                 y_to_plot = []
                 async for point in cursor:
                     x_to_plot.append(
-                        dt.datetime.strptime(point[2], "%Y-%m-%d %H:%M:%S"))
+                        dt.datetime.strptime(point[2], "%Y-%m-%d %H:%M:%S")
+                    )
                     # lp, division, tier = point[3:6]
                     y_to_plot.append(Ranker(*point[3:6][::-1])._score)
         async with sqa.connect(self.bot.db_path) as connection:
             user = await connection.execute_fetchall(
                 "SELECT league_username FROM league_players WHERE puuid = ?",
-                (summonerid[0][0], ),
+                (summonerid[0][0],),
             )
         plt.title(user[0][0])
 
@@ -71,23 +73,19 @@ class LeagueGraphs(commands.Cog):
                     tmp_col = "green"
             except IndexError:
                 tmp_col = "black"
-            plt.scatter(x_to_plot[idx],
-                        y_to_plot[idx],
-                        marker="x",
-                        color=tmp_col)
-        plt.plot(x_to_plot,
-                 y_to_plot,
-                 linewidth=2,
-                 color="black",
-                 linestyle=":",
-                 alpha=0.2)
+            plt.scatter(x_to_plot[idx], y_to_plot[idx], marker="x", color=tmp_col)
+        plt.plot(
+            x_to_plot, y_to_plot, linewidth=2, color="black", linestyle=":", alpha=0.2
+        )
         plt.ylim((min(y_to_plot) - 50), (max(y_to_plot) + 50))
         plt.tight_layout()
         plt.savefig("tmp/fig_to_send.jpg")
 
-        await ctx.followup.send(
-            file=discord.File(open("tmp/fig_to_send.jpg", "rb")))
+        ChegClass.add_my_cheg()
+
+        await ctx.followup.send(file=discord.File(open("tmp/to_send_cheg.jpg", "rb")))
         os.remove("tmp/fig_to_send.jpg")
+        os.remove("tmp/to_send_cheg.jpg")
 
     @app_commands.command(
         name="graph_user_average",
@@ -102,11 +100,12 @@ class LeagueGraphs(commands.Cog):
         async with sqa.connect(self.bot.db_path) as connection:
             summonerid = await connection.execute_fetchall(
                 "SELECT puuid FROM league_players WHERE league_username = ?",
-                (league_name, ),
+                (league_name,),
             )
         if summonerid is None:
             await ctx.response.send_message(
-                f"{league_name} does not exist in the database")
+                f"{league_name} does not exist in the database"
+            )
             return
         else:
             await ctx.response.defer()
@@ -120,11 +119,11 @@ class LeagueGraphs(commands.Cog):
         # plt._backend_mod.new_figure_manager_given_figure(1, fig)
         async with sqa.connect(self.bot.db_path) as connection:
             async with connection.execute(
-                    "SELECT * FROM league_history WHERE puuid = ?",
-                (summonerid[0][0], )) as cursor:
+                "SELECT * FROM league_history WHERE puuid = ?", (summonerid[0][0],)
+            ) as cursor:
                 score_dict = {}
                 async for point in cursor:
-                    key = dt.datetime.strptime(point[2][:10], '%Y-%m-%d')
+                    key = dt.datetime.strptime(point[2][:10], "%Y-%m-%d")
                     value = Ranker(*point[3:6][::-1])._score
                     if key not in score_dict.keys():
                         score_dict[key] = []
@@ -133,8 +132,9 @@ class LeagueGraphs(commands.Cog):
         async with sqa.connect(self.bot.db_path) as connection:
             user = await connection.execute_fetchall(
                 "SELECT league_username FROM league_players WHERE puuid = ?",
-                (summonerid[0][0], ))
-    
+                (summonerid[0][0],),
+            )
+
         plt.title(user[0][0])
 
         x_to_plot = []
@@ -142,20 +142,19 @@ class LeagueGraphs(commands.Cog):
         for key, value in score_dict.items():
             x_to_plot.append(key)
             y_to_plot.append(sum(value) / len(value))
-        plt.plot(x_to_plot,
-                 y_to_plot,
-                 linewidth=2,
-                 color="black",
-                 linestyle="-.",
-                 alpha=1)
+        plt.plot(
+            x_to_plot, y_to_plot, linewidth=2, color="black", linestyle="-.", alpha=1
+        )
         plt.ylim((min(y_to_plot) - 50), (max(y_to_plot) + 50))
         plt.xticks(rotation=45, ha="center")
         plt.tight_layout()
         plt.savefig("tmp/fig_to_send.jpg")
 
-        await ctx.followup.send(
-            file=discord.File(open("tmp/fig_to_send.jpg", "rb")))
+        ChegClass.add_my_cheg()
+
+        await ctx.followup.send(file=discord.File(open("tmp/to_send_cheg.jpg", "rb")))
         os.remove("tmp/fig_to_send.jpg")
+        os.remove("tmp/to_send_cheg.jpg")
 
 
 async def setup(bot: commands.Bot):

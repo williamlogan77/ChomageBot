@@ -81,7 +81,7 @@ class FetchFromRiot(commands.Cog):
                 try:
                     self.ranked_dict = await self.fetch_users_rank(cursor)
                 except ServerError as exc:
-                    self.bot.logger.error(
+                    self.bot.logging.error(
                         f"Error of: {exc}, trying again in 10 seconds")
                     asyncio.sleep(10)
                 # print(self.ranked_dict, flush=True)
@@ -95,7 +95,7 @@ class FetchFromRiot(commands.Cog):
                 (puuid, )) as cursor:
                 puuid, stored_name = cursor[0]
             if name != stored_name:
-                self.bot.logger.info(f"updating {stored_name} to {name}",
+                self.bot.logging.info(f"updating {stored_name} to {name}",
                                      flush=True)
                 await connection.execute(
                     "UPDATE league_players SET league_username = ? WHERE puuid = ?",

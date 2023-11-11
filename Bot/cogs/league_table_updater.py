@@ -95,8 +95,7 @@ class FetchFromRiot(commands.Cog):
                 (puuid, )) as cursor:
                 puuid, stored_name = cursor[0]
             if name != stored_name:
-                self.bot.logging.info(f"updating {stored_name} to {name}",
-                                     flush=True)
+                self.bot.logging.info(f"updating {stored_name} to {name}")
                 await connection.execute(
                     "UPDATE league_players SET league_username = ? WHERE puuid = ?",
                     (name, puuid))

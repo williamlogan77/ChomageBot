@@ -12,7 +12,7 @@ class FetchFromRiot(commands.Cog):
     def __init__(self, bot: MyDiscordBot):
         self.bot = bot
         self.bot.logging.info(f"{__name__} loaded")
-        # self.post_ranks.start()  # pylint: disable=E1101
+        self.post_ranks.start()  # pylint: disable=E1101
         self.fetch_ranks_from_riot.start()
         self.previous_ranks = {}
 
@@ -83,7 +83,7 @@ class FetchFromRiot(commands.Cog):
                 try:
                     self.ranked_dict = await self.fetch_users_rank(cursor)
                 except ServerError as exc:
-                    self.bot.logger.error(
+                    self.bot.logging.error(
                         f"Error of: {exc}, trying again in 10 seconds"
                     )
                     asyncio.sleep(10)
@@ -126,7 +126,7 @@ class FetchFromRiot(commands.Cog):
                     if (
                         self.ranked_dict[user]["leaguePoints"]
                         != self.previous_ranks[user]["leaguePoints"]
-                    ): 
+                    ):
                         print(f"{user} updated", flush=True)
                         await self.update_table(user, self.ranked_dict[user])
                         # print(self.ranked_dict[user], flush=True)
@@ -237,7 +237,10 @@ class FetchFromRiot(commands.Cog):
     # Needs updating to grab last match from the table
     async def update_table(self, user, user_stats_dict):
         async with sqa.connect(self.bot.db_path) as connection:
-            last_values = await connection.execute_fetchall("SELECT * FROM league_history WHERE puuid = ? ORDER BY id DESC LIMIT 1", (user_stats_dict["summonerId"]))
+            last_values = await connection.execute_fetchall(
+                "SELECT * FROM league_history ORDER BY id DESC WHERE puuid = ?",
+                (user_stats_dict["summonerId"]),
+            )
         if last_values[0][-2:] == (user_stats_dict["wins"], user_stats_dict["losses"]):
             return
         async with sqa.connect(self.bot.db_path) as connection:
@@ -246,7 +249,6 @@ class FetchFromRiot(commands.Cog):
                 (
                     user_stats_dict["summonerId"],
                     str(user_stats_dict["leaguePoints"]),
-                "INSERT INTO league_history (puuid, lp, division, tier, wins, losses) 
                     user_stats_dict["rank"],
                     user_stats_dict["tier"],
                     user_stats_dict["wins"],

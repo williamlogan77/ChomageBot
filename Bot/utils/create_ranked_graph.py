@@ -10,7 +10,7 @@ for league in Ranker.LEAGUES.keys():
         current_ticks.append((x._score + 50))
         new_ticks.append(str(x).split(" - ")[0])
 
-fig, ax = plt.subplots(figsize=(5, 5), dpi=1200)
+fig, ax = plt.subplots(figsize=(5, 5), dpi=600)
 
 y_lim = plt.gca().get_ylim()[1]
 

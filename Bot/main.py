@@ -8,21 +8,20 @@ import discord
 from discord.ext.commands import Bot
 from dotenv import load_dotenv
 import logging
+from utils.db_utils import DButils
 
 load_dotenv("../.env")
 
 
-
 class MyDiscordBot(Bot):
-
-    def __init__(self, command_prefix: str, intents: discord.Intents,
-                 db_path: str, serverid: int) -> None:
+    def __init__(
+        self, command_prefix: str, intents: discord.Intents, db_path: str, serverid: int
+    ) -> None:
         super().__init__(command_prefix, intents=intents)
+        self.dbutils = DButils(db_path=db_path)
         self.db_path = db_path
         self.guildid = serverid
-        self.lolapi = pantheon.Pantheon("euw1",
-                                        os.environ.get("riot_key"),
-                                        debug=True)
+        self.lolapi = pantheon.Pantheon("euw1", os.environ.get("riot_key"), debug=True)
         self.logging = logging.getLogger()
 
         self.logging.info("chommage is starting")
@@ -35,7 +34,8 @@ class MyDiscordBot(Bot):
                 nickname = member.nick if member.nick is not None else ""
                 await db.execute(
                     "REPLACE INTO users (user_id, nickname, discord_tag) VALUES (?, ?, ?)",
-                    (member.id, nickname, member.name))
+                    (member.id, nickname, member.name),
+                )
                 await db.commit()
 
             channels = await guild.fetch_channels()
@@ -45,7 +45,8 @@ class MyDiscordBot(Bot):
                     continue
                 await db.execute(
                     "REPLACE INTO discord_channels (channel_id, name, type) VALUES (?, ?, ?)",
-                    (int(channel.id), str(channel.name), str(channel.type)))
+                    (int(channel.id), str(channel.name), str(channel.type)),
+                )
             await db.commit()
         return
 
@@ -55,9 +56,12 @@ class MyDiscordBot(Bot):
         await self.sync_discord()
         self.logging.info("Bot is ready")
 
-    async def on_voice_state_update(self, member: discord.Member,
-                                    before: discord.VoiceState,
-                                    after: discord.VoiceState) -> None:
+    async def on_voice_state_update(
+        self,
+        member: discord.Member,
+        before: discord.VoiceState,
+        after: discord.VoiceState,
+    ) -> None:
         return
 
 
@@ -77,19 +81,19 @@ def setup_db() -> None:
         my_logger.info("Database exists, setup done.")
 
 
-handler = logging.FileHandler(filename='discord.log',
-                              encoding='utf-8',
-                              mode='w')
+handler = logging.FileHandler(filename="discord.log", encoding="utf-8", mode="w")
 discord.utils.setup_logging()
 
 
 async def main(my_token: str) -> None:
     setup_db()
     dbpath = "./db/database.sqlite"
-    bot = MyDiscordBot(command_prefix="!",
-                       intents=discord.Intents.all(),
-                       db_path=dbpath,
-                       serverid=667751882260742164)
+    bot = MyDiscordBot(
+        command_prefix="!",
+        intents=discord.Intents.all(),
+        db_path=dbpath,
+        serverid=667751882260742164,
+    )
     async with bot:
         os.chdir("cogs")
         for file in glob.glob("*.py"):
@@ -99,7 +103,6 @@ async def main(my_token: str) -> None:
 
 
 if __name__ == "__main__":
-
     asyncio.run(main(os.environ.get("token")))  # type: ignore
 
 #

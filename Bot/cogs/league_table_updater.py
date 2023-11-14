@@ -1,7 +1,7 @@
 from discord.ext import commands, tasks
 import aiosqlite as sqa
 from utils.rank_sorting_class import Ranker  # pylint: disable=E0401,E0611
-from main import MyDiscordBot
+from main import MyDiscordBot # pylint: disable=E0401
 from pantheon.utils.exceptions import RateLimit, Timeout, ServerError
 from discord import app_commands
 import asyncio
@@ -73,7 +73,7 @@ class FetchFromRiot(commands.Cog):
 
             return db_dict
 
-    @tasks.loop(seconds=30)
+    # @tasks.loop(seconds=30)
     async def fetch_ranks_from_riot(self):
         self.bot.logging.info("fetching ranks")
         # fetch from db
@@ -112,8 +112,8 @@ class FetchFromRiot(commands.Cog):
     @tasks.loop(seconds=10)
     async def post_ranks(self):
         await self.bot.wait_until_ready()
-        # await self.fetch_ranks()
-        self.ranked_dict = await self.fetch_ranks_from_db()
+        await self.fetch_ranks_from_riot()
+        # self.ranked_dict = await self.fetch_ranks_from_db()
         # if len(self.previous_ranks) == 0:
         #     self.previous_ranks = self.ranked_dict
         #     return

@@ -1,7 +1,7 @@
 from discord.ext import commands, tasks
 import aiosqlite as sqa
 from utils.rank_sorting_class import Ranker  # pylint: disable=E0401,E0611
-from Bot.main import MyDiscordBot
+from main import MyDiscordBot
 from pantheon.utils.exceptions import RateLimit, Timeout, ServerError
 from discord import app_commands
 import asyncio
@@ -87,7 +87,8 @@ class FetchFromRiot(commands.Cog):
                     self.ranked_dict = await self.fetch_users_rank(cursor)
                 except ServerError as exc:
                     self.bot.logging.error(
-                        f"Error of: {exc}, trying again in 10 seconds")
+                        f"Error of: {exc}, trying again in 10 seconds"
+                    )
                     asyncio.sleep(10)
                 # print(self.ranked_dict, flush=True)
 
@@ -101,8 +102,7 @@ class FetchFromRiot(commands.Cog):
             ) as cursor:
                 puuid, stored_name = cursor[0]
             if name != stored_name:
-                self.bot.logger.info(f"updating {stored_name} to {name}",
-                                     flush=True)
+                self.bot.logger.info(f"updating {stored_name} to {name}", flush=True)
                 await connection.execute(
                     "UPDATE league_players SET league_username = ? WHERE puuid = ?",
                     (name, puuid),

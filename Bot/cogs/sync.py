@@ -9,7 +9,7 @@ from main import MyDiscordBot
 
 class Refresh(
     GroupCog,
-    group_name="Refresh",
+    group_name="refresh",
     group_description="Controls the refreshing and syncing",
 ):
     def __init__(self, bot: MyDiscordBot):

@@ -1,11 +1,14 @@
 from discord.ext import commands, tasks
 import aiosqlite as sqa
+from utils.rank_sorting_class import Ranker  # pylint: disable=E0401,E0611
 from Bot.main import MyDiscordBot
-from utils.rank_sorting_class import Ranker  # pylint: disable=E0401
 from pantheon.utils.exceptions import RateLimit, Timeout, ServerError
 from discord import app_commands
 import asyncio
 import discord
+
+# Want to fetch ranks to post from the database
+# want to fetch from rito every 30s
 
 
 class FetchFromRiot(commands.Cog):
@@ -13,7 +16,7 @@ class FetchFromRiot(commands.Cog):
         self.bot = bot
         self.bot.logging.info(f"{__name__} loaded")
         self.post_ranks.start()  # pylint: disable=E1101
-        self.fetch_ranks_from_riot.start()
+        # self.fetch_ranks_from_riot.start() # pylint: disable=E1101
         self.previous_ranks = {}
 
         self.ranked_dict = None
@@ -236,7 +239,7 @@ class FetchFromRiot(commands.Cog):
 
     # Needs updating to grab last match from the table
     async def update_table(self, user, user_stats_dict):
-        async with sqa.connect(self.bot.db_path) as connection:
+        async with sqa.connect(database=self.bot.db_path) as connection:
             last_values = await connection.execute_fetchall(
                 "SELECT * FROM league_history ORDER BY id DESC WHERE puuid = ?",
                 (user_stats_dict["summonerId"]),

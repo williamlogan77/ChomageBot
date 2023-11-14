@@ -4,7 +4,7 @@ from discord.app_commands import command
 import glob
 import os
 
-from Bot.main import MyDiscordBot
+from main import MyDiscordBot
 
 
 class Refresh(

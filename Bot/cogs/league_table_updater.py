@@ -242,12 +242,14 @@ class FetchFromRiot(commands.Cog):
     async def update_table(self, user, user_stats_dict):
         async with sqa.connect(database=self.bot.db_path) as connection:
             try:
+                self.bot.logging.info(f"updating table, logging {user_stats_dict}")
                 last_values = await connection.execute_fetchall(
                     "SELECT * FROM league_history ORDER BY id DESC WHERE puuid = ?",
                     (user_stats_dict["summonerId"]),
                 )
             except Exception as e:
                 self.bot.logging.error(f"Failed to update table with error: {e}")
+                return
         if last_values[0][-2:] == (user_stats_dict["wins"], user_stats_dict["losses"]):
             return
         async with sqa.connect(self.bot.db_path) as connection:

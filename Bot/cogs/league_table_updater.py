@@ -1,7 +1,7 @@
 from discord.ext import commands, tasks
 import aiosqlite as sqa
 from utils.rank_sorting_class import Ranker  # pylint: disable=E0401,E0611
-from main import MyDiscordBot # pylint: disable=E0401
+from main import MyDiscordBot  # pylint: disable=E0401
 from pantheon.utils.exceptions import RateLimit, Timeout, ServerError
 from discord import app_commands
 import asyncio
@@ -223,6 +223,7 @@ class FetchFromRiot(commands.Cog):
         msg = await ctx.followup.send("Stopping...", wait=True, ephemeral=True)
         self.post_ranks.stop()  # pylint: disable=E1101
         await msg.edit(content="Stopped refreshing of ranks")
+        self.bot.logging.info("Stopped the refreshing of ranks posting")
 
     @app_commands.command(
         name="start_rank_refresh",
@@ -240,10 +241,13 @@ class FetchFromRiot(commands.Cog):
     # Needs updating to grab last match from the table
     async def update_table(self, user, user_stats_dict):
         async with sqa.connect(database=self.bot.db_path) as connection:
-            last_values = await connection.execute_fetchall(
-                "SELECT * FROM league_history ORDER BY id DESC WHERE puuid = ?",
-                (user_stats_dict["summonerId"]),
-            )
+            try:
+                last_values = await connection.execute_fetchall(
+                    "SELECT * FROM league_history ORDER BY id DESC WHERE puuid = ?",
+                    (user_stats_dict["summonerId"]),
+                )
+            except Exception as e:
+                self.bot.logging.error(f"Failed to update table with error: {e}")
         if last_values[0][-2:] == (user_stats_dict["wins"], user_stats_dict["losses"]):
             return
         async with sqa.connect(self.bot.db_path) as connection:

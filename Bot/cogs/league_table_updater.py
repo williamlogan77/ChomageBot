@@ -75,7 +75,7 @@ class FetchFromRiot(commands.Cog):
 
     # @tasks.loop(seconds=30)
     async def fetch_ranks_from_riot(self):
-        self.bot.logging.info("fetching ranks")
+        # self.bot.logging.info("fetching ranks")
         # fetch from db
         # await self.fetch_ranks_from_db()
         async with sqa.connect(self.bot.db_path) as connection:
@@ -244,8 +244,8 @@ class FetchFromRiot(commands.Cog):
             try:
                 self.bot.logging.info(f"updating table, logging {user_stats_dict}")
                 last_values = await connection.execute_fetchall(
-                    "SELECT * FROM league_history ORDER BY id DESC WHERE puuid = ?",
-                    (user_stats_dict["summonerId"]),
+                    "SELECT * FROM league_history WHERE puuid = ? ORDER BY id DESC",
+                    (user_stats_dict["summonerId"],),
                 )
             except Exception as e:
                 self.bot.logging.error(f"Failed to update table with error: {e}")

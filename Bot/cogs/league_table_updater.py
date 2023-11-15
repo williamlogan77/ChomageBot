@@ -237,6 +237,7 @@ class FetchFromRiot(commands.Cog):
         else:
             self.post_ranks.start()  # pylint: disable=E1101
             await msg.edit(content="Started refreshing of ranks")
+            self.bot.logging.info("Started rank refresh")
 
     # Needs updating to grab last match from the table
     async def update_table(self, user, user_stats_dict):

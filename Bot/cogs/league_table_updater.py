@@ -35,6 +35,9 @@ class FetchFromRiot(commands.Cog):
                             f"Rate limited on {user, name}, waiting {limited.timeToWait} seconds"
                         )
                         await asyncio.sleep(int(limited.timeToWait))
+                        self.post_ranks.stop()
+                        await asyncio.sleep(120)
+                        self.post_ranks.start()
                     else:
                         print("Timed out", flush=True)
                         await asyncio.sleep(10)

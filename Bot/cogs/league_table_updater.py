@@ -35,7 +35,7 @@ class FetchFromRiot(commands.Cog):
                             f"Rate limited on {user, name}, waiting {limited.timeToWait} seconds"
                         )
                         await asyncio.sleep(int(limited.timeToWait))
-                        self.post_ranks.stop()
+                        self.post_ranks.cancel()
                         await asyncio.sleep(120)
                         self.post_ranks.start()
                     else:
@@ -112,7 +112,7 @@ class FetchFromRiot(commands.Cog):
                 )
                 await connection.commit()
 
-    @tasks.loop(seconds=10)
+    @tasks.loop(seconds=60)
     async def post_ranks(self):
         await self.bot.wait_until_ready()
         await self.fetch_ranks_from_riot()

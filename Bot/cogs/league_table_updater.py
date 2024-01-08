@@ -35,9 +35,6 @@ class FetchFromRiot(commands.Cog):
                             f"Rate limited on {user, name}, waiting {limited.timeToWait} seconds"
                         )
                         await asyncio.sleep(int(limited.timeToWait))
-                        self.post_ranks.cancel()
-                        await asyncio.sleep(120)
-                        self.post_ranks.start()
                     else:
                         print("Timed out", flush=True)
                         await asyncio.sleep(10)
@@ -90,9 +87,9 @@ class FetchFromRiot(commands.Cog):
                     self.ranked_dict = await self.fetch_users_rank(cursor)
                 except ServerError as exc:
                     self.bot.logging.error(
-                        f"Error of: {exc}, trying again in 10 seconds"
+                        f"Error of: {exc}, trying again in 60 seconds"
                     )
-                    asyncio.sleep(10)
+                    asyncio.sleep(60)
                 # print(self.ranked_dict, flush=True)
 
         return
@@ -112,7 +109,7 @@ class FetchFromRiot(commands.Cog):
                 )
                 await connection.commit()
 
-    @tasks.loop(seconds=60)
+    @tasks.loop(seconds=120)
     async def post_ranks(self):
         await self.bot.wait_until_ready()
         await self.fetch_ranks_from_riot()

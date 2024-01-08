@@ -22,10 +22,10 @@ class Refresh(
         self.bot.logging.info("Syncing commands")
         try:
             await self.bot.tree.sync()
-            msg.edit(content="Succesfully synced")
+            await msg.edit(content="Succesfully synced")
         except Exception as e:
             self.bot.logging.error(f"Failed to sync due to: {e}")
-            msg.edit(content="Unsuccesful sync")
+            await msg.edit(content="Unsuccesful sync")
 
     @command(name="reload_cogs")
     async def reload_cogs(self, ctx: discord.Interaction):

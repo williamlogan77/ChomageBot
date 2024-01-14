@@ -102,7 +102,7 @@ class FetchFromRiot(commands.Cog):
             ) as cursor:
                 puuid, stored_name = cursor[0]
             if name != stored_name:
-                self.bot.logger.info(f"updating {stored_name} to {name}", flush=True)
+                self.bot.logging.info(f"updating {stored_name} to {name}")
                 await connection.execute(
                     "UPDATE league_players SET league_username = ? WHERE puuid = ?",
                     (name, puuid),
@@ -251,8 +251,11 @@ class FetchFromRiot(commands.Cog):
             except Exception as e:
                 self.bot.logging.error(f"Failed to update table with error: {e}")
                 return
-        if last_values[0][-2:] == (user_stats_dict["wins"], user_stats_dict["losses"]):
-            return
+        try:
+            if last_values[0][-2:] == (user_stats_dict["wins"], user_stats_dict["losses"]):
+                return
+        except:
+            pass
         async with sqa.connect(self.bot.db_path) as connection:
             await connection.execute(
                 "INSERT INTO league_history (puuid, lp, division, tier, wins, losses) VALUES (?, ?, ?, ?, ?, ?)",

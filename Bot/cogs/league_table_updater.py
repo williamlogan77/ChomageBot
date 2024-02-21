@@ -40,7 +40,7 @@ class FetchFromRiot(commands.Cog):
                         await asyncio.sleep(10)
 
             fivev5 = list(
-                filter(lambda x: (x["queueType"] == "RANKED_SOLO_5x5") and ((x["wins"]+x["losses"]) >= 20), user_rank)
+                filter(lambda x: x["queueType"] == "RANKED_SOLO_5x5", user_rank)
             )
             if len(fivev5) > 0:
                 fivev5 = fivev5[0]
@@ -49,6 +49,9 @@ class FetchFromRiot(commands.Cog):
                     fivev5["tier"], fivev5["rank"], fivev5["leaguePoints"]
                 )
                 fivev5["GamesPlayed"] = fivev5["wins"] + fivev5["losses"]
+                if fivev5["GamesPlayed"] < 20:
+                    del user_rank[fivev5]
+                    continue
                 fivev5["WinRate"] = (fivev5["wins"] / fivev5["GamesPlayed"]) * 100
 
                 users_ranks[fivev5["summonerName"]] = fivev5

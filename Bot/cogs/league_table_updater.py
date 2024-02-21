@@ -49,12 +49,12 @@ class FetchFromRiot(commands.Cog):
                     fivev5["tier"], fivev5["rank"], fivev5["leaguePoints"]
                 )
                 fivev5["GamesPlayed"] = fivev5["wins"] + fivev5["losses"]
-                if fivev5["GamesPlayed"] < 20:
-                    del user_rank[fivev5]
-                    continue
                 fivev5["WinRate"] = (fivev5["wins"] / fivev5["GamesPlayed"]) * 100
 
                 users_ranks[fivev5["summonerName"]] = fivev5
+                if fivev5["GamesPlayed"] < 20:
+                    del user_rank[fivev5["summonerName"]]
+                    continue
             else:
                 fivev5 = []
 

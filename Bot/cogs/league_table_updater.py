@@ -40,7 +40,7 @@ class FetchFromRiot(commands.Cog):
                         await asyncio.sleep(10)
 
             fivev5 = list(
-                filter(lambda x: x["queueType"] == "RANKED_SOLO_5x5", user_rank)
+                filter(lambda x: (x["queueType"] == "RANKED_SOLO_5x5") and (x["GamesPlayed"] >= 20), user_rank)
             )
             if len(fivev5) > 0:
                 fivev5 = fivev5[0]

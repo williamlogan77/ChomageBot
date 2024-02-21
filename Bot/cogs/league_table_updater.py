@@ -53,7 +53,7 @@ class FetchFromRiot(commands.Cog):
 
                 users_ranks[fivev5["summonerName"]] = fivev5
                 if fivev5["GamesPlayed"] < 20:
-                    del user_rank[fivev5["summonerName"]]
+                    del users_ranks[fivev5["summonerName"]]
                     continue
             else:
                 fivev5 = []

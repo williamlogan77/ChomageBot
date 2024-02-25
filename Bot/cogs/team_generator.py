@@ -37,11 +37,11 @@ class UserDropdown(discord.ui.UserSelect):
     async def callback(self, interaction: discord.Interaction) -> Any:
         members: List[Union[discord.Member, discord.User]] = self.values
         random.shuffle(members)
-        for team_no in np.ceil(len(members) / self.team_size):
+        for team_no in range(np.ceil(len(members) / self.team_size)):
             t1 = members[0:5]
             [members.remove(x) for x in members]  # pylint: disable=W0106
             random.shuffle(members)
-            await interaction.response.send_message(f"Team number {team_no} is:")
+            await interaction.response.send_message(f"Team number {team_no+1} is:")
             for team_member in t1:
                 await interaction.response.send_message(team_member)
 

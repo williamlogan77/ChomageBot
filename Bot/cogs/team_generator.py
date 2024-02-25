@@ -1,3 +1,4 @@
+from enum import member
 import typing
 import discord
 from discord.ext import commands
@@ -39,9 +40,12 @@ class UserDropdown(discord.ui.UserSelect):
         random.shuffle(members)
         to_send = ""
         for team_no in range(int(np.ceil(len(members) / self.team_size))):
+            print(members, flush=True)
             t1 = members[0 : self.team_size]
             for t in t1:
                 members.remove(t)
+
+            print(members, flush=True)
             # [members.remove(x) for x in members]  # pylint: disable=W0106
             random.shuffle(members)
             # await interaction.response.send_message(f"Team number {team_no+1} is:")

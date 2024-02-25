@@ -46,6 +46,9 @@ class Refresh(
                         f"Unable to reload {cog}, error of: {e}, trying to load it"
                     )
                     try:
+                        self.bot.logging.info(
+                            f"Not reloading {cog}, trying to load it first"
+                        )
                         await self.bot.load_extension(f"cogs.{cog[:-3]}")
                     except Exception as err:
                         self.bot.logging.error(f"Unable to load {cog}, error of :{err}")

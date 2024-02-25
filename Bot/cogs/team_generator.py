@@ -9,6 +9,13 @@ class TeamGenerator(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
+    @app_commands.command(
+        name="Select_Teams", description="Create a number of teams of players"
+    )
+    @app_commands.describe(
+        members="The list of discord members (seperated with a space and using their @)",
+        team_size="The size of the team",
+    )
     async def generate_teams(
         self,
         ctx: discord.Interaction,

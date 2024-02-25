@@ -1,3 +1,4 @@
+import typing
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -20,7 +21,8 @@ class TeamGenerator(commands.Cog):
         self,
         ctx: discord.Interaction,
         members: commands.Greedy[discord.Member],
-        team_size: int = 5,
+        *,
+        team_size: typing.Optional[int] = 5
     ):
         random.shuffle(members)
         for team_no in np.ceil(11 / team_size):

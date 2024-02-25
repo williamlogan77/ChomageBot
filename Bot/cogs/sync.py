@@ -3,8 +3,7 @@ from discord.ext.commands import GroupCog
 from discord.app_commands import command
 import glob
 import os
-
-from main import MyDiscordBot
+from main import MyDiscordBot  # pylint: disable=E0401
 
 
 class Refresh(
@@ -43,7 +42,13 @@ class Refresh(
                     await self.bot.reload_extension(f"cogs.{cog[:-3]}")
                     loaded += 1
                 except Exception as e:
-                    self.bot.logging.error(f"Unable to load {cog}, error of: {e}")
+                    self.bot.logging.error(
+                        f"Unable to reload {cog}, error of: {e}, trying to load it"
+                    )
+                    try:
+                        await self.bot.load_extension(f"cogs.{cog[:-3]}")
+                    except Exception as e:
+                        self.bot.logging.error(f"Unable to load {cog}, error of :{e}")
 
         os.chdir("../")
 

@@ -4,6 +4,7 @@ from discord.ext import commands
 from discord import app_commands
 import random
 import numpy as np
+from typing import Any, List, Union
 
 
 class TeamGenerator(commands.Cog):
@@ -20,19 +21,36 @@ class TeamGenerator(commands.Cog):
     async def generate_teams(
         self,
         ctx: discord.Interaction,
-        members: commands.Greedy[discord.Member],
-        *,
-        team_size: typing.Optional[int] = 5
+        team_size: typing.Optional[int] = 5,
     ):
+        view = DropdownView(team_size=team_size)
+        await ctx.response.send_message("Choose your team", view=view)
+
+        return
+
+
+class UserDropdown(discord.ui.UserSelect):
+    def __init__(self, team_size):
+
+        super().__init__(placeholder="Select a user", min_values=2, max_values=25)
+        self.team_size = team_size
+
+    async def callback(self, interaction: discord.Interaction) -> Any:
+        members: List[Union[discord.Member, discord.User]] = self.values
         random.shuffle(members)
-        for team_no in np.ceil(11 / team_size):
+        for team_no in np.ceil(len(members) / self.team_size):
             t1 = members[0:5]
             [members.remove(x) for x in members]  # pylint: disable=W0106
             random.shuffle(members)
-            await ctx.response.send_message(f"Team number {team_no} is:")
+            await interaction.response.send_message(f"Team number {team_no} is:")
             for team_member in t1:
-                await ctx.response.send_message(team_member)
-        return
+                await interaction.response.send_message(team_member)
+
+
+class DropdownView(discord.ui.View):
+    def __init__(self, team_size):
+        super().__init__()
+        self.add_item(UserDropdown(team_size=team_size))
 
 
 async def setup(bot: commands.Bot):

@@ -38,20 +38,13 @@ class Refresh(
         for idx, cog in enumerate(glob.glob("*.py")):
             if not cog.startswith("sync"):
                 try:
-                    self.bot.logging.info(f"Reloading {cog}")
-                    await self.bot.reload_extension(f"cogs.{cog[:-3]}")
+                    self.bot.logging.info(f"Unloading {cog}")
+                    await self.bot.unload_extension(f"cogs.{cog[:-3]}")
+                    self.bot.logging.info(f"Loading {cog}")
+                    await self.bot.load_extension(f"cogs.{cog[:-3]}")
                     loaded += 1
                 except Exception as e:
-                    self.bot.logging.error(
-                        f"Unable to reload {cog}, error of: {e}, trying to load it"
-                    )
-                    try:
-                        self.bot.logging.info(
-                            f"Not reloading {cog}, trying to load it first"
-                        )
-                        await self.bot.load_extension(f"cogs.{cog[:-3]}")
-                    except Exception as err:
-                        self.bot.logging.error(f"Unable to load {cog}, error of :{err}")
+                    self.bot.logging.error(f"Unable to reload {cog}, error of: {e}")
 
         os.chdir("../")
 

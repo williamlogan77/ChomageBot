@@ -41,9 +41,9 @@ class UserDropdown(discord.ui.UserSelect):
             t1 = members[0 : self.team_size]
             [members.remove(x) for x in members]  # pylint: disable=W0106
             random.shuffle(members)
-            await interaction.response.send_message(f"Team number {team_no+1} is:")
+            # await interaction.response.send_message(f"Team number {team_no+1} is:")
 
-            to_send = ""
+            to_send = "Team number {team_no+1} is:" + "\n "
             for team_member in t1:
                 to_send += f"<@{team_member.id}>" + "\n "
 

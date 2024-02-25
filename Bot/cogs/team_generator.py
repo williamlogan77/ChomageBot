@@ -13,15 +13,18 @@ class TeamGenerator(commands.Cog):
         self,
         ctx: discord.Interaction,
         members: commands.Greedy[discord.Member],
-        team_size: 5,
+        team_size: int = 5,
     ):
-        teams = {}
         random.shuffle(members)
-        for team_no in np.ceil(11 / 5):
+        for team_no in np.ceil(11 / team_size):
             t1 = members[0:5]
-            [members.remove(x) for x in members]
+            [members.remove(x) for x in members]  # pylint: disable=W0106
             random.shuffle(members)
             await ctx.response.send_message(f"Team number {team_no} is:")
             for team_member in t1:
                 await ctx.response.send_message(team_member)
         return
+
+
+async def setup(bot: commands.Bot):
+    await bot.add_cog(TeamGenerator(bot))

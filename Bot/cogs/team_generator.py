@@ -38,12 +38,16 @@ class UserDropdown(discord.ui.UserSelect):
         members: List[Union[discord.Member, discord.User]] = self.values
         random.shuffle(members)
         for team_no in range(int(np.ceil(len(members) / self.team_size))):
-            t1 = members[0:5]
+            t1 = members[0 : self.team_size]
             [members.remove(x) for x in members]  # pylint: disable=W0106
             random.shuffle(members)
             await interaction.response.send_message(f"Team number {team_no+1} is:")
+
+            to_send = ""
             for team_member in t1:
-                await interaction.response.send_message(team_member)
+                to_send += f"<@{team_member.id}>" + "\n "
+
+            await interaction.response.send_message(to_send)
 
 
 class DropdownView(discord.ui.View):

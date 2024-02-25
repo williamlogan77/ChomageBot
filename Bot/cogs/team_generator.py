@@ -15,7 +15,6 @@ class TeamGenerator(commands.Cog):
         name="select_teams", description="Create a number of teams of players"
     )
     @app_commands.describe(
-        members="The list of discord members (seperated with a space and using their @)",
         team_size="The size of the team",
     )
     async def generate_teams(

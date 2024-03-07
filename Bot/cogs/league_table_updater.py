@@ -24,7 +24,7 @@ class FetchFromRiot(commands.Cog):
     async def fetch_users_rank(self, users):
         users_ranks = {}
         looked_up_users = []
-        for user, name in users:
+        for user, name, user_id in users:
             while user not in looked_up_users:
                 try:
                     user_rank = await self.bot.lolapi.get_league_position(user)
@@ -44,6 +44,7 @@ class FetchFromRiot(commands.Cog):
             )
             if len(fivev5) > 0:
                 fivev5 = fivev5[0]
+                fivev5 = user_id
                 fivev5["discord_name"] = name
                 fivev5["sorted_rank"] = Ranker(
                     fivev5["tier"], fivev5["rank"], fivev5["leaguePoints"]
@@ -83,7 +84,7 @@ class FetchFromRiot(commands.Cog):
         # await self.fetch_ranks_from_db()
         async with sqa.connect(self.bot.db_path) as connection:
             async with connection.execute_fetchall(
-                "SELECT puuid, IIF(nickname='', discord_tag, nickname) FROM (SELECT * FROM league_players LEFT JOIN users ON user_id = discord_user_id)"
+                "SELECT puuid, IIF(nickname='', discord_tag, nickname), discord_user_id FROM (SELECT * FROM league_players LEFT JOIN users ON user_id = discord_user_id)"
             ) as cursor:
                 # Fetch current ranks and store them in a dict with updated values
                 try:
@@ -94,7 +95,6 @@ class FetchFromRiot(commands.Cog):
                     )
                     asyncio.sleep(60)
                 # print(self.ranked_dict, flush=True)
-
         return
 
     async def check_name(self, puuid, name):
@@ -160,6 +160,7 @@ class FetchFromRiot(commands.Cog):
                         str(index + 1)
                         + ". "
                         + posting["summonerName"]
+                        + f" - @<{posting['user_id']}>"
                         + "\n"
                         + "Rank: "
                         + posting["tier"].title()
@@ -179,7 +180,7 @@ class FetchFromRiot(commands.Cog):
                         str(index + 1)
                         + ". "
                         + posting["summonerName"]
-                        + f" - {posting['discord_name']}"
+                        + f" - @<{posting['user_id']}>"
                         + "\n"
                         + "Rank: "
                         + posting["tier"].title()
@@ -255,7 +256,10 @@ class FetchFromRiot(commands.Cog):
                 self.bot.logging.error(f"Failed to update table with error: {e}")
                 return
         try:
-            if last_values[0][-2:] == (user_stats_dict["wins"], user_stats_dict["losses"]):
+            if last_values[0][-2:] == (
+                user_stats_dict["wins"],
+                user_stats_dict["losses"],
+            ):
                 return
         except:
             pass

@@ -160,7 +160,7 @@ class FetchFromRiot(commands.Cog):
                         str(index + 1)
                         + ". "
                         + posting["summonerName"]
-                        + f" - @<{posting['user_id']}>"
+                        + f" - <@{posting['user_id']}>"
                         + "\n"
                         + "Rank: "
                         + posting["tier"].title()
@@ -180,7 +180,7 @@ class FetchFromRiot(commands.Cog):
                         str(index + 1)
                         + ". "
                         + posting["summonerName"]
-                        + f" - @<{posting['user_id']}>"
+                        + f" - <@{posting['user_id']}>"
                         + "\n"
                         + "Rank: "
                         + posting["tier"].title()

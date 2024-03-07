@@ -230,6 +230,8 @@ class FetchFromRiot(commands.Cog):
         await ctx.response.defer()
         msg = await ctx.followup.send("Stopping...", wait=True, ephemeral=True)
         self.post_ranks.stop()  # pylint: disable=E1101
+        asyncio.sleep(30)
+        self.post_ranks.cancel()  # pylint: disable=E1101
         await msg.edit(content="Stopped refreshing of ranks")
         self.bot.logging.info("Stopped the refreshing of ranks posting")
 

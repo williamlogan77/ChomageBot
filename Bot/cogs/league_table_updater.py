@@ -44,7 +44,7 @@ class FetchFromRiot(commands.Cog):
             )
             if len(fivev5) > 0:
                 fivev5 = fivev5[0]
-                fivev5 = user_id
+                fivev5["user_id"] = user_id
                 fivev5["discord_name"] = name
                 fivev5["sorted_rank"] = Ranker(
                     fivev5["tier"], fivev5["rank"], fivev5["leaguePoints"]

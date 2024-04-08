@@ -97,13 +97,16 @@ class FetchFromRiot(commands.Cog):
                 # print(self.ranked_dict, flush=True)
         return
 
-    async def check_name(self, puuid, name):
+    async def check_name(self, puuid):
         async with sqa.connect(self.bot.db_path) as connection:
             async with connection.execute_fetchall(
                 "SELECT puuid, league_username FROM league_players WHERE puuid = ?",
                 (puuid,),
             ) as cursor:
                 puuid, stored_name = cursor[0]
+
+            name = (await self.bot.lolapi.get_account_by_puuId(puuid))["gameName"]
+
             if name != stored_name:
                 self.bot.logging.info(f"updating {stored_name} to {name}")
                 await connection.execute(
@@ -123,10 +126,7 @@ class FetchFromRiot(commands.Cog):
 
         if (self.ranked_dict != self.previous_ranks) or (not self.previous_ranks):
             for user in self.ranked_dict.keys():
-                await self.check_name(
-                    self.ranked_dict[user]["summonerId"],
-                    self.ranked_dict[user]["summonerName"],
-                )
+                await self.check_name(self.ranked_dict[user]["summonerId"])
 
                 if self.previous_ranks and user in self.previous_ranks.keys():
                     if (
@@ -263,8 +263,9 @@ class FetchFromRiot(commands.Cog):
                 user_stats_dict["losses"],
             ):
                 return
-        except:
-            pass
+        except Exception as e:
+            self.bot.logging.info(f"Exception as {e}")
+
         async with sqa.connect(self.bot.db_path) as connection:
             await connection.execute(
                 "INSERT INTO league_history (puuid, lp, division, tier, wins, losses) VALUES (?, ?, ?, ?, ?, ?)",

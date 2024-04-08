@@ -122,7 +122,6 @@ class FetchFromRiot(commands.Cog):
 
     async def check_name(self, puuid):
         async with sqa.connect(self.bot.db_path) as connection:
-            print(puuid, flush = True)
             async with connection.execute_fetchall(
                 "SELECT puuid, league_username FROM league_players WHERE leagueId = ?",
                 (puuid,),
@@ -137,6 +136,7 @@ class FetchFromRiot(commands.Cog):
                     "UPDATE league_players SET league_username = ? WHERE puuid = ?",
                     (name, puuid),
                 )
+                self.ranked_dict["summonerName"] = name
                 await connection.commit()
 
     @tasks.loop(seconds=120)

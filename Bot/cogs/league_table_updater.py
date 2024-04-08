@@ -59,7 +59,6 @@ class FetchFromRiot(commands.Cog):
                     continue
             else:
                 fivev5 = []
-            print(fivev5, flush = True)
 
         return users_ranks
 
@@ -128,11 +127,10 @@ class FetchFromRiot(commands.Cog):
                 "SELECT league_username FROM league_players WHERE leagueId = ?",
                 (leagueId,),
             ) as cursor:
-                return cursor[0]
+                return cursor[0][0]
 
     async def check_name(self, puuid):
         async with sqa.connect(self.bot.db_path) as connection:
-            print(puuid, flush = True)
             async with connection.execute_fetchall(
                 "SELECT puuid, league_username FROM league_players WHERE leagueId = ?",
                 (puuid,),
@@ -169,7 +167,6 @@ class FetchFromRiot(commands.Cog):
                     ):
                         print(f"{user} updated", flush=True)
                         await self.update_table(user, self.ranked_dict[user])
-                        # print(self.ranked_dict[user], flush=True)
 
             self.bot.logging.info("Posting ranks")
             self.previous_ranks = self.ranked_dict

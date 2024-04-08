@@ -1,8 +1,8 @@
+import glob
+import os
 import discord
 from discord.ext.commands import GroupCog
 from discord.app_commands import command
-import glob
-import os
 from main import MyDiscordBot  # pylint: disable=E0401
 
 
@@ -11,11 +11,18 @@ class Refresh(
     group_name="refresh",
     group_description="Controls the refreshing and syncing",
 ):
+    """The cog containing commands related to admin tools"""
+
     def __init__(self, bot: MyDiscordBot):
         self.bot = bot
 
     @command(name="sync")
     async def sync(self, ctx: discord.Interaction):
+        """Command to sync all slash commands to discord
+
+        Args:
+            ctx (discord.Interaction): The discord interaction object
+        """
         await ctx.response.defer()
         msg = await ctx.followup.send("Syncing commands...", wait=True, ephemeral=True)
         self.bot.logging.info("Syncing commands")
@@ -28,6 +35,7 @@ class Refresh(
 
     @command(name="reload_cogs")
     async def reload_cogs(self, ctx: discord.Interaction):
+        """Command to reload all cogs"""
         await ctx.response.defer()
         msg = await ctx.followup.send("Reloading cogs...", wait=True, ephemeral=True)
 
@@ -53,4 +61,5 @@ class Refresh(
 
 
 async def setup(bot: MyDiscordBot):
+    """Setup function as needed by discord.py"""
     await bot.add_cog(Refresh(bot))

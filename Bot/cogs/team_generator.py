@@ -1,14 +1,15 @@
-from enum import member
 import typing
+import random
+from typing import Any, List, Union
 import discord
 from discord.ext import commands
 from discord import app_commands
-import random
 import numpy as np
-from typing import Any, List, Union
 
 
 class TeamGenerator(commands.Cog):
+    """Cog containing slash commands for team selection"""
+
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
@@ -23,6 +24,14 @@ class TeamGenerator(commands.Cog):
         ctx: discord.Interaction,
         team_size: typing.Optional[int] = 5,
     ):
+        """Slash command to generate teams
+
+        Args:
+            ctx (discord.Interaction): The discord interaction object (or
+            context) - in this case this is the command sent
+            team_size (typing.Optional[int], optional): The size of the team to choose.
+            Defaults to 5.
+        """
         view = DropdownView(team_size=team_size)
         await ctx.response.send_message("Choose your team", view=view)
 
@@ -30,6 +39,8 @@ class TeamGenerator(commands.Cog):
 
 
 class UserDropdown(discord.ui.UserSelect):
+    """Generate the dropdown component for the selection"""
+
     def __init__(self, team_size):
 
         super().__init__(placeholder="Select a user", min_values=2, max_values=25)
@@ -40,15 +51,10 @@ class UserDropdown(discord.ui.UserSelect):
         random.shuffle(members)
         to_send = ""
         for team_no in range(int(np.ceil(len(members) / self.team_size))):
-            print(members, flush=True)
             t1 = members[0 : self.team_size]
-            for t in t1:
-                members.remove(t)
+            _ = [members.remove(t) for t in t1]
 
-            print(members, flush=True)
-            # [members.remove(x) for x in members]  # pylint: disable=W0106
             random.shuffle(members)
-            # await interaction.response.send_message(f"Team number {team_no+1} is:")
 
             to_send += f"Team number {team_no+1} is:" + "\n "
             for team_member in t1:
@@ -59,10 +65,13 @@ class UserDropdown(discord.ui.UserSelect):
 
 
 class DropdownView(discord.ui.View):
+    """The overall view object"""
+
     def __init__(self, team_size):
         super().__init__()
         self.add_item(UserDropdown(team_size=team_size))
 
 
 async def setup(bot: commands.Bot):
+    """Setup function as needed by discord.py"""
     await bot.add_cog(TeamGenerator(bot))

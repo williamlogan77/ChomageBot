@@ -118,13 +118,13 @@ class FetchFromRiot(commands.Cog):
                         f"Error of: {exc}, trying again in 60 seconds"
                     )
                     asyncio.sleep(60)
-                # print(self.ranked_dict, flush=True)
         return
 
     async def check_name(self, puuid):
         async with sqa.connect(self.bot.db_path) as connection:
+            print(puuid, flush = True)
             async with connection.execute_fetchall(
-                "SELECT puuid, league_username FROM league_players WHERE puuid = ?",
+                "SELECT puuid, league_username FROM league_players WHERE leagueId = ?",
                 (puuid,),
             ) as cursor:
                 puuid, stored_name = cursor[0]
@@ -275,7 +275,7 @@ class FetchFromRiot(commands.Cog):
             try:
                 self.bot.logging.info(f"updating table, logging {user_stats_dict}")
                 last_values = await connection.execute_fetchall(
-                    "SELECT * FROM league_history WHERE puuid = ? ORDER BY id DESC",
+                    "SELECT * FROM league_history WHERE leagueId = ? ORDER BY id DESC",
                     (user_stats_dict["summonerId"],),
                 )
             except Exception as e:

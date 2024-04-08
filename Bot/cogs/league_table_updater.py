@@ -64,7 +64,24 @@ class FetchFromRiot(commands.Cog):
     async def fetch_ranks_from_db(self):
         async with sqa.connect(self.bot.db_path) as connection:
             async with connection.execute_fetchall(
-                "SELECT league_username, lp, division, tier FROM (SELECT DISTINCT puuid, MAX(timestamp), lp, division, tier FROM league_history GROUP BY puuid) as history, (SELECT * FROM league_players) as players WHERE history.puuid = players.puuid"
+                """SELECT league_username,
+                        lp,
+                        division,
+                        tier
+                    FROM (
+                            SELECT DISTINCT puuid,
+                                MAX(timestamp),
+                                lp,
+                                division,
+                                tier
+                            FROM league_history
+                            GROUP BY puuid
+                        ) as history,
+                        (
+                            SELECT *
+                            FROM league_players
+                        ) as players
+                    WHERE history.puuid = players.leagueId"""
             ) as cursor:
                 db_dict = {}
                 for user in cursor:
@@ -84,7 +101,14 @@ class FetchFromRiot(commands.Cog):
         # await self.fetch_ranks_from_db()
         async with sqa.connect(self.bot.db_path) as connection:
             async with connection.execute_fetchall(
-                "SELECT puuid, IIF(nickname='', discord_tag, nickname), discord_user_id FROM (SELECT * FROM league_players LEFT JOIN users ON user_id = discord_user_id)"
+                """SELECT leagueId,
+                        IIF(nickname = '', discord_tag, nickname),
+                        discord_user_id
+                    FROM (
+                            SELECT *
+                            FROM league_players
+                                LEFT JOIN users ON user_id = discord_user_id
+                        )"""
             ) as cursor:
                 # Fetch current ranks and store them in a dict with updated values
                 try:

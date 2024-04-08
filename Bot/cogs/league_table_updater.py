@@ -51,6 +51,7 @@ class FetchFromRiot(commands.Cog):
                 )
                 fivev5["GamesPlayed"] = fivev5["wins"] + fivev5["losses"]
                 fivev5["WinRate"] = (fivev5["wins"] / fivev5["GamesPlayed"]) * 100
+                fivev5["summonerName"] = await self.get_name(user)
 
                 users_ranks[fivev5["summonerName"]] = fivev5
                 if fivev5["GamesPlayed"] < 20:
@@ -58,6 +59,7 @@ class FetchFromRiot(commands.Cog):
                     continue
             else:
                 fivev5 = []
+            print(fivev5, flush = True)
 
         return users_ranks
 
@@ -119,6 +121,14 @@ class FetchFromRiot(commands.Cog):
                     )
                     asyncio.sleep(60)
         return
+
+    async def get_name(self, leagueId):
+        async with sqa.connect(self.bot.db_path) as connection:
+            async with connection.execute_fetchall(
+                "SELECT league_username FROM league_players WHERE leagueId = ?",
+                (leagueId,),
+            ) as cursor:
+                return cursor[0]
 
     async def check_name(self, puuid):
         async with sqa.connect(self.bot.db_path) as connection:

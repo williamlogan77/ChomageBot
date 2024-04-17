@@ -131,7 +131,7 @@ class LeagueGraphs(commands.Cog):
 
         async with sqa.connect(self.bot.db_path) as connection:
             user = await connection.execute_fetchall(
-                "SELECT league_username FROM league_players WHERE puuid = ?",
+                "SELECT league_username FROM league_players WHERE leagueId = ?",
                 (summonerid[0][0],),
             )
 

@@ -99,7 +99,7 @@ class LeagueGraphs(commands.Cog):
     ):
         async with sqa.connect(self.bot.db_path) as connection:
             summonerid = await connection.execute_fetchall(
-                "SELECT puuid FROM league_players WHERE league_username = ?",
+                "SELECT leagueId FROM league_players WHERE league_username = ?",
                 (league_name,),
             )
         if summonerid is None:

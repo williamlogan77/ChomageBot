@@ -3,7 +3,7 @@ from discord.ext import commands
 from discord import app_commands
 import aiosqlite as sqa
 from utils.autocomplete import DiscordAttachedLeagueNames  # pylint: disable=E0401
-from main import MyDiscordBot
+from main import MyDiscordBot # pylint: disable=E0401
 
 
 class LeagueUsers(commands.Cog):

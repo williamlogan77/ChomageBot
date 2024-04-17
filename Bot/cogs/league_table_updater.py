@@ -282,7 +282,7 @@ class FetchFromRiot(commands.Cog):
             try:
                 self.bot.logging.info(f"updating table, logging {user_stats_dict}")
                 last_values = await connection.execute_fetchall(
-                    "SELECT * FROM league_history WHERE leagueId = ? ORDER BY id DESC",
+                    "SELECT * FROM league_history WHERE puuid = ? ORDER BY id DESC",
                     (user_stats_dict["summonerId"],),
                 )
             except Exception as e:

@@ -18,6 +18,7 @@ class FetchFromRiot(commands.Cog):
         self.post_ranks.start()  # pylint: disable=E1101
         # self.fetch_ranks_from_riot.start() # pylint: disable=E1101
         self.previous_ranks = {}
+        self.min_games_played = 0
 
         self.ranked_dict = None
 
@@ -54,7 +55,7 @@ class FetchFromRiot(commands.Cog):
                 fivev5["summonerName"] = await self.get_name(user)
 
                 users_ranks[fivev5["summonerName"]] = fivev5
-                if fivev5["GamesPlayed"] < 20:
+                if fivev5["GamesPlayed"] < self.min_games_played:
                     del users_ranks[fivev5["summonerName"]]
                     continue
             else:
@@ -238,6 +239,21 @@ class FetchFromRiot(commands.Cog):
                 to_send = "\n".join(output_list)
                 await paste.send(to_send, silent=True)
 
+        return
+
+    @app_commands.command(
+        name="set_minimum_games_played",
+        description="Set the minimum amount of games played for a user to appear on the leaderboard",
+    )
+    @app_commands.describe(
+        number="The number of games a user must have played to appear on the leaderboard"
+    )
+    async def min_games_played_setter(self, ctx: discord.Interaction, number: int):
+        if not isinstance(number, int) or number > 200:
+            ctx.response.send_message(
+                "please enter a reasonable number....", ephemeral=True
+            )
+        self.min_games_played = number
         return
 
     @app_commands.command(

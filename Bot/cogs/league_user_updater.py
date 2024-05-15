@@ -10,6 +10,7 @@ class LeagueUsers(commands.Cog):
 
     def __init__(self, bot: MyDiscordBot):
         self.bot = bot
+        self.bot.logging.info(f"{__name__} loaded")
 
     @app_commands.command(name="add_player", description="Add user to the table")
     @app_commands.describe(

@@ -12,6 +12,7 @@ class TeamGenerator(commands.Cog):
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self.bot.logging.info(f"{__name__} loaded")
 
     @app_commands.command(
         name="select_teams", description="Create a number of teams of players"

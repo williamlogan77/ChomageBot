@@ -15,6 +15,7 @@ class Refresh(
 
     def __init__(self, bot: MyDiscordBot):
         self.bot = bot
+        self.bot.logging.info(f"{__name__} loaded")
 
     @command(name="sync")
     async def sync(self, ctx: discord.Interaction):

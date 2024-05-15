@@ -20,7 +20,7 @@ class FetchFromRiot(commands.Cog):
         self.previous_ranks = {}
         self.min_games_played = 0
 
-        self.ranked_dict = None
+        self.ranked_dict: dict = None # type: ignore
 
     async def fetch_users_rank(self, users):
         users_ranks = {}
@@ -119,7 +119,7 @@ class FetchFromRiot(commands.Cog):
                     self.bot.logging.error(
                         f"Error of: {exc}, trying again in 60 seconds"
                     )
-                    asyncio.sleep(60)
+                    await asyncio.sleep(60)
         return
 
     async def get_name(self, leagueId):
@@ -249,11 +249,18 @@ class FetchFromRiot(commands.Cog):
         number="The number of games a user must have played to appear on the leaderboard"
     )
     async def min_games_played_setter(self, ctx: discord.Interaction, number: int):
+        await ctx.response.defer()
         if not isinstance(number, int) or number > 200:
-            ctx.response.send_message(
-                "please enter a reasonable number....", ephemeral=True
-            )
+            await ctx.followup.send("please enter a reasonable number....", ephemeral=True)
+        self.bot.logging.info(
+            f"Updating minimum number of games played from {self.min_games_played} to {number}"
+        )
+
+        await ctx.followup.send(
+            f"updating minimum number of games played from {self.min_games_played} to {number}"
+        )
         self.min_games_played = number
+
         return
 
     @app_commands.command(
@@ -329,5 +336,5 @@ class FetchFromRiot(commands.Cog):
         return
 
 
-async def setup(bot: commands.Bot):
+async def setup(bot: MyDiscordBot):
     await bot.add_cog(FetchFromRiot(bot))

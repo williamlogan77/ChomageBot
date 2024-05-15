@@ -9,10 +9,11 @@ import pickle
 import matplotlib.pyplot as plt
 import datetime as dt
 import os
+from main import MyDiscordBot  # pylint: disable=E0401
 
 
 class LeagueGraphs(commands.Cog):
-    def __init__(self, bot: commands.Bot):
+    def __init__(self, bot: MyDiscordBot):
         self.bot = bot
         self.bot.logging.info(f"{__name__} loaded")
 

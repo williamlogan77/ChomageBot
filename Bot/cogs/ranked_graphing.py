@@ -29,9 +29,10 @@ class LeagueGraphs(commands.Cog):
     ):
         async with sqa.connect(self.bot.db_path) as connection:
             summonerid = await connection.execute_fetchall(
-                "SELECT puuid FROM league_players WHERE league_username = ?",
+                "SELECT leagueId FROM league_players WHERE league_username = ?",
                 (league_name,),
             )
+            print(summonerid)
             if summonerid is None:
                 await ctx.response.send_message(
                     f"{league_name} does not exist in the database"
@@ -50,7 +51,7 @@ class LeagueGraphs(commands.Cog):
         async with sqa.connect(self.bot.db_path) as connection:
             # need to change date here for relevant split - figure out logic for it
             async with connection.execute(
-                "SELECT * FROM league_history WHERE timestamp > '2024-05-15' AND leagueId = ?", (summonerid[0][0],)
+                "SELECT * FROM league_history WHERE timestamp > '2024-05-15' AND puuid = ?", (summonerid[0][0],)
             ) as cursor:
                 x_to_plot = []
                 y_to_plot = []
@@ -62,7 +63,7 @@ class LeagueGraphs(commands.Cog):
                     y_to_plot.append(Ranker(*point[3:6][::-1])._score)
         async with sqa.connect(self.bot.db_path) as connection:
             user = await connection.execute_fetchall(
-                "SELECT league_username FROM league_players WHERE puuid = ?",
+                "SELECT league_username FROM league_players WHERE leagueId = ?",
                 (summonerid[0][0],),
             )
         plt.title(user[0][0])
@@ -121,7 +122,7 @@ class LeagueGraphs(commands.Cog):
         # plt._backend_mod.new_figure_manager_given_figure(1, fig)
         async with sqa.connect(self.bot.db_path) as connection:
             async with connection.execute(
-                "SELECT * FROM league_history WHERE timestamp > '2024-05-15' AND leagueId = ?", (summonerid[0][0],)
+                "SELECT * FROM league_history WHERE timestamp > '2024-05-15' AND puuid = ?", (summonerid[0][0],)
             ) as cursor:
                 score_dict = {}
                 async for point in cursor:

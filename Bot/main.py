@@ -9,22 +9,36 @@ from discord.ext.commands import Bot
 from dotenv import load_dotenv
 import logging
 from utils.db_utils import DButils
+import sys
 
 load_dotenv("../.env")
 
 
 class MyDiscordBot(Bot):
     def __init__(
-        self, command_prefix: str, intents: discord.Intents, db_path: str, serverid: int
+        self,
+        command_prefix: str,
+        intents: discord.Intents,
+        db_path: str,
+        serverid: int,
+
     ) -> None:
         super().__init__(command_prefix, intents=intents)
         self.dbutils = DButils(db_path=db_path)
         self.db_path = db_path
         self.guildid = serverid
         self.lolapi = pantheon.Pantheon("euw1", os.environ.get("riot_key"), debug=True)
-        self.logging = logging.getLogger()
+        self.logging: logging.Logger = None
 
-        self.logging.info("chommage is starting")
+
+
+    async def setup_hook(self) -> None:
+        discord.utils.setup_logging()
+        self.logging = logging.getLogger()
+        
+
+        for file in glob.glob("./cogs/*.py"):
+            await self.load_extension(f"cogs.{file.split('/')[-1][:-3]}")
 
     async def sync_discord(self) -> None:
         print("Syncing users")
@@ -65,8 +79,7 @@ class MyDiscordBot(Bot):
         return
 
 
-def setup_db() -> None:
-    my_logger = logging.getLogger()
+def setup_db(logger: logging.Logger) -> None:
 
     if not os.path.isfile("./db/database.sqlite"):
         MyDiscordBot.info("Setting up database")
@@ -78,15 +91,15 @@ def setup_db() -> None:
                 sql_code = f.read()
             cursor.executescript(sql_code)
     else:
-        my_logger.info("Database exists, setup done.")
+        logger.info("Database exists, setup done.")
 
 
-handler = logging.FileHandler(filename="discord.log", encoding="utf-8", mode="w")
-discord.utils.setup_logging()
+
 
 
 async def main(my_token: str) -> None:
-    setup_db()
+    # my_logger = logging.getLogger()
+    # setup_db(my_logger)
     dbpath = "./db/database.sqlite"
     bot = MyDiscordBot(
         command_prefix="!",
@@ -95,10 +108,7 @@ async def main(my_token: str) -> None:
         serverid=667751882260742164,
     )
     async with bot:
-        os.chdir("cogs")
-        for file in glob.glob("*.py"):
-            await bot.load_extension(f"cogs.{file[:-3]}")
-        os.chdir("../")
+
         await bot.start(my_token)
 
 

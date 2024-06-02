@@ -56,7 +56,7 @@ class LeagueUsers(commands.Cog):
     )
     @app_commands.describe(
         user="Clear all accounts associated with this user",
-        league_name="Specify account to remove",
+        league_name="Specify account to remove, seperated with a ;",
     )
     async def remove_from_db(
         self,
@@ -65,7 +65,7 @@ class LeagueUsers(commands.Cog):
         league_name: app_commands.Transform[str, DiscordAttachedLeagueNames] = "",
     ):
         if league_name != "":
-            names = league_name.split(" ")
+            names = league_name.split(";")
             async with sqa.connect(self.bot.db_path) as db:
                 for name in names:
                     await db.execute(

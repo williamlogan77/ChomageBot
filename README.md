@@ -22,3 +22,9 @@ The bot is fully encapsulated using docker and should be deployable to any envir
 * Add in persistent view for management of bot
 * Find new hosting environment (free EC2 instance almost up)
 * Implement local caching using a temp db/redis for calls to riot API
+
+# Notes
+
+If you have come across this repository, please feel free to rework/update features and suggest new implementations.
+
+

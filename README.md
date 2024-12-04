@@ -18,10 +18,13 @@ The bot is fully encapsulated using docker and should be deployable to any envir
 # To-do
 
 * Migrate from SQLite to PostGresSQL (WIP on a local branch)
+  * Use AWS RDS for persistent data store?
 * Implement front-end dashboard/control
 * Add in persistent view for management of bot
 * Find new hosting environment (free EC2 instance almost up)
 * Implement local caching using a temp db/redis for calls to riot API
+* Use AWS lambda + gatway API to modularise some of the code
+  * This would require AWS cdk to maintain
 
 # Notes
 

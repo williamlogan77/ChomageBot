@@ -28,7 +28,7 @@ class FetchFromRiot(commands.Cog):
         for user, name, user_id in users:
             while user not in looked_up_users:
                 try:
-                    user_rank = await self.bot.lolapi.get_league_position(user)
+                    user_rank = await self.bot.lolapi.getLeaguePosition(user)
                     looked_up_users.append(user)
                 except (RateLimit, Timeout) as limited:
                     if isinstance(limited, RateLimit):
@@ -138,7 +138,7 @@ class FetchFromRiot(commands.Cog):
             ) as cursor:
                 puuid, stored_name = cursor[0]
 
-            name = (await self.bot.lolapi.get_account_by_puuId(puuid))["gameName"]
+            name = (await self.bot.lolapi.getSummonerByAccountId(puuid))["gameName"]
 
             if name != stored_name:
                 self.bot.logging.info(f"updating {stored_name} to {name}")

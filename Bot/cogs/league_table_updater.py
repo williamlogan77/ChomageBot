@@ -6,6 +6,8 @@ from pantheon.utils.exceptions import RateLimit, Timeout, ServerError
 from discord import app_commands
 import asyncio
 import discord
+import aiohttp
+import os
 
 # Want to fetch ranks to post from the database
 # want to fetch from rito every 30s
@@ -25,20 +27,39 @@ class FetchFromRiot(commands.Cog):
     async def fetch_users_rank(self, users):
         users_ranks = {}
         looked_up_users = []
-        for user, name, user_id in users:
-            while user not in looked_up_users:
+        riot_api_key = os.environ.get("riot_key")
+        
+        for puuid, name, user_id in users:
+            user_rank = None
+            while puuid not in looked_up_users:
                 try:
-                    user_rank = await self.bot.lolapi.get_league_position(user)
-                    looked_up_users.append(user)
-                except (RateLimit, Timeout) as limited:
-                    if isinstance(limited, RateLimit):
-                        self.bot.logging.warning(
-                            f"Rate limited on {user, name}, waiting {limited.timeToWait} seconds"
-                        )
-                        await asyncio.sleep(int(limited.timeToWait))
-                    else:
-                        print("Timed out", flush=True)
-                        await asyncio.sleep(10)
+                    self.bot.logging.info(f"Fetching rank for: {name}")
+                    # Direct PUUID endpoint - much simpler!
+                    # Endpoint: GET /lol/league/v4/entries/by-puuid/{encryptedPUUID}
+                    # Note: League API uses platform routing (euw1), not regional routing (europe)
+                    league_url = f"https://euw1.api.riotgames.com/lol/league/v4/entries/by-puuid/{puuid}"
+                    headers = {"X-Riot-Token": riot_api_key}
+                    
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(league_url, headers=headers) as response:
+                            if response.status == 200:
+                                user_rank = await response.json()
+                                looked_up_users.append(puuid)
+                            elif response.status == 429:
+                                # Rate limited
+                                retry_after = int(response.headers.get('Retry-After', 10))
+                                self.bot.logging.warning(f"Rate limited, waiting {retry_after} seconds")
+                                await asyncio.sleep(retry_after)
+                            else:
+                                error_text = await response.text()
+                                raise Exception(f"HTTP {response.status}: {error_text}")
+                except Exception as e:
+                    self.bot.logging.error(f"Failed to fetch rank for {name}: {type(e).__name__} - {e}")
+                    looked_up_users.append(puuid)
+                    break
+            
+            if user_rank is None:
+                continue
 
             fivev5 = list(
                 filter(lambda x: x["queueType"] == "RANKED_SOLO_5x5", user_rank)
@@ -52,7 +73,7 @@ class FetchFromRiot(commands.Cog):
                 )
                 fivev5["GamesPlayed"] = fivev5["wins"] + fivev5["losses"]
                 fivev5["WinRate"] = (fivev5["wins"] / fivev5["GamesPlayed"]) * 100
-                fivev5["summonerName"] = await self.get_name(user)
+                fivev5["summonerName"] = await self.get_name(puuid)
 
                 users_ranks[fivev5["summonerName"]] = fivev5
                 if fivev5["GamesPlayed"] < self.min_games_played:
@@ -103,7 +124,7 @@ class FetchFromRiot(commands.Cog):
         # await self.fetch_ranks_from_db()
         async with sqa.connect(self.bot.db_path) as connection:
             async with connection.execute_fetchall(
-                """SELECT leagueId,
+                """SELECT puuid,
                         IIF(nickname = '', discord_tag, nickname),
                         discord_user_id
                     FROM (
@@ -122,20 +143,25 @@ class FetchFromRiot(commands.Cog):
                     await asyncio.sleep(60)
         return
 
-    async def get_name(self, leagueId):
+    async def get_name(self, puuid):
         async with sqa.connect(self.bot.db_path) as connection:
             async with connection.execute_fetchall(
-                "SELECT league_username FROM league_players WHERE leagueId = ?",
-                (leagueId,),
+                "SELECT league_username FROM league_players WHERE puuid = ?",
+                (puuid,),
             ) as cursor:
-                return cursor[0][0]
+                if cursor and len(cursor) > 0:
+                    return cursor[0][0]
+                else:
+                    return "Unknown"
 
     async def check_name(self, puuid):
         async with sqa.connect(self.bot.db_path) as connection:
             async with connection.execute_fetchall(
-                "SELECT puuid, league_username FROM league_players WHERE leagueId = ?",
+                "SELECT puuid, league_username FROM league_players WHERE puuid = ?",
                 (puuid,),
             ) as cursor:
+                if not cursor or len(cursor) == 0:
+                    return
                 puuid, stored_name = cursor[0]
 
             name = (await self.bot.lolapi.get_account_by_puuId(puuid))["gameName"]
@@ -159,7 +185,7 @@ class FetchFromRiot(commands.Cog):
 
         if (self.ranked_dict != self.previous_ranks) or (not self.previous_ranks):
             for user in self.ranked_dict.keys():
-                await self.check_name(self.ranked_dict[user]["summonerId"])
+                await self.check_name(self.ranked_dict[user]["puuid"])
 
                 if self.previous_ranks and user in self.previous_ranks.keys():
                     if (
@@ -232,8 +258,11 @@ class FetchFromRiot(commands.Cog):
                 output_list.append(post)
 
             paste = self.bot.get_channel(919981835428179988)
-            async for message in paste.history():
-                await message.delete()
+            try:
+                async for message in paste.history():
+                    await message.delete()
+            except discord.errors.Forbidden:
+                self.bot.logging.warning("Missing permissions to delete messages, skipping cleanup")
 
             if len(output_list) != 0:
                 to_send = "\n".join(output_list)
@@ -306,7 +335,7 @@ class FetchFromRiot(commands.Cog):
                 self.bot.logging.info(f"updating table, logging {user_stats_dict}")
                 last_values = await connection.execute_fetchall(
                     "SELECT * FROM league_history WHERE puuid = ? ORDER BY id DESC",
-                    (user_stats_dict["summonerId"],),
+                    (user_stats_dict["puuid"],),
                 )
             except Exception as e:
                 self.bot.logging.error(f"Failed to update table with error: {e}")
@@ -324,7 +353,7 @@ class FetchFromRiot(commands.Cog):
             await connection.execute(
                 "INSERT INTO league_history (puuid, lp, division, tier, wins, losses) VALUES (?, ?, ?, ?, ?, ?)",
                 (
-                    user_stats_dict["summonerId"],
+                    user_stats_dict["puuid"],
                     str(user_stats_dict["leaguePoints"]),
                     user_stats_dict["rank"],
                     user_stats_dict["tier"],

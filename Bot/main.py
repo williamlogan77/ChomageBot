@@ -11,7 +11,9 @@ import logging
 from utils.db_utils import DButils
 import sys
 
-load_dotenv("../.env")
+# Load .env from parent directory relative to this file's location
+env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".env")
+load_dotenv(env_path)
 
 
 class MyDiscordBot(Bot):
@@ -27,7 +29,16 @@ class MyDiscordBot(Bot):
         self.dbutils = DButils(db_path=db_path)
         self.db_path = db_path
         self.guildid = serverid
-        self.lolapi = pantheon.Pantheon("euw1", os.environ.get("riot_key"), debug=True)
+        
+        riot_key = os.environ.get("riot_key")
+        # Log API key info (first/last few chars only for security)
+        if riot_key:
+            key_preview = f"{riot_key[:10]}...{riot_key[-4:]}" if len(riot_key) > 14 else "***"
+            print(f"Riot API Key loaded: {key_preview}")
+        else:
+            print("WARNING: Riot API Key not found in environment variables!")
+        
+        self.lolapi = pantheon.Pantheon("euw1", riot_key, debug=True)
         self.logging: logging.Logger = None
 
 
@@ -38,7 +49,9 @@ class MyDiscordBot(Bot):
         
 
         for file in glob.glob("./cogs/*.py"):
-            await self.load_extension(f"cogs.{file.split('/')[-1][:-3]}")
+            # Use os.path for cross-platform compatibility
+            cog_name = os.path.basename(file)[:-3]
+            await self.load_extension(f"cogs.{cog_name}")
 
     async def sync_discord(self) -> None:
         print("Syncing users")
@@ -101,11 +114,15 @@ async def main(my_token: str) -> None:
     # my_logger = logging.getLogger()
     # setup_db(my_logger)
     dbpath = "./db/database.sqlite"
+    server_id = int(os.environ.get("guild_id", "0"))
+    if server_id == 0:
+        raise ValueError("guild_id environment variable must be set in .env file")
+    
     bot = MyDiscordBot(
         command_prefix="!",
         intents=discord.Intents.all(),
         db_path=dbpath,
-        serverid=667751882260742164,
+        serverid=server_id,
     )
     async with bot:
 

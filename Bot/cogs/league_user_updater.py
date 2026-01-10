@@ -25,27 +25,25 @@ class LeagueUsers(commands.Cog):
         tagline: str,
         user: discord.User,
     ):
+        # Get PUUID from Account API - this is all we need now
         puuid = (await self.bot.lolapi.get_account_by_riotId(league_name, tagline))[
             "puuid"
         ]
-
-        summonerid = (await self.bot.lolapi.get_summoner_by_puuId(puuid))["id"]
 
         async with sqa.connect(self.bot.db_path) as db:  # type: ignore
             await db.execute(
                 """REPLACE INTO league_players (
                         discord_user_id,
                         puuid,
-                        leagueId,
                         league_username,
                         tag
                     )
-                    VALUES (?, ?, ?, ?, ?)""",
-                (user.id, puuid, summonerid, league_name, tagline),
+                    VALUES (?, ?, ?, ?)""",
+                (user.id, puuid, league_name, tagline),
             )
             await db.commit()
         self.bot.logging.info(
-            f"put {user.id, user.name, puuid, summonerid, league_name, tagline} into db for {ctx.user}"
+            f"put {user.id, user.name, puuid, league_name, tagline} into db for {ctx.user}"
         )
         await ctx.response.send_message(f"Added {league_name} into the db")
         return

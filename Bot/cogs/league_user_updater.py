@@ -34,12 +34,13 @@ class LeagueUsers(commands.Cog):
             await db.execute(
                 """REPLACE INTO league_players (
                         discord_user_id,
+                        leagueId,
                         puuid,
                         league_username,
                         tag
                     )
-                    VALUES (?, ?, ?, ?)""",
-                (user.id, puuid, league_name, tagline),
+                    VALUES (?, ?, ?, ?, ?)""",
+                (user.id, puuid, puuid, league_name, tagline),
             )
             await db.commit()
         self.bot.logging.info(

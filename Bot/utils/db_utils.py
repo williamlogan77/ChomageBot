@@ -2,10 +2,36 @@ import re
 from typing import Iterable
 import aiosqlite as sqa
 
+###============================================================================
 
 class DButils:
     def __init__(self, db_path):
         self.db_path = db_path
+
+    async def add_members_to_db(members_iterator) -> None:
+        async with sqa.connect(self.db_path) as db:
+            async for member in members_iterator:
+                nickname = member.nick if member.nick is not None else ""
+                await db.execute(
+                    "REPLACE INTO users (user_id, nickname, discord_tag) VALUES (?, ?, ?)",
+                    (member.id, nickname, member.name),
+                )
+            await db.commit()   # Commit to db after loop
+        return
+
+    async def add_channels_to_db(channels) -> None:
+        async with sqa.connect(self.db_path) as db:
+            for channel in channels:
+                if isinstance(channel, CategoryChannel):
+                    continue    # Ignore CategoryChannels
+                await db.execute(
+                    "REPLACE INTO discord_channels (channel_id, name, type) VALUES (?, ?, ?)",
+                    (channel.id, channel.name, channel.type),
+                )
+            await db.commit()
+        return
+
+
 
     async def get_id_from_username(self, name) -> str:
         async with sqa.connect(self.db_path) as connection:

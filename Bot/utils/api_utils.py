@@ -69,7 +69,7 @@ class APIutils:
         return await self.fetch(self.BASE_URL_RIOT + endpoint)
 
 
-    async def get_account_by_riotId(self, league_name, tag_Line):
+    async def get_account_by_riotid(self, league_name, tag_Line):
         # GET /riot/account/v1/accounts/by-riot-id/{gameName}/{tagLine}
         # Returns the result of https://developer.riotgames.com/apis#account-v1/GET_getByRiotId
         endpoint = f"/account/v1/accounts/by-riot-id/{league_name}/{tag_Line}"

@@ -13,6 +13,11 @@ class APIutils:
     def __init__(self, riot_api_key):
         self.headers = {"X-Riot-Token": riot_api_key}
 
+    BASE_URL = "https://euw1.api.riotgames.com/"
+    BASE_URL_LOL = BASE_URL + "lol/"
+    BASE_URL_RIOT = BASE_URL + "riot/"
+
+
 ###============================================================================
 
     # Retry function, taken directly from aiohttp docs
@@ -51,13 +56,21 @@ class APIutils:
 
     async def get_league_v4_entries(self, puuid: str)
         # GET /lol/league/v4/entries/by-puuid
-        # Direct PUUID endpoint - much simpler!
         # Endpoint: GET /lol/league/v4/entries/by-puuid/{encryptedPUUID}
         # Note: League API uses platform routing (euw1), not regional routing (europe)
-        league_v4_url = f"https://euw1.api.riotgames.com/lol/league/v4/entries/by-puuid/{puuid}"
+        endpoint = f"league/v4/entries/by-puuid/{puuid}"
+        return await self.fetch(self.BASE_URL_LOL + endpoint)
 
 
+    async def get_account_by_puuid(self, puuid: str):
+        # GET /riot/account/v1/accounts/by-puuid/{puuid}
+        # Returns the result of https://developer.riotgames.com/apis#account-v1/GET_getByPuuid
+        endpoint = f"account/v1/accounts/by-puuid/{puuid}"
+        return await self.fetch(self.BASE_URL_RIOT + endpoint)
 
 
-
-
+    async def get_account_by_riotId(self, league_name, tag_Line):
+        # GET /riot/account/v1/accounts/by-riot-id/{gameName}/{tagLine}
+        # Returns the result of https://developer.riotgames.com/apis#account-v1/GET_getByRiotId
+        endpoint = f"/account/v1/accounts/by-riot-id/{league_name}/{tag_Line}"
+        return await self.fetch(self.BASE_URL_RIOT + endpoint)

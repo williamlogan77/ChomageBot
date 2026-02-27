@@ -26,7 +26,7 @@ class LeagueUsers(commands.Cog):
         user: discord.User,
     ):
         # Get PUUID from Account API - this is all we need now
-        puuid = (await self.bot.lolapi.get_account_by_riotId(league_name, tagline))[
+        puuid = (await self.bot.apiutils.get_account_by_riotid(league_name, tagline))[
             "puuid"
         ]
 

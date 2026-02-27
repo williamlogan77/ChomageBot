@@ -12,16 +12,16 @@ class MyDiscordBot(Bot):
         serverid: int,
     ) -> None:
         super().__init__(command_prefix, intents=intents)
-        self.dbutils = DButils()
         self.serverid = serverid
-        
-        riot_key = os.environ.get("riot_key")
+        self.riot_key = os.environ.get("riot_key")
         if riot_key:
             log.info(f"Riot API Key loaded")
         else:
             log.warn("WARNING: Riot API Key not found in environment variables!")
-        # Is this the right place for this check?
+        self.apiutils = APIutils(riot_key)
+        self.dbutils = DButils()
 
+###============================================================================
 
     async def setup_hook(self) -> None:
         discord.utils.setup_logging(root=True)

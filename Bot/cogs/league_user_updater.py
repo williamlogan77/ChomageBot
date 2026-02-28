@@ -15,20 +15,22 @@ class LeagueUsers(commands.Cog):
     @app_commands.command(name="add_player", description="Add user to the table")
     @app_commands.describe(
         league_name="The league name",
-        tagline="The bit after # (don't include this)",
+        tag_line="The bit after # (don't include this)",
         user="The discord account attached",
     )
     async def add_to_db(
         self,
         ctx: discord.Interaction,
         league_name: str,
-        tagline: str,
+        tag_line: str,
         user: discord.User,
     ):
         # Get PUUID from Account API - this is all we need now
-        puuid = (await self.bot.apiutils.get_account_by_riotid(league_name, tagline))[
-            "puuid"
-        ]
+        try:
+            response = await self.bot.apiutils.get_account_by_riotid(league_name, tag_line)
+            puuid = response["puuid"]
+        except Exception as e:
+            log.error(f"Failed to fetch rank for {name}: {type(e).__name__} - {e}")
 
         async with sqa.connect(self.bot.db_path) as db:  # type: ignore
             await db.execute(
@@ -40,11 +42,11 @@ class LeagueUsers(commands.Cog):
                         tag
                     )
                     VALUES (?, ?, ?, ?, ?)""",
-                (user.id, puuid, puuid, league_name, tagline),
+                (user.id, puuid, puuid, league_name, tag_line),
             )
             await db.commit()
         self.bot.logging.info(
-            f"put {user.id, user.name, puuid, league_name, tagline} into db for {ctx.user}"
+            f"put {user.id, user.name, puuid, league_name, tag_line} into db for {ctx.user}"
         )
         await ctx.response.send_message(f"Added {league_name} into the db")
         return

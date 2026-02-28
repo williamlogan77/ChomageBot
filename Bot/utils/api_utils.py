@@ -30,7 +30,7 @@ class APIutils:
         for _ in range(3):  # Try up to 3 times
             response = await handler(request)
             log.info(f"{response.status}, {response.headers}")
-            if response.ok: # respones is 200 (400 or below)
+            if response.ok: # response is 200 (400 or below)
                 return response
             elif response.status == 429:
                 # Rate limited
@@ -45,16 +45,13 @@ class APIutils:
 
     async def fetch(self, url):
         log.info(f"Making request: {url}")
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=headers, middlewares=retry_middleware) as response:
-            return respones.json()
-        except Exception as e:
-            break
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, middlewares=retry_middleware) as response:
+        return response.json()
 
 ###============================================================================
 
-    async def get_league_v4_entries(self, puuid: str)
+    async def get_league_queues_entries(self, puuid: str)
         # GET /lol/league/v4/entries/by-puuid
         # Endpoint: GET /lol/league/v4/entries/by-puuid/{encryptedPUUID}
         # Note: League API uses platform routing (euw1), not regional routing (europe)
@@ -72,5 +69,5 @@ class APIutils:
     async def get_account_by_riotid(self, league_name, tag_Line):
         # GET /riot/account/v1/accounts/by-riot-id/{gameName}/{tagLine}
         # Returns the result of https://developer.riotgames.com/apis#account-v1/GET_getByRiotId
-        endpoint = f"/account/v1/accounts/by-riot-id/{league_name}/{tag_Line}"
+        endpoint = f"account/v1/accounts/by-riot-id/{league_name}/{tag_Line}"
         return await self.fetch(self.BASE_URL_RIOT + endpoint)

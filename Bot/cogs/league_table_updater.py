@@ -28,42 +28,18 @@ class FetchFromRiot(commands.Cog):
     async def fetch_users_rank(self, users):
         users_ranks = {}
         looked_up_users = []
-        riot_api_key = os.environ.get("riot_key")
         
         for puuid, name, user_id in users:
-            user_rank = None
-            while puuid not in looked_up_users:
-                try:
-                    self.bot.logging.info(f"Fetching rank for: {name}")
-                    # Direct PUUID endpoint - much simpler!
-                    # Endpoint: GET /lol/league/v4/entries/by-puuid/{encryptedPUUID}
-                    # Note: League API uses platform routing (euw1), not regional routing (europe)
-                    league_url = f"https://euw1.api.riotgames.com/lol/league/v4/entries/by-puuid/{puuid}"
-                    headers = {"X-Riot-Token": riot_api_key}
-                    
-                    async with aiohttp.ClientSession() as session:
-                        async with session.get(league_url, headers=headers) as response:
-                            if response.status == 200:
-                                user_rank = await response.json()
-                                looked_up_users.append(puuid)
-                            elif response.status == 429:
-                                # Rate limited
-                                retry_after = int(response.headers.get('Retry-After', 10))
-                                self.bot.logging.warning(f"Rate limited, waiting {retry_after} seconds")
-                                await asyncio.sleep(retry_after)
-                            else:
-                                error_text = await response.text()
-                                raise Exception(f"HTTP {response.status}: {error_text}")
-                except Exception as e:
-                    self.bot.logging.error(f"Failed to fetch rank for {name}: {type(e).__name__} - {e}")
-                    looked_up_users.append(puuid)
-                    break
-            
-            if user_rank is None:
+            try:
+                response = await self.bot.apiutils.get_league_queues_entries(puuid)
+            except Exception as e:
+                log.error(f"Failed to fetch rank for {name}: {type(e).__name__} - {e}")
+                break
+            if response is None:
                 continue
 
             fivev5 = list(
-                filter(lambda x: x["queueType"] == "RANKED_SOLO_5x5", user_rank)
+                filter(lambda x: x["queueType"] == "RANKED_SOLO_5x5", response)
             )
             if len(fivev5) > 0:
                 fivev5 = fivev5[0]
@@ -166,7 +142,11 @@ class FetchFromRiot(commands.Cog):
                     return
                 puuid, stored_name = cursor[0]
 
-            name = (await self.bot.apiutils.get_account_by_puuid(puuid))["gameName"]
+            try:
+                response = await self.bot.apiutils.get_account_by_puuid(puuid)
+            except Exception as e:
+                log.error(f"Failed to fetch rank for {name}: {type(e).__name__} - {e}")
+            name = response["gameName"]
 
             if name != stored_name:
                 self.bot.logging.info(f"updating {stored_name} to {name}")

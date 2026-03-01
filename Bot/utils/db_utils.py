@@ -2,48 +2,57 @@ import re
 from typing import Iterable
 import aiosqlite as sqa
 
+from typing import Any, Iterable
+
+from discord import CategoryChannel
 ###============================================================================
 
 class DButils:
     def __init__(self):
         self.db_path ="./db/database.sqlite"
 
-    async def add_members_to_db(members_iterator) -> None:
+    EXECUTE = "execute"
+    EXECUTE_MANY = "executemany"
+    EXECUTE_FETCH = "execute_fetchall"
+
+    async def execute_query(self, method_name, statement: str, params: Iterable[Any]):
         async with sqa.connect(self.db_path) as db:
-            async for member in members_iterator:
-                nickname = member.nick if member.nick is not None else ""
-                await db.execute(
-                    "REPLACE INTO users (user_id, nickname, discord_tag) VALUES (?, ?, ?)",
-                    (member.id, nickname, member.name),
-                )
-            await db.commit()   # Commit to db after loop
-        return
+            query_func = getattr(db, method_name)
+            result = await query_func(statement, params)
+            if db.in_transaction:
+                await db.commit()
+            return result   # This will only return on a fetch all
+
+###============================================================================
+
+    async def add_members_to_db(members) -> None:
+        statement = "REPLACE INTO users (user_id, nickname, discord_tag) VALUES (?, ?, ?)"
+        member_data = [
+            (member.id, member.display_name, member.name)
+            for member in members
+        ]
+        execute_query(EXECUTE_MANY, statement, member_data)
+
 
     async def add_channels_to_db(channels) -> None:
         async with sqa.connect(self.db_path) as db:
-            for channel in channels:
-                if isinstance(channel, CategoryChannel):
-                    continue    # Ignore CategoryChannels
-                await db.execute(
-                    "REPLACE INTO discord_channels (channel_id, name, type) VALUES (?, ?, ?)",
-                    (channel.id, channel.name, channel.type),
-                )
-            await db.commit()
-        return
+        statement = "REPLACE INTO discord_channels (channel_id, name, type) VALUES (?, ?, ?)"
+        channel_data = [
+            (channel.id, channel.name, channel.type)
+            for channel in channels if isinstance(channel, CategoryChannel):
+        ]
+        execute_query(EXECUTE_MANY, statement, channel_data)
+
 
     async def get_id_from_username(self, name) -> str:
-        async with sqa.connect(self.db_path) as connection:
-            puuid = await connection.execute_fetchall(
-                "SELECT puuid FROM league_players WHERE league_username = ?", (name,)
-            )
-        return puuid[0][0]
+        statement = "SELECT puuid FROM league_players WHERE league_username = ?"
+        return execute_query(EXECUTE_FETCH, statement, name)[0][0]
+
 
     async def get_username_from_id(self, puuid) -> str:
-        async with sqa.connect(self.db_path) as connection:
-            name = await connection.execute_fetchall(
-                "SELECT league_username FROM league_players WHERE puuid = ?", (puuid)
-            )
-        return name[0][0]
+        statement = "SELECT league_username FROM league_players WHERE puuid = ?"
+        return execute_query(EXECUTE_FETCH, statement, puuid)[0][0]
+
 
     async def get_recent(self, player, number) -> Iterable[tuple]:
         if player == "":

@@ -34,16 +34,14 @@ class MyDiscordBot(Bot):
 
     async def sync_discord(self) -> None:
         log.info("Syncing users")
-        guild = await self.fetch_guild(self.serverid)
-        members_iterator = guild.fetch_members()    # Returns an async iterator
-        dbutils.add_members_to_db(members_iterator)
-        log.info("Syncing channels")
-        channels = await guild.fetch_channels() # Returns an list
-        dbutils.add_channels_to_db(channels)
+        guild = bot.get_guild(self.serverid)
+        # We wait for on ready then we can get the guild without an API call
+        dbutils.add_members_to_db(guild.memebers)
+        log.info("Syncing channels")        
+        dbutils.add_channels_to_db(guild.channels)
         return
 
-    async def on_connect(self) -> None:
-        await self.wait_until_ready()
+    async def on_ready(self) -> None:
         log.info("Connected to discord, syncing users and channels")
         await self.sync_discord()
         log.info("Bot is ready")

@@ -17,7 +17,6 @@ class APIutils:
     BASE_URL_LOL = BASE_URL + "lol/"
     BASE_URL_RIOT = BASE_URL + "riot/"
 
-
 ###============================================================================
 
     # Retry function, taken directly from aiohttp docs

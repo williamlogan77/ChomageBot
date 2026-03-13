@@ -30,7 +30,7 @@ class LeagueUsers(commands.Cog):
     ):
         # Get PUUID from Account API - this is all we need now
         try:
-            response = await self.bot.apiutils.get_account_by_riotid(league_name, tag_line)
+            response = await self.bot.api_utils.get_account_by_riotid(league_name, tag_line)
             puuid = response["puuid"]
             async with sqa.connect(self.bot.db_path) as db:  # type: ignore
                 await db.execute(

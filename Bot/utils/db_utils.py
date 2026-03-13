@@ -8,8 +8,8 @@ from discord import CategoryChannel
 ###============================================================================
 
 class DButils:
-    def __init__(self):
-        self.db_path ="./db/database.sqlite"
+    def __init__(self, db_path):
+        self.db_path = db_path
 
     EXECUTE = "execute"
     EXECUTE_MANY = "executemany"
@@ -25,33 +25,32 @@ class DButils:
 
 ###============================================================================
 
-    async def add_members_to_db(members) -> None:
+    async def add_members_to_db(self, members) -> None:
         statement = "REPLACE INTO users (user_id, nickname, discord_tag) VALUES (?, ?, ?)"
         member_data = [
             (member.id, member.display_name, member.name)
             for member in members
         ]
-        execute_query(EXECUTE_MANY, statement, member_data)
+        await self.execute_query(self.EXECUTE_MANY, statement, member_data)
 
 
-    async def add_channels_to_db(channels) -> None:
-        async with sqa.connect(self.db_path) as db:
+    async def add_channels_to_db(self, channels) -> None:
         statement = "REPLACE INTO discord_channels (channel_id, name, type) VALUES (?, ?, ?)"
         channel_data = [
             (channel.id, channel.name, channel.type)
-            for channel in channels if isinstance(channel, CategoryChannel):
+            for channel in channels if isinstance(channel, CategoryChannel)
         ]
-        execute_query(EXECUTE_MANY, statement, channel_data)
+        await self.execute_query(self.EXECUTE_MANY, statement, channel_data)
 
 
     async def get_id_from_username(self, name) -> str:
         statement = "SELECT puuid FROM league_players WHERE league_username = ?"
-        return execute_query(EXECUTE_FETCH, statement, name)[0][0]
+        return await self.execute_query(self.EXECUTE_FETCH, statement, name)[0][0]
 
 
     async def get_username_from_id(self, puuid) -> str:
         statement = "SELECT league_username FROM league_players WHERE puuid = ?"
-        return execute_query(EXECUTE_FETCH, statement, puuid)[0][0]
+        return await self.execute_query(self.EXECUTE_FETCH, statement, puuid)[0][0]
 
 
     async def get_recent(self, player, number) -> Iterable[tuple]:

@@ -21,6 +21,7 @@ create table if not exists league_players (
     discord_user_id INTEGER not null,
     puuid TEXT not null primary key,
     league_username TEXT not null
+    tag TEXT not null
 );
 create table if not exists league_history (
     id INTEGER not null primary key autoincrement,

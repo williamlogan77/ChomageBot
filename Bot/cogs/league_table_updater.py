@@ -96,7 +96,7 @@ class FetchFromRiot(commands.Cog):
 
     # @tasks.loop(seconds=30)
     async def fetch_ranks_from_riot(self):
-        # self.bot.logging.info("fetching ranks")
+        # log.info("fetching ranks")
         # fetch from db
         # await self.fetch_ranks_from_db()
         async with sqa.connect(self.bot.db_path) as connection:
@@ -115,7 +115,7 @@ class FetchFromRiot(commands.Cog):
                     self.ranked_dict = await self.fetch_users_rank(cursor)
                 except ServerError as exc:
                     #CHANGE
-                    self.bot.logging.error(
+                    log.error(
                         f"Error of: {exc}, trying again in 60 seconds"
                     )
                     await asyncio.sleep(60)
@@ -149,7 +149,7 @@ class FetchFromRiot(commands.Cog):
             name = response["gameName"]
 
             if name != stored_name:
-                self.bot.logging.info(f"updating {stored_name} to {name}")
+                log.info(f"updating {stored_name} to {name}")
                 await connection.execute(
                     "UPDATE league_players SET league_username = ? WHERE puuid = ?",
                     (name, puuid),
@@ -177,7 +177,7 @@ class FetchFromRiot(commands.Cog):
                         print(f"{user} updated", flush=True)
                         await self.update_table(user, self.ranked_dict[user])
 
-            self.bot.logging.info("Posting ranks")
+            log.info("Posting ranks")
             self.previous_ranks = self.ranked_dict
             to_post = filter(
                 lambda x: type(x) == type({}),
@@ -239,12 +239,13 @@ class FetchFromRiot(commands.Cog):
                     )
                 output_list.append(post)
 
-            paste = self.bot.get_channel(919981835428179988)
+            paste = self.bot.get_channel(919981835428179988)    #wow this is dodgy
+            #Really we need a coomand to add a changle to the bot whhich it prints too. Maybe a defautlt value tooo?
             try:
                 async for message in paste.history():
                     await message.delete()
             except discord.errors.Forbidden:
-                self.bot.logging.warning("Missing permissions to delete messages, skipping cleanup")
+                log.warning("Missing permissions to delete messages, skipping cleanup")
 
             if len(output_list) != 0:
                 to_send = "\n".join(output_list)
@@ -263,7 +264,7 @@ class FetchFromRiot(commands.Cog):
         await ctx.response.defer()
         if not isinstance(number, int) or number > 200:
             await ctx.followup.send("please enter a reasonable number....", ephemeral=True)
-        self.bot.logging.info(
+        log.info(
             f"Updating minimum number of games played from {self.min_games_played} to {number}"
         )
 
@@ -294,7 +295,7 @@ class FetchFromRiot(commands.Cog):
         await asyncio.sleep(30)
         self.post_ranks.cancel()  # pylint: disable=E1101
         await msg.edit(content="Stopped refreshing of ranks")
-        self.bot.logging.info("Stopped the refreshing of ranks posting")
+        log.info("Stopped the refreshing of ranks posting")
 
     @app_commands.command(
         name="start_rank_refresh",
@@ -308,19 +309,19 @@ class FetchFromRiot(commands.Cog):
         else:
             self.post_ranks.start()  # pylint: disable=E1101
             await msg.edit(content="Started refreshing of ranks")
-            self.bot.logging.info("Started rank refresh")
+            log.info("Started rank refresh")
 
     # Needs updating to grab last match from the table
     async def update_table(self, user, user_stats_dict):
         async with sqa.connect(database=self.bot.db_path) as connection:
             try:
-                self.bot.logging.info(f"updating table, logging {user_stats_dict}")
+                log.info(f"updating table, logging {user_stats_dict}")
                 last_values = await connection.execute_fetchall(
                     "SELECT * FROM league_history WHERE puuid = ? ORDER BY id DESC",
                     (user_stats_dict["puuid"],),
                 )
             except Exception as e:
-                self.bot.logging.error(f"Failed to update table with error: {e}")
+                log.error(f"Failed to update table with error: {e}")
                 return
         try:
             if last_values[0][-2:] == (
@@ -329,7 +330,7 @@ class FetchFromRiot(commands.Cog):
             ):
                 return
         except Exception as e:
-            self.bot.logging.info(f"Exception as {e}")
+            log.info(f"Exception as {e}")
 
         async with sqa.connect(self.bot.db_path) as connection:
             await connection.execute(

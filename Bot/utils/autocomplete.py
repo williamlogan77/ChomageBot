@@ -1,8 +1,11 @@
 from typing import Any
 import discord
 from discord import app_commands
-import aiosqlite as sqa
+import logging
 
+log = logging.getLogger(__name__)
+
+###============================================================================
 
 class DiscordAttachedLeagueNames(app_commands.Transformer):
     # This class contains discord.Interaction.
@@ -12,12 +15,10 @@ class DiscordAttachedLeagueNames(app_commands.Transformer):
         return value
 
     async def autocomplete(self, interaction: discord.Interaction, value):
-        async with sqa.connect(interaction.client.db_path) as db:
-            db.row_factory = lambda cursor, row: row[0]
-            attached_accounts = await db.execute_fetchall(
-                "SELECT league_username FROM league_players WHERE discord_user_id = ?",
-                (interaction.namespace.user.id, ))
+        log.info(f"Autocompleting for {interaction.namespace.user.id}")
+        league_names = await interaction.client.db_utils.get_username_from_discord_id(
+            interaction.namespace.user.id)
         return [
             app_commands.Choice(name=league_name, value=league_name)
-            for league_name in attached_accounts
+            for league_name in league_names
         ]

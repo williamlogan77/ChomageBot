@@ -22,7 +22,7 @@ class FetchFromRiot(commands.Cog):
         # self.fetch_ranks_from_riot.start() # pylint: disable=E1101
         self.previous_ranks = {}
         self.min_games_played = 0
-        self.channel_id = ""    # make the channelid/name configurable
+
         self.ranked_dict: dict = None # type: ignore
 
     async def fetch_users_rank(self, users):
@@ -31,7 +31,7 @@ class FetchFromRiot(commands.Cog):
         
         for puuid, name, user_id in users:
             try:
-                response = await self.bot.api_utils.get_league_queues_entries(puuid)
+                response = await self.bot.apiutils.get_league_queues_entries(puuid)
             except Exception as e:
                 log.error(f"Failed to fetch rank for {name}: {type(e).__name__} - {e}")
                 break
@@ -143,7 +143,7 @@ class FetchFromRiot(commands.Cog):
                 puuid, stored_name = cursor[0]
 
             try:
-                response = await self.bot.api_utils.get_account_by_puuid(puuid)
+                response = await self.bot.apiutils.get_account_by_puuid(puuid)
             except Exception as e:
                 log.error(f"Failed to fetch rank for {name}: {type(e).__name__} - {e}")
             name = response["gameName"]
@@ -164,12 +164,6 @@ class FetchFromRiot(commands.Cog):
         # if len(self.previous_ranks) == 0:
         #     self.previous_ranks = self.ranked_dict
         #     return
-
-        #channel = self.bot.get_channel(919981835428179988)
-        # This should probably be configurable via slash command
-        if not self.channel_id:
-            self.channel_id = await self.bot.db_utils.get_channel_from_name("league-ranking")
-        channel = self.bot.get_channel(self.channel_id)
 
         if (self.ranked_dict != self.previous_ranks) or (not self.previous_ranks):
             for user in self.ranked_dict.keys():
@@ -245,15 +239,17 @@ class FetchFromRiot(commands.Cog):
                     )
                 output_list.append(post)
 
+            paste = self.bot.get_channel(919981835428179988)    #wow this is dodgy
+            #Really we need a coomand to add a changle to the bot whhich it prints too. Maybe a defautlt value tooo?
             try:
-                async for message in channel.history():
+                async for message in paste.history():
                     await message.delete()
             except discord.errors.Forbidden:
                 log.warning("Missing permissions to delete messages, skipping cleanup")
 
             if len(output_list) != 0:
                 to_send = "\n".join(output_list)
-                await channel.send(to_send, silent=True)
+                await paste.send(to_send, silent=True)
 
         return
 

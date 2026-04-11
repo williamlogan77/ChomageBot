@@ -29,8 +29,8 @@ class MyDiscordBot(Bot):
             log.info(f"Riot API Key loaded")
         else:
             log.warn("WARNING: Riot API Key not found in environment variables!")
-        self.api_utils = APIutils(self.riot_key)
-        self.db_utils = DButils("./db/databasecopy.sqlite")
+        self.apiutils = APIutils(self.riot_key)
+        self.dbutils = DButils("./db/databasecopy.sqlite")
         self.db_path ="./db/databasecopy.sqlite"       #Env var pls
 
 ###============================================================================
@@ -49,9 +49,9 @@ class MyDiscordBot(Bot):
         log.info("Syncing users")
         guild = self.get_guild(self.serverid)
         # We wait for on ready then we can get the guild without an API call
-        await self.db_utils.add_members_to_db(guild.members)
+        await self.dbutils.add_members_to_db(guild.members)
         log.info("Syncing channels")
-        await self.db_utils.add_channels_to_db(guild.channels)
+        await self.dbutils.add_channels_to_db(guild.channels)
         return
 
     async def on_ready(self) -> None:

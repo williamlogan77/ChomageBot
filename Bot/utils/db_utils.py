@@ -40,16 +40,24 @@ class DButils:
         await self.execute_query(self.EXECUTE_MANY, statement, member_data)
 
 
+    async def add_channels_to_db(self, channels) -> None:
+        statement = "REPLACE INTO discord_channels (channel_id, name, type) VALUES (?, ?, ?)"
+        channel_data = [
+            (int(channel.id), str(channel.name), str(channel.type))
+            for channel in channels if not isinstance(channel, CategoryChannel)
+        ]
+        await self.execute_query(self.EXECUTE_MANY, statement, channel_data)
+
+
     async def get_id_from_username(self, name) -> str:
         statement = "SELECT puuid FROM league_players WHERE league_username = ?"
-        result = await self.execute_query(self.EXECUTE_FETCH, statement, name)
-        return result[0][0]
+        return await self.execute_query(self.EXECUTE_FETCH, statement, name)[0][0]
 
 
     async def get_username_from_id(self, puuid) -> str:
         statement = "SELECT league_username FROM league_players WHERE puuid = ?"
-        result = await self.execute_query(self.EXECUTE_FETCH, statement, puuid)
-        return result[0][0]
+        return await self.execute_query(self.EXECUTE_FETCH, statement, puuid)[0][0]
+
 
     async def get_recent(self, player, number) -> Iterable[tuple]:
         if player == "":
@@ -65,19 +73,3 @@ class DButils:
         async with sqa.connect(self.bot.db_path) as connection:
             recent_matches = await connection.execute_fetchall(*sql)
         return recent_matches
-
-###============================================================================
-
-    async def add_channels_to_db(self, channels) -> None:
-        statement = "REPLACE INTO discord_channels (channel_id, name, type) VALUES (?, ?, ?)"
-        channel_data = [
-            (int(channel.id), str(channel.name), str(channel.type))
-            for channel in channels if not isinstance(channel, CategoryChannel)
-        ]
-        await self.execute_query(self.EXECUTE_MANY, statement, channel_data)
-
-
-    async def get_channel_from_name(self, name: str) -> str:
-        statement = "SELECT channel_id FROM discord_channels WHERE name = ?"
-        result = await self.execute_query(self.EXECUTE_FETCH, statement, [name])
-        return result[0][0]

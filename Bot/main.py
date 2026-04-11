@@ -12,6 +12,7 @@ load_dotenv(env_path)
 ###============================================================================
 
 async def main(my_token: str) -> None:
+    dbpath = "./db/database.sqlite"
     server_id = int(os.environ.get("guild_id", "0"))
     if server_id == 0:
         raise ValueError("guild_id environment variable must be set in .env file")
@@ -19,6 +20,7 @@ async def main(my_token: str) -> None:
     bot = MyDiscordBot(
         command_prefix="!",
         intents=discord.Intents.all(),
+        db_path=dbpath,
         serverid=server_id,
     )
     async with bot:

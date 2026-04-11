@@ -5,8 +5,6 @@ import aiosqlite as sqa
 
 
 class DiscordAttachedLeagueNames(app_commands.Transformer):
-    # This class contains discord.Interaction.
-    # interaction class contains property client (the bot this is used in).
 
     async def transform(self, interaction: discord.Interaction, value: Any):
         return value

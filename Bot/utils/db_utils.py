@@ -5,11 +5,6 @@ import aiosqlite as sqa
 from typing import Any, Iterable
 
 from discord import CategoryChannel
-
-import logging
-
-log = logging.getLogger(__name__)
-
 ###============================================================================
 
 class DButils:
@@ -21,7 +16,6 @@ class DButils:
     EXECUTE_FETCH = "execute_fetchall"
 
     async def execute_query(self, method_name, statement: str, params: Iterable[Any]):
-        log.info(f"DB request: {method_name}, {statement}")
         async with sqa.connect(self.db_path) as db:
             query_func = getattr(db, method_name)
             result = await query_func(statement, params)
@@ -43,8 +37,8 @@ class DButils:
     async def add_channels_to_db(self, channels) -> None:
         statement = "REPLACE INTO discord_channels (channel_id, name, type) VALUES (?, ?, ?)"
         channel_data = [
-            (int(channel.id), str(channel.name), str(channel.type))
-            for channel in channels if not isinstance(channel, CategoryChannel)
+            (channel.id, channel.name, channel.type)
+            for channel in channels if isinstance(channel, CategoryChannel)
         ]
         await self.execute_query(self.EXECUTE_MANY, statement, channel_data)
 

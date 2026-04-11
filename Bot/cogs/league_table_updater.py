@@ -2,22 +2,21 @@ from discord.ext import commands, tasks
 import aiosqlite as sqa
 from utils.rank_sorting_class import Ranker  # pylint: disable=E0401,E0611
 from main import MyDiscordBot  # pylint: disable=E0401
+from pantheon.utils.exceptions import RateLimit, Timeout, ServerError
 from discord import app_commands
 import asyncio
 import discord
 import aiohttp
 import os
 
-import logging
-
 # Want to fetch ranks to post from the database
 # want to fetch from rito every 30s
 
-log = logging.getLogger(__name__)
 
 class FetchFromRiot(commands.Cog):
     def __init__(self, bot: MyDiscordBot):
         self.bot = bot
+        self.bot.logging.info(f"{__name__} loaded")
         self.post_ranks.start()  # pylint: disable=E1101
         # self.fetch_ranks_from_riot.start() # pylint: disable=E1101
         self.previous_ranks = {}
@@ -138,7 +137,6 @@ class FetchFromRiot(commands.Cog):
                 try:
                     self.ranked_dict = await self.fetch_users_rank(cursor)
                 except ServerError as exc:
-                    #CHANGE
                     self.bot.logging.error(
                         f"Error of: {exc}, trying again in 60 seconds"
                     )
@@ -166,7 +164,7 @@ class FetchFromRiot(commands.Cog):
                     return
                 puuid, stored_name = cursor[0]
 
-            name = (await self.bot.apiutils.get_account_by_puuid(puuid))["gameName"]
+            name = (await self.bot.lolapi.get_account_by_puuId(puuid))["gameName"]
 
             if name != stored_name:
                 self.bot.logging.info(f"updating {stored_name} to {name}")

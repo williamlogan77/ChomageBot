@@ -22,20 +22,23 @@ class MyDiscordBot(Bot):
         serverid: int,
     ) -> None:
         super().__init__(command_prefix, intents=intents)
-        # Configure root logger. All other classes will use this logger
         discord.utils.setup_logging(root=True)
         self.serverid = serverid
         self.riot_key = os.environ.get("riot_key")
+        if self.riot_key:
+            log.info(f"Riot API Key loaded")
+        else:
+            log.warn("WARNING: Riot API Key not found in environment variables!")
         self.api_utils = APIutils(self.riot_key)
-        self.db_path = os.environ.get("db_path", "./db/database.sqlite")
-        self.db_utils = DButils(self.db_path)
+        self.db_utils = DButils("./db/databasecopy.sqlite")
+        self.db_path ="./db/databasecopy.sqlite"       #Env var pls
 
 ###============================================================================
 
     async def setup_hook(self) -> None:        
         log.info("Running setup hook")
-        # Ping the status API to check API key is valid
-        await self.api_utils.get_lol_status()
+        # Configure root logger. All other classes will use this logger
+
         for file in glob.glob("./cogs/*.py"):
             # Use os.path for cross-platform compatibility
             cog_name = os.path.basename(file)[:-3]
@@ -55,7 +58,6 @@ class MyDiscordBot(Bot):
         log.info("Connected to discord")
         await self.sync_discord()
         log.info("Bot is ready")
-
 
     async def on_voice_state_update(
         self,

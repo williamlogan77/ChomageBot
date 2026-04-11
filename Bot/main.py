@@ -2,23 +2,12 @@ import asyncio
 import os
 import discord
 from dotenv import load_dotenv
+
 from bot import MyDiscordBot
-import logging
 
 # Load .env from parent directory relative to this file's location
 env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".env")
 load_dotenv(env_path)
-
-###============================================================================
-# Setup log level between debug and info for util calls
-
-logging.VERBOSE = 15
-logging.addLevelName(logging.VERBOSE, "VERBOSE")
-
-def verbose(self, message, *args, **kwargs):
-    if self.isEnabledFor(logging.VERBOSE):
-        self._log(logging.VERBOSE, message, args, **kwargs)
-logging.Logger.verbose = verbose
 
 ###============================================================================
 

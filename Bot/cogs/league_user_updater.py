@@ -1,6 +1,7 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
+import aiosqlite as sqa
 from utils.autocomplete import DiscordAttachedLeagueNames  # pylint: disable=E0401
 from main import MyDiscordBot # pylint: disable=E0401
 
@@ -31,7 +32,21 @@ class LeagueUsers(commands.Cog):
         try:
             response = await self.bot.api_utils.get_account_by_riotid(league_name, tag_line)
             puuid = response["puuid"]
-            await self.bot.db_utils.add_player(user.id, puuid, league_name, tag_line)
+            async with sqa.connect(self.bot.db_path) as db:  # type: ignore
+                await db.execute(
+                    """REPLACE INTO league_players (
+                            discord_user_id,
+                            puuid,
+                            league_username,
+                            tag
+                        )
+                        VALUES (?, ?, ?, ?)""",  #leagueId removed
+                    (user.id, puuid, league_name, tag_line),
+                )
+                await db.commit()
+            log.info(
+                f"put {user.id, puuid, league_name, tag_line} into db for {ctx.user}"
+            )
             await ctx.response.send_message(f"Added {league_name} into the db")
         except Exception as e:
             log.error(f"Failed to fetch rank for {league_name}: {type(e).__name__} - {e}")
@@ -43,7 +58,7 @@ class LeagueUsers(commands.Cog):
     )
     @app_commands.describe(
         user="Clear all accounts associated with this user",
-        league_name="Specify account to remove, seperated with a ,",
+        league_name="Specify account to remove, seperated with a ;",
     )
     async def remove_from_db(
         self,
@@ -51,16 +66,25 @@ class LeagueUsers(commands.Cog):
         user: discord.User,
         league_name: app_commands.Transform[str, DiscordAttachedLeagueNames] = "",
     ):
-        if league_name:
-            for name in league_name.split(","):  # Who splits on a ;?
-                # Whats even the point, the autofill makes it hard to supply more than 1 value
-                await self.bot.db_utils.delete_player_by_username(name)
-            await ctx.response.send_message(f"{name} removed from list")
+        if league_name != "":
+            names = league_name.split(";")
+            async with sqa.connect(self.bot.db_path) as db:
+                for name in names:
+                    await db.execute(
+                        "DELETE FROM league_players WHERE league_username = ?", (name,)
+                    )
+                    await db.commit()
+                    await ctx.response.send_message(f"{name} removed from list")
+
         else:
-            await self.bot.db_utils.delete_player_by_discord_id(user.id)
-            await ctx.response.send_message(
-                f"successfully removed all accounts associated with {user.name}"
-            )
+            async with sqa.connect(self.bot.db_path) as db:
+                await db.execute(
+                    "DELETE FROM league_players WHERE discord_user_id = ?", (user.id,)
+                )
+                await db.commit()
+                await ctx.response.send_message(
+                    f"successfully removed all accounts associated with {user.name}"
+                )
 
         return
 
@@ -69,8 +93,13 @@ class LeagueUsers(commands.Cog):
         description="Shows all player currently stored in the league database",
     )
     async def show_all(self, ctx: discord.Interaction):
-        usernames = await self.bot.db_utils.get_usernames_and_tags()
-        message = "\n".join(f"{name[0]} #{name[1]}" for name in usernames)
+        async with sqa.connect(self.bot.db_path) as db:
+            to_show = await db.execute_fetchall(
+                "SELECT league_username, tag FROM league_players"
+            )
+        message = ""
+        for name in to_show:
+            message += str(name[0]) + "#" + str(name[1]) + "\n"
         if not message:
             message = "No players to rank"
         await ctx.response.send_message(message)

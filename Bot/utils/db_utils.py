@@ -5,8 +5,8 @@ import aiosqlite as sqa
 ###============================================================================
 
 class DButils:
-    def __init__(self):
-        self.db_path ="./db/database.sqlite"
+    def __init__(self, db_path):
+        self.db_path = db_path
 
     async def add_members_to_db(members_iterator) -> None:
         async with sqa.connect(self.db_path) as db:
@@ -30,6 +30,8 @@ class DButils:
                 )
             await db.commit()
         return
+
+
 
     async def get_id_from_username(self, name) -> str:
         async with sqa.connect(self.db_path) as connection:

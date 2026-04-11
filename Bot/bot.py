@@ -1,6 +1,5 @@
 from discord.ext.commands import Bot
 import logging
-import glob
 
 log = logging.getLogger(__name__)
 
@@ -9,19 +8,19 @@ class MyDiscordBot(Bot):
         self,
         command_prefix: str,
         intents: discord.Intents,
+        db_path: str,
         serverid: int,
     ) -> None:
         super().__init__(command_prefix, intents=intents)
-        self.dbutils = DButils()
-        self.serverid = serverid
+        self.dbutils = DButils(db_path=db_path)
+        self.db_path = db_path
+        self.guildid = serverid
         
         riot_key = os.environ.get("riot_key")
         if riot_key:
             log.info(f"Riot API Key loaded")
         else:
             log.warn("WARNING: Riot API Key not found in environment variables!")
-        # Is this the right place for this check?
-
 
     async def setup_hook(self) -> None:
         discord.utils.setup_logging(root=True)
@@ -34,12 +33,12 @@ class MyDiscordBot(Bot):
 
     async def sync_discord(self) -> None:
         log.info("Syncing users")
-        guild = await self.fetch_guild(self.serverid)
+        guild = await self.fetch_guild(self.guildid)
         members_iterator = guild.fetch_members()    # Returns an async iterator
-        dbutils.add_members_to_db(members_iterator)
+        DButils.add_members_to_db(members_iterator)
         log.info("Syncing channels")
         channels = await guild.fetch_channels() # Returns an list
-        dbutils.add_channels_to_db(channels)
+        DButils.add_channels_to_db(channels)
         return
 
     async def on_connect(self) -> None:
@@ -55,3 +54,23 @@ class MyDiscordBot(Bot):
         after: discord.VoiceState,
     ) -> None:
         return
+
+
+
+#
+#
+#def setup_db(logger: logging.Logger) -> None:
+#
+#    if not os.path.isfile("./db/database.sqlite"):
+#        MyDiscordBot.info("Setting up database")
+#        with open("./db/database.sqlite", "x", encoding="utf-8") as f:
+#            pass
+#        with sq.connect("./db/database.sqlite") as connection:
+#            cursor = connection.cursor()
+#            with open("./db/setup.sql", "r", encoding="utf-8") as f:
+#                sql_code = f.read()
+#            cursor.executescript(sql_code)
+#    else:
+#        logger.info("Database exists, setup done.")
+#
+

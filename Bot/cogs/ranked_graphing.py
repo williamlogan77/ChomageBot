@@ -11,14 +11,11 @@ import datetime as dt
 import os
 from main import MyDiscordBot  # pylint: disable=E0401
 
-import logging
-
-log = logging.getLogger(__name__)
 
 class LeagueGraphs(commands.Cog):
     def __init__(self, bot: MyDiscordBot):
         self.bot = bot
-        log.info(f"{__name__} loaded")
+        self.bot.logging.info(f"{__name__} loaded")
 
     @app_commands.command(
         name="graph_user_granular",

@@ -5,16 +5,14 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 import numpy as np
-import logging
 
-log = logging.getLogger(__name__)
 
 class TeamGenerator(commands.Cog):
     """Cog containing slash commands for team selection"""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        log.info(f"{__name__} loaded")
+        self.bot.logging.info(f"{__name__} loaded")
 
     @app_commands.command(
         name="select_teams", description="Create a number of teams of players"

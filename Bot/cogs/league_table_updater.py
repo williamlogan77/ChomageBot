@@ -19,14 +19,13 @@ class FetchFromRiot(commands.Cog):
     def __init__(self, bot: MyDiscordBot):
         self.bot = bot
         self.post_ranks.start()  # pylint: disable=E1101
-        #self.fetch_ranks_from_riot.start() # pylint: disable=E1101
+        # self.fetch_ranks_from_riot.start() # pylint: disable=E1101
         self.previous_ranks = {}
         self.min_games_played = 0
         self.channel_id = ""    # make the channelid/name configurable
         self.ranked_dict: dict = None # type: ignore
 
-    async def fetch_users_rank(self, users) -> dict:
-        # Can be replaced with class (next PR)
+    async def fetch_users_rank(self, users):
         users_ranks = {}
         looked_up_users = []
         
@@ -51,7 +50,7 @@ class FetchFromRiot(commands.Cog):
                 )
                 fivev5["GamesPlayed"] = fivev5["wins"] + fivev5["losses"]
                 fivev5["WinRate"] = (fivev5["wins"] / fivev5["GamesPlayed"]) * 100
-                fivev5["summonerName"] = await self.bot.db_utils.get_username_from_id(puuid)    # Needed?
+                fivev5["summonerName"] = await self.get_name(puuid)
 
                 users_ranks[fivev5["summonerName"]] = fivev5
                 if fivev5["GamesPlayed"] < self.min_games_played:
@@ -97,31 +96,67 @@ class FetchFromRiot(commands.Cog):
 
     # @tasks.loop(seconds=30)
     async def fetch_ranks_from_riot(self):
-        log.info("Fetching ranks")
-        users = await self.bot.db_utils.get_members_and_puuid()
-        # Fetch current ranks and store them in a dict with updated values
-        try:
-            self.ranked_dict = await self.fetch_users_rank(users)
-        except ServerError as exc:  # Dodgy
-            #CHANGE
-            log.error(
-                f"Error of: {exc}, trying again in 60 seconds"
-            )
-            await asyncio.sleep(60)
+        # log.info("fetching ranks")
+        # fetch from db
+        # await self.fetch_ranks_from_db()
+        async with sqa.connect(self.bot.db_path) as connection:
+            async with connection.execute_fetchall(
+                """SELECT puuid,
+                        IIF(nickname = '', discord_tag, nickname),
+                        discord_user_id
+                    FROM (
+                            SELECT *
+                            FROM league_players
+                                LEFT JOIN users ON user_id = discord_user_id
+                        )"""
+            ) as cursor:
+                # Fetch current ranks and store them in a dict with updated values
+                try:
+                    self.ranked_dict = await self.fetch_users_rank(cursor)
+                except ServerError as exc:
+                    #CHANGE
+                    log.error(
+                        f"Error of: {exc}, trying again in 60 seconds"
+                    )
+                    await asyncio.sleep(60)
         return
 
+    async def get_name(self, puuid):
+        async with sqa.connect(self.bot.db_path) as connection:
+            async with connection.execute_fetchall(
+                "SELECT league_username FROM league_players WHERE puuid = ?",
+                (puuid,),
+            ) as cursor:
+                if cursor and len(cursor) > 0:
+                    return cursor[0][0]
+                else:
+                    return "Unknown"
+
     async def check_name(self, puuid):
-        try:
-            stored_name = await self.bot.db_utils.get_username_from_id(puuid)
-            response = await self.bot.api_utils.get_account_by_puuid(puuid)
+        async with sqa.connect(self.bot.db_path) as connection:
+            async with connection.execute_fetchall(
+                "SELECT puuid, league_username FROM league_players WHERE puuid = ?",
+                (puuid,),
+            ) as cursor:
+                if not cursor or len(cursor) == 0:
+                    return
+                puuid, stored_name = cursor[0]
+
+            try:
+                response = await self.bot.api_utils.get_account_by_puuid(puuid)
+            except Exception as e:
+                log.error(f"Failed to fetch rank for {name}: {type(e).__name__} - {e}")
             name = response["gameName"]
+
             if name != stored_name:
                 log.info(f"updating {stored_name} to {name}")
-                await self.bot.db_utils.updated_username(name, puuid)
-        except Exception as e:
-            log.error(f"Failed to fetch rank for {name}: {type(e).__name__} - {e}")
+                await connection.execute(
+                    "UPDATE league_players SET league_username = ? WHERE puuid = ?",
+                    (name, puuid),
+                )
+                await connection.commit()
 
-    @tasks.loop(seconds=60)
+    @tasks.loop(seconds=120)
     async def post_ranks(self):
         await self.bot.wait_until_ready()
         await self.fetch_ranks_from_riot()
@@ -130,13 +165,13 @@ class FetchFromRiot(commands.Cog):
         #     self.previous_ranks = self.ranked_dict
         #     return
 
-        if not self.channel_id:     # Set the league-ranking channel
+        #channel = self.bot.get_channel(919981835428179988)
+        # This should probably be configurable via slash command
+        if not self.channel_id:
             self.channel_id = await self.bot.db_utils.get_channel_from_name("league-ranking")
         channel = self.bot.get_channel(self.channel_id)
 
         if (self.ranked_dict != self.previous_ranks) or (not self.previous_ranks):
-        # Idk what this even does. It does mean that it takes a cycle for the correct name to be added
-        # to the ranking table.
             for user in self.ranked_dict.keys():
                 await self.check_name(self.ranked_dict[user]["puuid"])
 
@@ -145,7 +180,7 @@ class FetchFromRiot(commands.Cog):
                         self.ranked_dict[user]["leaguePoints"]
                         != self.previous_ranks[user]["leaguePoints"]
                     ):
-                        log.info(f"{user} updated")
+                        print(f"{user} updated", flush=True)
                         await self.update_table(user, self.ranked_dict[user])
 
             log.info("Posting ranks")

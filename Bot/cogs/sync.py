@@ -4,9 +4,7 @@ import discord
 from discord.ext.commands import GroupCog
 from discord.app_commands import command
 from main import MyDiscordBot  # pylint: disable=E0401
-import logging
 
-log = logging.getLogger(__name__)
 
 class Refresh(
     GroupCog,
@@ -17,7 +15,7 @@ class Refresh(
 
     def __init__(self, bot: MyDiscordBot):
         self.bot = bot
-        log.info(f"{__name__} loaded")
+        self.bot.logging.info(f"{__name__} loaded")
 
     @command(name="sync")
     async def sync(self, ctx: discord.Interaction):
@@ -28,12 +26,12 @@ class Refresh(
         """
         await ctx.response.defer()
         msg = await ctx.followup.send("Syncing commands...", wait=True, ephemeral=True)
-        log.info("Syncing commands")
+        self.bot.logging.info("Syncing commands")
         try:
             await self.bot.tree.sync()
             await msg.edit(content="Succesfully synced")
         except Exception as e:
-            log.error(f"Failed to sync due to: {e}")
+            self.bot.logging.error(f"Failed to sync due to: {e}")
             await msg.edit(content="Unsuccesful sync")
 
     @command(name="reload_cogs")
@@ -42,25 +40,25 @@ class Refresh(
         await ctx.response.defer()
         msg = await ctx.followup.send("Reloading cogs...", wait=True, ephemeral=True)
 
-        log.info("updating cogs")
+        self.bot.logging.info("updating cogs")
 
         os.chdir("cogs/")
         loaded = 0
         for idx, cog in enumerate(glob.glob("*.py")):
             if not cog.startswith("sync"):
                 try:
-                    log.info(f"Unloading {cog}")
+                    self.bot.logging.info(f"Unloading {cog}")
                     await self.bot.unload_extension(f"cogs.{cog[:-3]}")
-                    log.info(f"Loading {cog}")
+                    self.bot.logging.info(f"Loading {cog}")
                     await self.bot.load_extension(f"cogs.{cog[:-3]}")
                     loaded += 1
                 except Exception as e:
-                    log.error(f"Unable to reload {cog}, error of: {e}")
+                    self.bot.logging.error(f"Unable to reload {cog}, error of: {e}")
 
         os.chdir("../")
 
         await msg.edit(content="Sucessfully reloaded all cogs.")
-        log.info(f"Synced and reloaded {loaded}/{idx} cogs")
+        self.bot.logging.info(f"Synced and reloaded {loaded}/{idx} cogs")
 
 
 async def setup(bot: MyDiscordBot):

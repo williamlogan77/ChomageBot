@@ -34,11 +34,25 @@ class MyDiscordBot(Bot):
     async def sync_discord(self) -> None:
         log.info("Syncing users")
         guild = await self.fetch_guild(self.guildid)
-        members_iterator = guild.fetch_members()    # Returns an async iterator
-        DButils.add_members_to_db(members_iterator)
-        log.info("Syncing channels")
-        channels = await guild.fetch_channels() # Returns an list
-        DButils.add_channels_to_db(channels)
+        async with sqa.connect(self.db_path) as db:
+            async for member in guild.fetch_members():
+                nickname = member.nick if member.nick is not None else ""
+                await db.execute(
+                    "REPLACE INTO users (user_id, nickname, discord_tag) VALUES (?, ?, ?)",
+                    (member.id, nickname, member.name),
+                )
+                await db.commit()
+
+            channels = await guild.fetch_channels()
+
+            for channel in channels:
+                if str(channel.type) == "category":
+                    continue
+                await db.execute(
+                    "REPLACE INTO discord_channels (channel_id, name, type) VALUES (?, ?, ?)",
+                    (int(channel.id), str(channel.name), str(channel.type)),
+                )
+            await db.commit()
         return
 
     async def on_connect(self) -> None:

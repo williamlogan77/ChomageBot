@@ -20,7 +20,9 @@ create table if not exists discord_events (
 create table if not exists league_players (
     discord_user_id INTEGER not null,
     puuid TEXT not null primary key,
-    league_username TEXT not null
+    league_username TEXT not null,
+    current_loss_streak INTEGER DEFAULT 0,
+    last_notified_streak INTEGER DEFAULT 0
 );
 create table if not exists league_history (
     id INTEGER not null primary key autoincrement,

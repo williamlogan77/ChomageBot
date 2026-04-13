@@ -349,6 +349,32 @@ class FetchFromRiot(commands.Cog):
         except Exception as e:
             self.bot.logging.info(f"Exception as {e}")
 
+        # Check for rank changes and loss streaks
+        if last_values:
+            # last_values structure: (id, puuid, timestamp, lp, division, tier, wins, losses)
+            prev_lp, prev_division, prev_tier, prev_wins, prev_losses = last_values[0][3:8]
+            new_tier = user_stats_dict["tier"]
+            new_division = user_stats_dict["rank"]
+            new_wins = user_stats_dict["wins"]
+            new_losses = user_stats_dict["losses"]
+            
+            # Check for promotion/demotion
+            if prev_tier != new_tier or prev_division != new_division:
+                await self.handle_rank_change(
+                    user_stats_dict,
+                    prev_tier,
+                    prev_division,
+                    new_tier,
+                    new_division
+                )
+            
+            # If losses increased but wins didn't, it's a loss
+            if new_losses > prev_losses and new_wins == prev_wins:
+                await self.handle_loss_streak(user_stats_dict)
+            # If wins increased, reset the streak
+            elif new_wins > prev_wins:
+                await self.reset_loss_streak(user_stats_dict["puuid"])
+
         async with sqa.connect(self.bot.db_path) as connection:
             await connection.execute(
                 "INSERT INTO league_history (puuid, lp, division, tier, wins, losses) VALUES (?, ?, ?, ?, ?, ?)",
@@ -363,6 +389,167 @@ class FetchFromRiot(commands.Cog):
             )
             await connection.commit()
         return
+
+    async def handle_loss_streak(self, user_stats_dict):
+        """Handle loss streak tracking and notifications"""
+        puuid = user_stats_dict["puuid"]
+        
+        async with sqa.connect(self.bot.db_path) as connection:
+            # Get current streak
+            result = await connection.execute_fetchall(
+                "SELECT current_loss_streak, last_notified_streak, discord_user_id FROM league_players WHERE puuid = ?",
+                (puuid,),
+            )
+            
+            if not result:
+                return
+            
+            current_streak, last_notified, discord_user_id = result[0]
+            new_streak = current_streak + 1
+            
+            # Update the streak
+            await connection.execute(
+                "UPDATE league_players SET current_loss_streak = ? WHERE puuid = ?",
+                (new_streak, puuid),
+            )
+            await connection.commit()
+            
+            # Send notification if at 5 or higher and haven't notified for this streak yet
+            if new_streak >= 5 and new_streak > last_notified:
+                await self.send_loss_streak_notification(
+                    user_stats_dict["summonerName"],
+                    discord_user_id,
+                    new_streak
+                )
+                
+                # Update last notified
+                await connection.execute(
+                    "UPDATE league_players SET last_notified_streak = ? WHERE puuid = ?",
+                    (new_streak, puuid),
+                )
+                await connection.commit()
+    
+    async def handle_rank_change(self, user_stats_dict, old_tier, old_division, new_tier, new_division):
+        """Handle rank promotion/demotion notifications"""
+        try:
+            # Create Ranker objects to compare ranks
+            old_rank = Ranker(old_tier, old_division, 0)
+            new_rank = Ranker(new_tier, new_division, 0)
+            
+            # Determine if it's a promotion or demotion
+            is_promotion = new_rank > old_rank
+            
+            # Get discord user ID
+            async with sqa.connect(self.bot.db_path) as connection:
+                result = await connection.execute_fetchall(
+                    "SELECT discord_user_id FROM league_players WHERE puuid = ?",
+                    (user_stats_dict["puuid"],),
+                )
+                
+                if not result:
+                    return
+                
+                discord_user_id = result[0][0]
+            
+            # Send notification
+            await self.send_rank_change_notification(
+                user_stats_dict["summonerName"],
+                discord_user_id,
+                old_tier,
+                old_division,
+                new_tier,
+                new_division,
+                is_promotion
+            )
+            
+        except Exception as e:
+            self.bot.logging.error(f"Error handling rank change: {e}")
+    
+    async def reset_loss_streak(self, puuid):
+        """Reset loss streak when player wins"""
+        async with sqa.connect(self.bot.db_path) as connection:
+            await connection.execute(
+                "UPDATE league_players SET current_loss_streak = 0, last_notified_streak = 0 WHERE puuid = ?",
+                (puuid,),
+            )
+            await connection.commit()
+    
+    async def send_loss_streak_notification(self, summoner_name, discord_user_id, streak):
+        """Send a message to the general channel about the loss streak"""
+        try:
+            # Get the general channel - you'll need to update this channel ID
+            # Currently using the same channel as the rank updates for testing
+            general_channel = self.bot.get_channel(919981835428179988)
+            
+            if general_channel is None:
+                self.bot.logging.error("Could not find general channel for loss streak notification")
+                return
+            
+            messages = {
+                5: f"🔥 <@{discord_user_id}> ({summoner_name}) is on a **5 game loss streak** in ranked! 💀",
+                6: f"💥 <@{discord_user_id}> ({summoner_name}) just hit a **6 game loss streak**! Time to take a break? 😰",
+                7: f"🚨 <@{discord_user_id}> ({summoner_name}) is spiraling with a **7 game loss streak**! 🆘",
+                8: f"⚠️ <@{discord_user_id}> ({summoner_name}) reaches **8 losses in a row**! Someone stop them! 🛑",
+                9: f"💀 <@{discord_user_id}> ({summoner_name}) is in the shadow realm with **9 straight losses**! 👻",
+                10: f"🏆 <@{discord_user_id}> ({summoner_name}) has achieved **DOUBLE DIGIT LOSSES** (10)! Legend status! 🎖️"
+            }
+            
+            # For streaks above 10, use a generic message
+            if streak >= 10:
+                message = f"😱 <@{discord_user_id}> ({summoner_name}) is on an UNBELIEVABLE **{streak} game loss streak**! 💔"
+            else:
+                message = messages.get(streak, f"<@{discord_user_id}> ({summoner_name}) is on a {streak} game loss streak!")
+            
+            await general_channel.send(message)
+            self.bot.logging.info(f"Sent loss streak notification for {summoner_name} ({streak} losses)")
+            
+        except Exception as e:
+            self.bot.logging.error(f"Failed to send loss streak notification: {e}")
+    
+    async def send_rank_change_notification(self, summoner_name, discord_user_id, old_tier, old_division, new_tier, new_division, is_promotion):
+        """Send a message to the general channel about rank changes"""
+        try:
+            # Get the general channel
+            general_channel = self.bot.get_channel(919981835428179988)
+            
+            if general_channel is None:
+                self.bot.logging.error("Could not find general channel for rank change notification")
+                return
+            
+            # Format the rank strings
+            old_rank_str = f"{old_tier.title()} {old_division}" if old_tier.lower() != "master" else f"{old_tier.title()}"
+            new_rank_str = f"{new_tier.title()} {new_division}" if new_tier.lower() != "master" else f"{new_tier.title()}"
+            
+            if is_promotion:
+                # Promotion messages
+                emoji = "🎉"
+                action = "promoted"
+                if new_tier.lower() == "master":
+                    emoji = "👑"
+                    message = f"{emoji} **HUGE!** <@{discord_user_id}> ({summoner_name}) has been promoted to **{new_rank_str}**! {emoji}"
+                elif old_tier != new_tier:
+                    # Tier promotion (e.g., Gold to Platinum)
+                    message = f"{emoji} **Congratulations!** <@{discord_user_id}> ({summoner_name}) has been promoted from **{old_rank_str}** to **{new_rank_str}**! {emoji}"
+                else:
+                    # Division promotion (e.g., Gold IV to Gold III)
+                    message = f"{emoji} <@{discord_user_id}> ({summoner_name}) has been promoted from **{old_rank_str}** to **{new_rank_str}**! {emoji}"
+            else:
+                # Demotion messages
+                emoji = "📉"
+                action = "demoted"
+                if old_tier != new_tier:
+                    # Tier demotion (e.g., Platinum to Gold)
+                    emoji = "💔"
+                    message = f"{emoji} <@{discord_user_id}> ({summoner_name}) has been demoted from **{old_rank_str}** to **{new_rank_str}**... {emoji}"
+                else:
+                    # Division demotion (e.g., Gold III to Gold IV)
+                    message = f"{emoji} <@{discord_user_id}> ({summoner_name}) has been demoted from **{old_rank_str}** to **{new_rank_str}**. {emoji}"
+            
+            await general_channel.send(message)
+            self.bot.logging.info(f"Sent rank change notification for {summoner_name}: {old_rank_str} -> {new_rank_str} ({action})")
+            
+        except Exception as e:
+            self.bot.logging.error(f"Failed to send rank change notification: {e}")
 
 
 async def setup(bot: MyDiscordBot):

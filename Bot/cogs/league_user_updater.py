@@ -1,52 +1,40 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
-import aiosqlite as sqa
 from utils.autocomplete import DiscordAttachedLeagueNames  # pylint: disable=E0401
 from main import MyDiscordBot # pylint: disable=E0401
 
+import logging
+
+log = logging.getLogger(__name__)
 
 class LeagueUsers(commands.Cog):
 
     def __init__(self, bot: MyDiscordBot):
         self.bot = bot
-        self.bot.logging.info(f"{__name__} loaded")
+        log.info(f"{__name__} loaded")
 
     @app_commands.command(name="add_player", description="Add user to the table")
     @app_commands.describe(
         league_name="The league name",
-        tagline="The bit after # (don't include this)",
+        tag_line="The bit after # (don't include this)",
         user="The discord account attached",
     )
-    async def add_to_db(
+    async def add_player(
         self,
         ctx: discord.Interaction,
         league_name: str,
-        tagline: str,
+        tag_line: str,
         user: discord.User,
     ):
         # Get PUUID from Account API - this is all we need now
-        puuid = (await self.bot.lolapi.get_account_by_riotId(league_name, tagline))[
-            "puuid"
-        ]
-
-        async with sqa.connect(self.bot.db_path) as db:  # type: ignore
-            await db.execute(
-                """REPLACE INTO league_players (
-                        discord_user_id,
-                        leagueId,
-                        puuid,
-                        league_username,
-                        tag
-                    )
-                    VALUES (?, ?, ?, ?, ?)""",
-                (user.id, puuid, puuid, league_name, tagline),
-            )
-            await db.commit()
-        self.bot.logging.info(
-            f"put {user.id, user.name, puuid, league_name, tagline} into db for {ctx.user}"
-        )
-        await ctx.response.send_message(f"Added {league_name} into the db")
+        try:
+            response = await self.bot.api_utils.get_account_by_riotid(league_name, tag_line)
+            puuid = response["puuid"]
+            await self.bot.db_utils.add_player(user.id, puuid, league_name, tag_line)
+            await ctx.response.send_message(f"Added {league_name} into the db")
+        except Exception as e:
+            log.error(f"Failed to fetch rank for {league_name}: {type(e).__name__} - {e}")
         return
 
     @app_commands.command(
@@ -55,7 +43,7 @@ class LeagueUsers(commands.Cog):
     )
     @app_commands.describe(
         user="Clear all accounts associated with this user",
-        league_name="Specify account to remove, seperated with a ;",
+        league_name="Specify account to remove, seperated with a ,",
     )
     async def remove_from_db(
         self,
@@ -63,25 +51,16 @@ class LeagueUsers(commands.Cog):
         user: discord.User,
         league_name: app_commands.Transform[str, DiscordAttachedLeagueNames] = "",
     ):
-        if league_name != "":
-            names = league_name.split(";")
-            async with sqa.connect(self.bot.db_path) as db:
-                for name in names:
-                    await db.execute(
-                        "DELETE FROM league_players WHERE league_username = ?", (name,)
-                    )
-                    await db.commit()
-                    await ctx.response.send_message(f"{name} removed from list")
-
+        if league_name:
+            for name in league_name.split(","):  # Who splits on a ;?
+                # Whats even the point, the autofill makes it hard to supply more than 1 value
+                await self.bot.db_utils.delete_player_by_username(name)
+            await ctx.response.send_message(f"{name} removed from list")
         else:
-            async with sqa.connect(self.bot.db_path) as db:
-                await db.execute(
-                    "DELETE FROM league_players WHERE discord_user_id = ?", (user.id,)
-                )
-                await db.commit()
-                await ctx.response.send_message(
-                    f"successfully removed all accounts associated with {user.name}"
-                )
+            await self.bot.db_utils.delete_player_by_discord_id(user.id)
+            await ctx.response.send_message(
+                f"successfully removed all accounts associated with {user.name}"
+            )
 
         return
 
@@ -90,15 +69,11 @@ class LeagueUsers(commands.Cog):
         description="Shows all player currently stored in the league database",
     )
     async def show_all(self, ctx: discord.Interaction):
-        async with sqa.connect(self.bot.db_path) as db:
-            to_show = await db.execute_fetchall(
-                "SELECT league_username, tag FROM league_players"
-            )
-        to_print = ""
-        for name in to_show:
-            to_print += str(name[0]) + "#" + str(name[1]) + "\n"
-
-        await ctx.response.send_message(to_print)
+        usernames = await self.bot.db_utils.get_usernames_and_tags()
+        message = "\n".join(f"{name[0]} #{name[1]}" for name in usernames)
+        if not message:
+            message = "No players to rank"
+        await ctx.response.send_message(message)
 
 
 async def setup(bot: commands.Bot):

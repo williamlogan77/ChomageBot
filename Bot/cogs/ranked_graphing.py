@@ -11,11 +11,14 @@ import datetime as dt
 import os
 from main import MyDiscordBot  # pylint: disable=E0401
 
+import logging
+
+log = logging.getLogger(__name__)
 
 class LeagueGraphs(commands.Cog):
     def __init__(self, bot: MyDiscordBot):
         self.bot = bot
-        self.bot.logging.info(f"{__name__} loaded")
+        log.info(f"{__name__} loaded")
 
     @app_commands.command(
         name="graph_user_granular",
@@ -27,22 +30,16 @@ class LeagueGraphs(commands.Cog):
         user: discord.User,
         league_name: app_commands.Transform[str, DiscordAttachedLeagueNames],
     ):
-        async with sqa.connect(self.bot.db_path) as connection:
-            summonerid = await connection.execute_fetchall(
-                "SELECT leagueId FROM league_players WHERE league_username = ?",
-                (league_name,),
+        summonerid = await self.bot.db_utils.get_id_from_username(league_name)
+        if not summonerid:
+            await ctx.response.send_message(
+                f"{league_name} does not exist in the database"
             )
-            print(summonerid)
-            if summonerid is None:
-                await ctx.response.send_message(
-                    f"{league_name} does not exist in the database"
-                )
-                return
-            else:
-                await ctx.response.defer()
-            # msg = await ctx.followup.send("Refreshing ranks...",
-            #                               wait=True,
-            #                               ephemeral=True)
+            return
+
+        # msg = await ctx.followup.send("Refreshing ranks...",
+        #                               wait=True,
+        #                               ephemeral=True)
 
         with open("utils/my_fig.pickle", "rb") as f:
             fig = pickle.load(f)
@@ -51,7 +48,7 @@ class LeagueGraphs(commands.Cog):
         async with sqa.connect(self.bot.db_path) as connection:
             # need to change date here for relevant split - figure out logic for it
             async with connection.execute(
-                "SELECT * FROM league_history WHERE timestamp > '2024-05-15' AND puuid = ?", (summonerid[0][0],)
+                "SELECT * FROM league_history WHERE timestamp > '2024-05-15' AND puuid = ?", (summonerid,)
             ) as cursor:
                 x_to_plot = []
                 y_to_plot = []
@@ -64,7 +61,7 @@ class LeagueGraphs(commands.Cog):
         async with sqa.connect(self.bot.db_path) as connection:
             user = await connection.execute_fetchall(
                 "SELECT league_username FROM league_players WHERE leagueId = ?",
-                (summonerid[0][0],),
+                (summonerid,),
             )
         plt.title(user[0][0])
 
@@ -100,18 +97,12 @@ class LeagueGraphs(commands.Cog):
         user: discord.User,
         league_name: app_commands.Transform[str, DiscordAttachedLeagueNames],
     ):
-        async with sqa.connect(self.bot.db_path) as connection:
-            summonerid = await connection.execute_fetchall(
-                "SELECT leagueId FROM league_players WHERE league_username = ?",
-                (league_name,),
-            )
-        if summonerid is None:
+        summonerid = await self.bot.db_utils.get_id_from_username(league_name)
+        if not summonerid:
             await ctx.response.send_message(
                 f"{league_name} does not exist in the database"
             )
             return
-        else:
-            await ctx.response.defer()
         # msg = await ctx.followup.send("Refreshing ranks...",
         #                               wait=True,
         #                               ephemeral=True)
@@ -122,7 +113,7 @@ class LeagueGraphs(commands.Cog):
         # plt._backend_mod.new_figure_manager_given_figure(1, fig)
         async with sqa.connect(self.bot.db_path) as connection:
             async with connection.execute(
-                "SELECT * FROM league_history WHERE timestamp > '2024-05-15' AND puuid = ?", (summonerid[0][0],)
+                "SELECT * FROM league_history WHERE timestamp > '2024-05-15' AND puuid = ?", (summonerid,)
             ) as cursor:
                 score_dict = {}
                 async for point in cursor:
@@ -135,7 +126,7 @@ class LeagueGraphs(commands.Cog):
         async with sqa.connect(self.bot.db_path) as connection:
             user = await connection.execute_fetchall(
                 "SELECT league_username FROM league_players WHERE leagueId = ?",
-                (summonerid[0][0],),
+                (summonerid,),
             )
 
         plt.title(user[0][0])

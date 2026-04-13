@@ -20,7 +20,8 @@ create table if not exists discord_events (
 create table if not exists league_players (
     discord_user_id INTEGER not null,
     puuid TEXT not null primary key,
-    league_username TEXT not null
+    league_username TEXT not null,
+    tag TEXT not null
 );
 create table if not exists league_history (
     id INTEGER not null primary key autoincrement,
@@ -28,7 +29,9 @@ create table if not exists league_history (
     timestamp DATETIME not null DEFAULT CURRENT_TIMESTAMP,
     lp INTEGER,
     division TEXT,
-    tier TEXT
+    tier TEXT,
+    wins INTEGER,
+    losses INTEGER
 );
 create unique index if not exists discord_events_event_id_uindex on discord_events (event_id);
 create unique index if not exists users_user_id_uindex on users (user_id);

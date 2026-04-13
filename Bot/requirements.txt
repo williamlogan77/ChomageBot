@@ -7,3 +7,4 @@ python-dotenv
 pantheon
 matplotlib==3.7
 opencv-python
+numpy<2

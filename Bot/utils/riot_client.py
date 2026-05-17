@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import random
 import time
 from collections import deque
 from typing import Any
@@ -87,11 +88,13 @@ async def get_json(url: str, params: dict | None = None) -> tuple[int, Any]:
                         return (r.status, await r.json())
                     if r.status == 429:
                         retry_after = int(r.headers.get("Retry-After", 10))
+                        # Jitter so concurrent 429s don't retry in lockstep.
+                        sleep_for = retry_after + random.uniform(0, 1)
                         log.warning(
                             f"Riot 429 on attempt {attempt + 1}/{MAX_RETRIES + 1}, "
-                            f"sleeping {retry_after}s"
+                            f"sleeping {sleep_for:.2f}s"
                         )
-                        await asyncio.sleep(retry_after)
+                        await asyncio.sleep(sleep_for)
                         continue
                     body = await r.text()
                     log.error(f"Riot {r.status} for {url}: {body[:200]}")

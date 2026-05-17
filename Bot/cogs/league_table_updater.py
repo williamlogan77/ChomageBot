@@ -1,7 +1,5 @@
 import asyncio
-import os
 
-import aiohttp
 import aiosqlite as sqa
 import discord
 from discord import app_commands
@@ -9,6 +7,8 @@ from discord.ext import commands, tasks
 from main import MyDiscordBot
 from pantheon.utils.exceptions import ServerError
 from utils.rank_sorting_class import Ranker
+from utils.riot_client import get_json
+from utils.riot_stats import fetch_recent_kd
 
 # Want to fetch ranks to post from the database
 # want to fetch from rito every 30s
@@ -35,45 +35,18 @@ class FetchFromRiot(commands.Cog):
 
     async def fetch_users_rank(self, users):
         users_ranks = {}
-        looked_up_users = []
-        riot_api_key = os.environ.get("riot_key")
+        seen: set[str] = set()
 
+        # League-entries uses platform routing (euw1), not regional (europe).
         for puuid, name, user_id in users:
-            user_rank = None
-            while puuid not in looked_up_users:
-                try:
-                    self.bot.logging.info(f"Fetching rank for: {name}")
-                    # Direct PUUID endpoint - much simpler!
-                    # Endpoint: GET /lol/league/v4/entries/by-puuid/{encryptedPUUID}
-                    # Note: League API uses platform routing (euw1), not regional routing (europe)
-                    league_url = (
-                        f"https://euw1.api.riotgames.com/lol/league/v4/entries/by-puuid/{puuid}"
-                    )
-                    headers = {"X-Riot-Token": riot_api_key}
-
-                    async with aiohttp.ClientSession() as session:
-                        async with session.get(league_url, headers=headers) as response:
-                            if response.status == 200:
-                                user_rank = await response.json()
-                                looked_up_users.append(puuid)
-                            elif response.status == 429:
-                                # Rate limited
-                                retry_after = int(response.headers.get("Retry-After", 10))
-                                self.bot.logging.warning(
-                                    f"Rate limited, waiting {retry_after} seconds"
-                                )
-                                await asyncio.sleep(retry_after)
-                            else:
-                                error_text = await response.text()
-                                raise Exception(f"HTTP {response.status}: {error_text}")
-                except Exception as e:
-                    self.bot.logging.error(
-                        f"Failed to fetch rank for {name}: {type(e).__name__} - {e}"
-                    )
-                    looked_up_users.append(puuid)
-                    break
-
-            if user_rank is None:
+            if puuid in seen:
+                continue
+            seen.add(puuid)
+            self.bot.logging.info(f"Fetching rank for: {name}")
+            league_url = f"https://euw1.api.riotgames.com/lol/league/v4/entries/by-puuid/{puuid}"
+            status, user_rank = await get_json(league_url)
+            if status != 200 or user_rank is None:
+                self.bot.logging.error(f"Failed to fetch rank for {name}: HTTP {status}")
                 continue
 
             fivev5 = list(filter(lambda x: x["queueType"] == "RANKED_SOLO_5x5", user_rank))
@@ -233,14 +206,24 @@ class FetchFromRiot(commands.Cog):
                 break
         return streak
 
-    async def send_streak_ping(self, user_id: int, streak: int) -> None:
+    async def send_streak_ping(self, user_id: int, streak: int, puuid: str) -> None:
         channel = self.bot.get_channel(STREAK_PING_CHANNEL)
         if channel is None:
             self.bot.logging.warning(
                 f"Streak channel {STREAK_PING_CHANNEL} not found, skipping ping"
             )
             return
-        await channel.send(f"\U0001f635 <@{user_id}> is on a **{streak}-game loss streak**. F.")
+        # Pull K/D over roughly the streak window (capped at 20). If the
+        # ratio is below 1.0, mock with the raw kills/deaths; otherwise
+        # the emoji + ping speak for themselves.
+        kills, deaths, _assists, _wins, games = await fetch_recent_kd(
+            puuid, count=min(max(streak, 5), 20)
+        )
+        extra = ""
+        if games > 0 and deaths > 0 and (kills / deaths) < 1.0:
+            extra = f" {kills}/{deaths}"
+        # \U0001FAF5 = pointing at viewer, \U0001F602 = face with tears of joy
+        await channel.send(f"\U0001faf5\U0001f602 <@{user_id}>{extra}")
 
     async def get_name(self, puuid):
         async with sqa.connect(self.bot.db_path) as connection:
@@ -306,7 +289,9 @@ class FetchFromRiot(commands.Cog):
                 posting_data = self.ranked_dict[user]
                 streak = await self.get_recent_streak(posting_data["puuid"])
                 if streak >= STREAK_THRESHOLD and user not in self.streak_pinged:
-                    await self.send_streak_ping(posting_data["user_id"], streak)
+                    await self.send_streak_ping(
+                        posting_data["user_id"], streak, posting_data["puuid"]
+                    )
                     self.streak_pinged.add(user)
                 elif streak < STREAK_THRESHOLD and user in self.streak_pinged:
                     self.streak_pinged.discard(user)

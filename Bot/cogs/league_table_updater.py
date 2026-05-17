@@ -148,12 +148,21 @@ class FetchFromRiot(commands.Cog):
         return
 
     async def get_last_five_games(self, puuid):
+        # Older history rows are keyed by the legacy encrypted summoner ID
+        # (league_players.leagueId, ~47 chars), newer rows by the real
+        # puuid (~78 chars). Query both so legacy-tracked players still
+        # surface their game history.
         async with sqa.connect(self.bot.db_path) as connection:
             async with connection.execute(
                 "SELECT wins, losses FROM league_history "
-                "WHERE puuid = ? AND wins IS NOT NULL AND losses IS NOT NULL "
+                "WHERE puuid IN ("
+                "    SELECT leagueId FROM league_players WHERE puuid = ?"
+                "    UNION"
+                "    SELECT puuid    FROM league_players WHERE puuid = ?"
+                ") "
+                "AND wins IS NOT NULL AND losses IS NOT NULL "
                 "ORDER BY id DESC LIMIT 6",
-                (puuid,),
+                (puuid, puuid),
             ) as cursor:
                 rows = await cursor.fetchall()
         if not rows:

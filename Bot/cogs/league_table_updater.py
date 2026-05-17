@@ -30,6 +30,7 @@ class FetchFromRiot(commands.Cog):
         self.min_games_played = 0
         self.last_updated_by: list[str] = []
         self.streak_pinged: set[str] = set()
+        self.previous_positions: dict[str, int] = {}
 
         self.ranked_dict: dict | None = None
 
@@ -310,7 +311,19 @@ class FetchFromRiot(commands.Cog):
             #                         reverse=True)
 
             output_list = []
+            current_positions: dict[str, int] = {}
             for index, posting in enumerate(sorted_results):
+                current_pos = index + 1
+                current_positions[posting["summonerName"]] = current_pos
+                prev_pos = self.previous_positions.get(posting["summonerName"])
+                # \U00002B06\U0000FE0F = ⬆️, \U00002B07\U0000FE0F = ⬇️
+                if prev_pos is None or prev_pos == current_pos:
+                    position_arrow = ""
+                elif current_pos < prev_pos:
+                    position_arrow = "\U00002b06\U0000fe0f "
+                else:
+                    position_arrow = "\U00002b07\U0000fe0f "
+
                 updated_flag = (
                     " \U0001f6a9" if posting["summonerName"] in self.last_updated_by else ""
                 )
@@ -318,7 +331,8 @@ class FetchFromRiot(commands.Cog):
                 last_five_line = f"Last 5: {last_five}\n" if last_five else ""
                 if posting["tier"].title() == "Master":
                     post = (
-                        str(index + 1)
+                        position_arrow
+                        + str(index + 1)
                         + ". "
                         + posting["summonerName"]
                         + f" - <@{posting['user_id']}>"
@@ -340,7 +354,8 @@ class FetchFromRiot(commands.Cog):
                     )
                 else:
                     post = (
-                        str(index + 1)
+                        position_arrow
+                        + str(index + 1)
                         + ". "
                         + posting["summonerName"]
                         + f" - <@{posting['user_id']}>"
@@ -363,6 +378,9 @@ class FetchFromRiot(commands.Cog):
                         + last_five_line
                     )
                 output_list.append(post)
+
+            # Remember positions for next cycle's arrow comparisons.
+            self.previous_positions = current_positions
 
             paste = self.bot.get_channel(919981835428179988)
             try:

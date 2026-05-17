@@ -1,0 +1,5 @@
+* text=auto
+
+# Shell scripts must be LF-terminated for #!/bin/bash to work on the
+# Linux container side, regardless of where they're checked out.
+*.sh text eol=lf

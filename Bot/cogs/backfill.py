@@ -1,12 +1,22 @@
-"""Backfill per-match stats from Riot's Match-V5 into the match_stats table.
+"""Backfill + ongoing-stream of per-match stats into the match_stats table.
 
 Runs inside the bot process so Riot API calls share the global rate
-limiter in :mod:`utils.riot_client`. Triggered manually via admin slash
-commands; the work is dispatched to a background asyncio task so the
-command returns immediately and the rest of the bot keeps running.
+limiter in :mod:`utils.riot_client`. Two flows:
 
-Idempotent: match_id is the table's PRIMARY KEY and we skip fetching
-matches already stored before calling Match-V5, so re-runs are cheap.
+* Owner slash command ``/backfill_all`` — one-shot historical pull. By
+  default the most recent 100 matches per player; with ``all_history=True``
+  it paginates Match-V5 to the end of Riot's exposed window (~2 years).
+  Work runs as a background asyncio task so the command returns
+  immediately and the rest of the bot keeps serving.
+* ``stream_matches`` ``@tasks.loop(minutes=5)`` — always-on. Polls the most
+  recent 5 match IDs per tracked player, inserts any not already stored.
+  Catches new games soon after they happen without needing a manual
+  trigger.
+
+Both paths share the same per-player routine and are fully idempotent:
+match_id is the table's PRIMARY KEY, we pre-filter against existing IDs
+before any match-detail fetch, and the write uses INSERT OR IGNORE as a
+belt-and-braces guard.
 """
 
 import asyncio
@@ -16,14 +26,16 @@ import logging
 import aiosqlite as sqa
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 from utils.riot_client import get_match, get_match_ids
 
 log = logging.getLogger(__name__)
 
-# Match-V5 returns up to 100 IDs per page; one page is the default scope.
-# Bump or paginate further for deeper history (~2y exposed by Riot).
-DEFAULT_MATCHES_PER_PLAYER = 100
+# Match-V5 caps a single page at 100 IDs. We use 100 everywhere and paginate
+# for deeper history.
+PAGE_SIZE = 100
+DEFAULT_BACKFILL_COUNT = 100
+STREAM_RECENT_COUNT = 5  # How many recent IDs the stream checks per player
 
 
 async def _is_bot_owner(interaction: discord.Interaction) -> bool:
@@ -38,30 +50,46 @@ async def _is_bot_owner(interaction: discord.Interaction) -> bool:
 
 
 class Backfill(commands.Cog):
-    """Owner-only commands to backfill match_stats from Riot's Match-V5."""
+    """Owner-only commands + always-on streaming for match_stats."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.bot.logging.info(f"{__name__} loaded")
         self._task: asyncio.Task | None = None
         self._progress: dict[str, int] = {}
+        self._stream_last_ran: dt.datetime | None = None
+        self._stream_total_inserts: int = 0
+        self.stream_matches.start()
+
+    def cog_unload(self) -> None:
+        self.stream_matches.cancel()
+
+    # --- slash commands -----------------------------------------------
 
     @app_commands.command(
         name="backfill_all",
-        description="(owner) Backfill recent match_stats for every tracked player",
+        description="(owner) Backfill match_stats for every tracked player",
     )
     @app_commands.default_permissions(administrator=True)
     @app_commands.guild_only()
     @app_commands.check(_is_bot_owner)
-    @app_commands.describe(count="Matches to attempt per player (max 100). Default 100.")
-    async def backfill_all(self, ctx: discord.Interaction, count: int = DEFAULT_MATCHES_PER_PLAYER):
+    @app_commands.describe(
+        count="Max matches per player (max 100). Ignored if all_history=True.",
+        all_history="Paginate through Riot's entire exposed history (~2y). Slow.",
+    )
+    async def backfill_all(
+        self,
+        ctx: discord.Interaction,
+        count: int = DEFAULT_BACKFILL_COUNT,
+        all_history: bool = False,
+    ):
         await ctx.response.defer()
 
         if self._task is not None and not self._task.done():
             await ctx.followup.send("Backfill already running. Use /backfill_status.")
             return
 
-        count = max(1, min(count, 100))
+        count = max(1, min(count, PAGE_SIZE))
 
         async with sqa.connect(self.bot.db_path) as db:
             rows = await db.execute_fetchall(
@@ -74,30 +102,41 @@ class Backfill(commands.Cog):
             return
 
         self._progress = {name: -1 for _, name in rows}
-        self._task = asyncio.create_task(self._do_backfill(list(rows), count))
+        self._task = asyncio.create_task(self._do_backfill(list(rows), count, all_history))
+        scope = "all of Riot's exposed history (~2y)" if all_history else f"up to {count} matches"
         await ctx.followup.send(
-            f"Backfilling {len(rows)} players (up to {count} matches each). "
+            f"Backfilling {len(rows)} players ({scope}). "
             f"Use /backfill_status to check progress."
         )
 
     @app_commands.command(
         name="backfill_status",
-        description="(owner) Report progress of the running (or last) backfill",
+        description="(owner) Progress of the running (or last) backfill + stream",
     )
     @app_commands.default_permissions(administrator=True)
     @app_commands.guild_only()
     @app_commands.check(_is_bot_owner)
     async def backfill_status(self, ctx: discord.Interaction):
+        # Stream summary
+        stream_when = (
+            self._stream_last_ran.strftime("%Y-%m-%d %H:%M:%S")
+            if self._stream_last_ran
+            else "never"
+        )
+        stream_line = f"stream: last ran {stream_when}, {self._stream_total_inserts} total inserts"
+
         if self._task is None:
-            await ctx.response.send_message("No backfill has been started.")
+            await ctx.response.send_message(f"No /backfill_all has been started.\n{stream_line}")
             return
 
         lines = []
         for name, inserted in self._progress.items():
-            if inserted < 0:
+            if inserted == -1:
                 lines.append(f"  {name}: queued")
+            elif inserted == -2:
+                lines.append(f"  {name}: errored")
             else:
-                lines.append(f"  {name}: {inserted} new matches")
+                lines.append(f"  {name}: {inserted} matches")
 
         if self._task.done():
             try:
@@ -109,19 +148,10 @@ class Backfill(commands.Cog):
             header = "Backfill running..."
 
         body = "\n".join(lines[:25])
-        more = f"\n  …and {len(lines) - 25} more" if len(lines) > 25 else ""
-        await ctx.response.send_message(f"{header}\n```\n{body}{more}\n```")
+        more = f"\n  ...and {len(lines) - 25} more" if len(lines) > 25 else ""
+        await ctx.response.send_message(f"{header}\n{stream_line}\n```\n{body}{more}\n```")
 
-    async def _do_backfill(self, players: list[tuple[str, str]], count: int) -> None:
-        for puuid, name in players:
-            try:
-                inserted = await self._backfill_player(puuid, count)
-                self._progress[name] = inserted
-                self.bot.logging.info(f"Backfill: {name} +{inserted} matches")
-            except Exception as exc:
-                self._progress[name] = 0
-                self.bot.logging.error(f"Backfill failed for {name}: {exc!r}")
-        self.bot.logging.info("Backfill complete")
+    # --- error handling -----------------------------------------------
 
     async def cog_app_command_error(
         self, interaction: discord.Interaction, error: app_commands.AppCommandError
@@ -138,27 +168,97 @@ class Backfill(commands.Cog):
         else:
             await interaction.response.send_message(msg, ephemeral=True)
 
-    async def _backfill_player(self, puuid: str, count: int) -> int:
-        match_ids = await get_match_ids(puuid, count=count)
-        if not match_ids:
-            return 0
+    # --- always-on stream ---------------------------------------------
 
-        # Skip matches we already have.
+    @tasks.loop(minutes=5)
+    async def stream_matches(self) -> None:
+        """Pull the last STREAM_RECENT_COUNT match IDs for every tracked
+        player and insert anything new. Cheap on steady state — most calls
+        return IDs we already have and skip the match-detail fetch.
+        """
         async with sqa.connect(self.bot.db_path) as db:
-            placeholders = ",".join("?" * len(match_ids))
-            existing_rows = await db.execute_fetchall(
-                f"SELECT match_id FROM match_stats WHERE match_id IN ({placeholders})",
-                tuple(match_ids),
+            rows = await db.execute_fetchall(
+                "SELECT puuid, league_username FROM league_players "
+                "WHERE puuid IS NOT NULL AND puuid != ''"
             )
-            existing = {row[0] for row in existing_rows}
+        for puuid, name in rows:
+            try:
+                inserted = await self._backfill_player(
+                    puuid, count=STREAM_RECENT_COUNT, all_history=False
+                )
+                if inserted > 0:
+                    self._stream_total_inserts += inserted
+                    self.bot.logging.info(f"Stream: {name} +{inserted} matches")
+            except Exception as exc:
+                self.bot.logging.error(f"Stream failed for {name}: {exc!r}")
+        self._stream_last_ran = dt.datetime.now()
 
-        to_fetch = [mid for mid in match_ids if mid not in existing]
-        if not to_fetch:
-            return 0
+    @stream_matches.before_loop
+    async def before_stream(self) -> None:
+        await self.bot.wait_until_ready()
 
+    # --- shared per-player routine ------------------------------------
+
+    async def _do_backfill(
+        self,
+        players: list[tuple[str, str]],
+        count: int,
+        all_history: bool,
+    ) -> None:
+        for puuid, name in players:
+            try:
+                inserted = await self._backfill_player(puuid, count, all_history)
+                self._progress[name] = inserted
+                self.bot.logging.info(f"Backfill: {name} +{inserted} matches")
+            except Exception as exc:
+                self._progress[name] = -2
+                self.bot.logging.error(f"Backfill failed for {name}: {exc!r}")
+        self.bot.logging.info("Backfill complete")
+
+    async def _backfill_player(self, puuid: str, count: int, all_history: bool = False) -> int:
+        """Pull match IDs for the player and insert any not already stored.
+
+        With ``all_history=False``, fetches a single page of up to ``count``
+        IDs. With ``all_history=True``, paginates by incrementing ``start``
+        until Riot returns a short page (signalling end of history).
+        Returns the total number of newly inserted matches.
+        """
+        inserted_total = 0
+        start = 0
+
+        while True:
+            page_size = PAGE_SIZE if all_history else count
+            ids = await get_match_ids(puuid, count=page_size, start=start)
+            if not ids:
+                break
+
+            # Filter out match IDs we already have stored.
+            async with sqa.connect(self.bot.db_path) as db:
+                placeholders = ",".join("?" * len(ids))
+                existing_rows = await db.execute_fetchall(
+                    f"SELECT match_id FROM match_stats WHERE match_id IN ({placeholders})",
+                    tuple(ids),
+                )
+                existing = {row[0] for row in existing_rows}
+
+            to_fetch = [mid for mid in ids if mid not in existing]
+            if to_fetch:
+                inserted_total += await self._insert_matches(puuid, to_fetch)
+
+            # Stop when Riot returned less than we asked for (end of history)
+            # or when we've satisfied a bounded request.
+            if len(ids) < page_size:
+                break
+            if not all_history:
+                break
+            start += len(ids)
+
+        return inserted_total
+
+    async def _insert_matches(self, puuid: str, match_ids: list[str]) -> int:
         inserted = 0
         async with sqa.connect(self.bot.db_path) as db:
-            for mid in to_fetch:
+            for mid in match_ids:
                 match = await get_match(mid)
                 if match is None:
                     continue

@@ -3,15 +3,17 @@
 Runs inside the bot process so Riot API calls share the global rate
 limiter in :mod:`utils.riot_client`. Two flows:
 
-* Owner slash command ``/backfill_all`` — one-shot historical pull. By
+* Slash command ``/backfill_all`` — one-shot historical pull. By
   default the most recent 100 matches per player; with ``all_history=True``
   it paginates Match-V5 to the end of Riot's exposed window (~2 years).
   Work runs as a background asyncio task so the command returns
-  immediately and the rest of the bot keeps serving.
-* ``stream_matches`` ``@tasks.loop(minutes=5)`` — always-on. Polls the most
-  recent 5 match IDs per tracked player, inserts any not already stored.
-  Catches new games soon after they happen without needing a manual
-  trigger.
+  immediately and the rest of the bot keeps serving. Responses are
+  ephemeral (only the invoker sees them) so triggering it doesn't spam
+  the channel.
+* ``stream_matches`` ``@tasks.loop(minutes=5)`` — always-on. Polls the
+  most recent 5 match IDs per tracked player, inserts any not already
+  stored. Catches new games soon after they happen without needing a
+  manual trigger.
 
 Both paths share the same per-player routine and are fully idempotent:
 match_id is the table's PRIMARY KEY, we pre-filter against existing IDs
@@ -38,19 +40,8 @@ DEFAULT_BACKFILL_COUNT = 100
 STREAM_RECENT_COUNT = 5  # How many recent IDs the stream checks per player
 
 
-async def _is_bot_owner(interaction: discord.Interaction) -> bool:
-    """Slash-command check: only the bot's registered application owner.
-
-    discord.py resolves bot.owner_id from the Discord application's owner
-    on first connect, so no IDs are hardcoded. Returning False fails the
-    check via discord.py's CheckFailure path, which the cog's error
-    handler turns into an ephemeral rejection message.
-    """
-    return await interaction.client.is_owner(interaction.user)
-
-
 class Backfill(commands.Cog):
-    """Owner-only commands + always-on streaming for match_stats."""
+    """Backfill commands + always-on streaming for match_stats."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -68,11 +59,9 @@ class Backfill(commands.Cog):
 
     @app_commands.command(
         name="backfill_all",
-        description="(owner) Backfill match_stats for every tracked player",
+        description="Backfill match_stats for every tracked player (ephemeral)",
     )
-    @app_commands.default_permissions(administrator=True)
     @app_commands.guild_only()
-    @app_commands.check(_is_bot_owner)
     @app_commands.describe(
         count="Max matches per player (max 100). Ignored if all_history=True.",
         all_history="Paginate through Riot's entire exposed history (~2y). Slow.",
@@ -83,10 +72,12 @@ class Backfill(commands.Cog):
         count: int = DEFAULT_BACKFILL_COUNT,
         all_history: bool = False,
     ):
-        await ctx.response.defer()
+        await ctx.response.defer(ephemeral=True)
 
         if self._task is not None and not self._task.done():
-            await ctx.followup.send("Backfill already running. Use /backfill_status.")
+            await ctx.followup.send(
+                "Backfill already running. Use /backfill_status.", ephemeral=True
+            )
             return
 
         count = max(1, min(count, PAGE_SIZE))
@@ -98,7 +89,7 @@ class Backfill(commands.Cog):
             )
 
         if not rows:
-            await ctx.followup.send("No players to backfill.")
+            await ctx.followup.send("No players to backfill.", ephemeral=True)
             return
 
         self._progress = {name: -1 for _, name in rows}
@@ -106,18 +97,16 @@ class Backfill(commands.Cog):
         scope = "all of Riot's exposed history (~2y)" if all_history else f"up to {count} matches"
         await ctx.followup.send(
             f"Backfilling {len(rows)} players ({scope}). "
-            f"Use /backfill_status to check progress."
+            f"Use /backfill_status to check progress.",
+            ephemeral=True,
         )
 
     @app_commands.command(
         name="backfill_status",
-        description="(owner) Progress of the running (or last) backfill + stream",
+        description="Progress of the running (or last) backfill + stream (ephemeral)",
     )
-    @app_commands.default_permissions(administrator=True)
     @app_commands.guild_only()
-    @app_commands.check(_is_bot_owner)
     async def backfill_status(self, ctx: discord.Interaction):
-        # Stream summary
         stream_when = (
             self._stream_last_ran.strftime("%Y-%m-%d %H:%M:%S")
             if self._stream_last_ran
@@ -126,7 +115,9 @@ class Backfill(commands.Cog):
         stream_line = f"stream: last ran {stream_when}, {self._stream_total_inserts} total inserts"
 
         if self._task is None:
-            await ctx.response.send_message(f"No /backfill_all has been started.\n{stream_line}")
+            await ctx.response.send_message(
+                f"No /backfill_all has been started.\n{stream_line}", ephemeral=True
+            )
             return
 
         lines = []
@@ -149,16 +140,16 @@ class Backfill(commands.Cog):
 
         body = "\n".join(lines[:25])
         more = f"\n  ...and {len(lines) - 25} more" if len(lines) > 25 else ""
-        await ctx.response.send_message(f"{header}\n{stream_line}\n```\n{body}{more}\n```")
+        await ctx.response.send_message(
+            f"{header}\n{stream_line}\n```\n{body}{more}\n```", ephemeral=True
+        )
 
     # --- error handling -----------------------------------------------
 
     async def cog_app_command_error(
         self, interaction: discord.Interaction, error: app_commands.AppCommandError
     ) -> None:
-        if isinstance(error, app_commands.CheckFailure):
-            msg = "Bot owner only."
-        elif isinstance(error, app_commands.NoPrivateMessage):
+        if isinstance(error, app_commands.NoPrivateMessage):
             msg = "Run this in the server, not DMs."
         else:
             self.bot.logging.error(f"backfill cog error: {error!r}")

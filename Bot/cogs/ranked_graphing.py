@@ -1,15 +1,16 @@
-from discord.ext import commands
-import aiosqlite as sqa
-from utils.rank_sorting_class import Ranker  # pylint: disable=E0401
-from discord import app_commands
-import discord
-from utils.autocomplete import DiscordAttachedLeagueNames  # pylint: disable=E0401
-from utils.add_a_cheg import ChegClass  # pylint: disable=E0401
-import pickle
-import matplotlib.pyplot as plt
 import datetime as dt
 import os
+import pickle
+
+import aiosqlite as sqa
+import discord
+import matplotlib.pyplot as plt
+from discord import app_commands
+from discord.ext import commands
 from main import MyDiscordBot  # pylint: disable=E0401
+from utils.add_a_cheg import ChegClass  # pylint: disable=E0401
+from utils.autocomplete import DiscordAttachedLeagueNames  # pylint: disable=E0401
+from utils.rank_sorting_class import Ranker  # pylint: disable=E0401
 
 
 class LeagueGraphs(commands.Cog):
@@ -34,9 +35,7 @@ class LeagueGraphs(commands.Cog):
             )
             print(summonerid)
             if summonerid is None:
-                await ctx.response.send_message(
-                    f"{league_name} does not exist in the database"
-                )
+                await ctx.response.send_message(f"{league_name} does not exist in the database")
                 return
             else:
                 await ctx.response.defer()
@@ -45,20 +44,21 @@ class LeagueGraphs(commands.Cog):
             #                               ephemeral=True)
 
         with open("utils/my_fig.pickle", "rb") as f:
-            fig = pickle.load(f)
+            # Load registers the figure with matplotlib's pyplot manager;
+            # the returned value isn't otherwise used.
+            pickle.load(f)
 
             # plt._backend_mod.new_figure_manager_given_figure(1, fig)
         async with sqa.connect(self.bot.db_path) as connection:
             # need to change date here for relevant split - figure out logic for it
             async with connection.execute(
-                "SELECT * FROM league_history WHERE timestamp > '2024-05-15' AND puuid = ?", (summonerid[0][0],)
+                "SELECT * FROM league_history WHERE timestamp > '2024-05-15' AND puuid = ?",
+                (summonerid[0][0],),
             ) as cursor:
                 x_to_plot = []
                 y_to_plot = []
                 async for point in cursor:
-                    x_to_plot.append(
-                        dt.datetime.strptime(point[2], "%Y-%m-%d %H:%M:%S")
-                    )
+                    x_to_plot.append(dt.datetime.strptime(point[2], "%Y-%m-%d %H:%M:%S"))
                     # lp, division, tier = point[3:6]
                     y_to_plot.append(Ranker(*point[3:6][::-1])._score)
         async with sqa.connect(self.bot.db_path) as connection:
@@ -77,9 +77,7 @@ class LeagueGraphs(commands.Cog):
             except IndexError:
                 tmp_col = "black"
             plt.scatter(x_to_plot[idx], y_to_plot[idx], marker="x", color=tmp_col)
-        plt.plot(
-            x_to_plot, y_to_plot, linewidth=2, color="black", linestyle=":", alpha=0.2
-        )
+        plt.plot(x_to_plot, y_to_plot, linewidth=2, color="black", linestyle=":", alpha=0.2)
         plt.ylim((min(y_to_plot) - 50), (max(y_to_plot) + 50))
         plt.tight_layout()
         plt.savefig("tmp/fig_to_send.jpg")
@@ -106,9 +104,7 @@ class LeagueGraphs(commands.Cog):
                 (league_name,),
             )
         if summonerid is None:
-            await ctx.response.send_message(
-                f"{league_name} does not exist in the database"
-            )
+            await ctx.response.send_message(f"{league_name} does not exist in the database")
             return
         else:
             await ctx.response.defer()
@@ -117,12 +113,15 @@ class LeagueGraphs(commands.Cog):
         #                               ephemeral=True)
 
         with open("utils/my_fig.pickle", "rb") as f:
-            fig = pickle.load(f)
+            # Load registers the figure with matplotlib's pyplot manager;
+            # the returned value isn't otherwise used.
+            pickle.load(f)
 
         # plt._backend_mod.new_figure_manager_given_figure(1, fig)
         async with sqa.connect(self.bot.db_path) as connection:
             async with connection.execute(
-                "SELECT * FROM league_history WHERE timestamp > '2024-05-15' AND puuid = ?", (summonerid[0][0],)
+                "SELECT * FROM league_history WHERE timestamp > '2024-05-15' AND puuid = ?",
+                (summonerid[0][0],),
             ) as cursor:
                 score_dict = {}
                 async for point in cursor:
@@ -145,9 +144,7 @@ class LeagueGraphs(commands.Cog):
         for key, value in score_dict.items():
             x_to_plot.append(key)
             y_to_plot.append(sum(value) / len(value))
-        plt.plot(
-            x_to_plot, y_to_plot, linewidth=2, color="black", linestyle="-.", alpha=1
-        )
+        plt.plot(x_to_plot, y_to_plot, linewidth=2, color="black", linestyle="-.", alpha=1)
         plt.ylim((min(y_to_plot) - 50), (max(y_to_plot) + 50))
         plt.xticks(rotation=45, ha="center")
         plt.tight_layout()

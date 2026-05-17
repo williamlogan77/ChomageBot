@@ -1,13 +1,14 @@
-from discord.ext import commands, tasks
-import aiosqlite as sqa
-from utils.rank_sorting_class import Ranker  # pylint: disable=E0401,E0611
-from main import MyDiscordBot  # pylint: disable=E0401
-from pantheon.utils.exceptions import RateLimit, Timeout, ServerError
-from discord import app_commands
 import asyncio
-import discord
-import aiohttp
 import os
+
+import aiohttp
+import aiosqlite as sqa
+import discord
+from discord import app_commands
+from discord.ext import commands, tasks
+from main import MyDiscordBot  # pylint: disable=E0401
+from pantheon.utils.exceptions import ServerError
+from utils.rank_sorting_class import Ranker  # pylint: disable=E0401,E0611
 
 # Want to fetch ranks to post from the database
 # want to fetch from rito every 30s
@@ -22,13 +23,13 @@ class FetchFromRiot(commands.Cog):
         self.previous_ranks = {}
         self.min_games_played = 0
 
-        self.ranked_dict: dict = None # type: ignore
+        self.ranked_dict: dict = None  # type: ignore
 
     async def fetch_users_rank(self, users):
         users_ranks = {}
         looked_up_users = []
         riot_api_key = os.environ.get("riot_key")
-        
+
         for puuid, name, user_id in users:
             user_rank = None
             while puuid not in looked_up_users:
@@ -37,9 +38,11 @@ class FetchFromRiot(commands.Cog):
                     # Direct PUUID endpoint - much simpler!
                     # Endpoint: GET /lol/league/v4/entries/by-puuid/{encryptedPUUID}
                     # Note: League API uses platform routing (euw1), not regional routing (europe)
-                    league_url = f"https://euw1.api.riotgames.com/lol/league/v4/entries/by-puuid/{puuid}"
+                    league_url = (
+                        f"https://euw1.api.riotgames.com/lol/league/v4/entries/by-puuid/{puuid}"
+                    )
                     headers = {"X-Riot-Token": riot_api_key}
-                    
+
                     async with aiohttp.ClientSession() as session:
                         async with session.get(league_url, headers=headers) as response:
                             if response.status == 200:
@@ -47,23 +50,25 @@ class FetchFromRiot(commands.Cog):
                                 looked_up_users.append(puuid)
                             elif response.status == 429:
                                 # Rate limited
-                                retry_after = int(response.headers.get('Retry-After', 10))
-                                self.bot.logging.warning(f"Rate limited, waiting {retry_after} seconds")
+                                retry_after = int(response.headers.get("Retry-After", 10))
+                                self.bot.logging.warning(
+                                    f"Rate limited, waiting {retry_after} seconds"
+                                )
                                 await asyncio.sleep(retry_after)
                             else:
                                 error_text = await response.text()
                                 raise Exception(f"HTTP {response.status}: {error_text}")
                 except Exception as e:
-                    self.bot.logging.error(f"Failed to fetch rank for {name}: {type(e).__name__} - {e}")
+                    self.bot.logging.error(
+                        f"Failed to fetch rank for {name}: {type(e).__name__} - {e}"
+                    )
                     looked_up_users.append(puuid)
                     break
-            
+
             if user_rank is None:
                 continue
 
-            fivev5 = list(
-                filter(lambda x: x["queueType"] == "RANKED_SOLO_5x5", user_rank)
-            )
+            fivev5 = list(filter(lambda x: x["queueType"] == "RANKED_SOLO_5x5", user_rank))
             if len(fivev5) > 0:
                 fivev5 = fivev5[0]
                 fivev5["user_id"] = user_id
@@ -137,9 +142,7 @@ class FetchFromRiot(commands.Cog):
                 try:
                     self.ranked_dict = await self.fetch_users_rank(cursor)
                 except ServerError as exc:
-                    self.bot.logging.error(
-                        f"Error of: {exc}, trying again in 60 seconds"
-                    )
+                    self.bot.logging.error(f"Error of: {exc}, trying again in 60 seconds")
                     await asyncio.sleep(60)
         return
 
@@ -198,13 +201,11 @@ class FetchFromRiot(commands.Cog):
             self.bot.logging.info("Posting ranks")
             self.previous_ranks = self.ranked_dict
             to_post = filter(
-                lambda x: type(x) == type({}),
+                lambda x: isinstance(x, dict),
                 [data for data in self.ranked_dict.values()],
             )
             # Sort by rank
-            sorted_results = sorted(
-                to_post, key=lambda d: d["sorted_rank"], reverse=True
-            )
+            sorted_results = sorted(to_post, key=lambda d: d["sorted_rank"], reverse=True)
 
             # Sort by winrate
             # sorted_results = sorted(to_post,

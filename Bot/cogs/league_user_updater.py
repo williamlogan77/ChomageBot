@@ -1,13 +1,12 @@
-import discord
-from discord.ext import commands
-from discord import app_commands
 import aiosqlite as sqa
-from utils.autocomplete import DiscordAttachedLeagueNames  # pylint: disable=E0401
-from main import MyDiscordBot # pylint: disable=E0401
+import discord
+from discord import app_commands
+from discord.ext import commands
+from main import MyDiscordBot
+from utils.autocomplete import DiscordAttachedLeagueNames
 
 
 class LeagueUsers(commands.Cog):
-
     def __init__(self, bot: MyDiscordBot):
         self.bot = bot
         self.bot.logging.info(f"{__name__} loaded")
@@ -26,9 +25,7 @@ class LeagueUsers(commands.Cog):
         user: discord.User,
     ):
         # Get PUUID from Account API - this is all we need now
-        puuid = (await self.bot.lolapi.get_account_by_riotId(league_name, tagline))[
-            "puuid"
-        ]
+        puuid = (await self.bot.lolapi.get_account_by_riotId(league_name, tagline))["puuid"]
 
         async with sqa.connect(self.bot.db_path) as db:  # type: ignore
             await db.execute(
@@ -75,9 +72,7 @@ class LeagueUsers(commands.Cog):
 
         else:
             async with sqa.connect(self.bot.db_path) as db:
-                await db.execute(
-                    "DELETE FROM league_players WHERE discord_user_id = ?", (user.id,)
-                )
+                await db.execute("DELETE FROM league_players WHERE discord_user_id = ?", (user.id,))
                 await db.commit()
                 await ctx.response.send_message(
                     f"successfully removed all accounts associated with {user.name}"
@@ -91,9 +86,7 @@ class LeagueUsers(commands.Cog):
     )
     async def show_all(self, ctx: discord.Interaction):
         async with sqa.connect(self.bot.db_path) as db:
-            to_show = await db.execute_fetchall(
-                "SELECT league_username, tag FROM league_players"
-            )
+            to_show = await db.execute_fetchall("SELECT league_username, tag FROM league_players")
         to_print = ""
         for name in to_show:
             to_print += str(name[0]) + "#" + str(name[1]) + "\n"

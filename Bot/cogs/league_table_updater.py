@@ -267,7 +267,11 @@ class FetchFromRiot(commands.Cog):
 
             if len(output_list) != 0:
                 to_send = "\n".join(output_list)
-                await paste.send(to_send, silent=True)
+                await paste.send(
+                    to_send,
+                    silent=True,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
 
         return
 

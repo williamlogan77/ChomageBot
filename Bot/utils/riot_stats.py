@@ -1,9 +1,4 @@
-from utils.riot_client import get_json
-
-# Match-V5 uses regional routing (europe), distinct from the platform routing
-# (euw1) used for league entries.
-REGION_ROUTE = "europe"
-RANKED_SOLO_QUEUE_ID = 420
+from utils.riot_client import get_match, get_match_ids
 
 
 async def fetch_recent_kd(puuid: str, count: int = 20) -> tuple[int, int, int, int, int]:
@@ -13,17 +8,12 @@ async def fetch_recent_kd(puuid: str, count: int = 20) -> tuple[int, int, int, i
     failure returns ``(0, 0, 0, 0, 0)``; callers should treat
     ``games_counted == 0`` as "no data".
 
-    Each call hits Riot's Match-V5 ~N+1 times. Rate-limited via the shared
-    :mod:`utils.riot_client`, so safe to call from anywhere — concurrent
-    callers serialise behind the global limiter rather than racing.
+    Each call hits Riot's Match-V5 ~N+1 times via the shared rate-limited
+    client. Safe to call concurrently — callers serialise behind the global
+    limiter rather than racing.
     """
-    ids_url = (
-        f"https://{REGION_ROUTE}.api.riotgames.com" f"/lol/match/v5/matches/by-puuid/{puuid}/ids"
-    )
-    status, match_ids = await get_json(
-        ids_url, params={"queue": RANKED_SOLO_QUEUE_ID, "count": count}
-    )
-    if status != 200 or not match_ids:
+    match_ids = await get_match_ids(puuid, count=count)
+    if not match_ids:
         return (0, 0, 0, 0, 0)
 
     kills = 0
@@ -32,9 +22,8 @@ async def fetch_recent_kd(puuid: str, count: int = 20) -> tuple[int, int, int, i
     wins = 0
     games = 0
     for match_id in match_ids:
-        match_url = f"https://{REGION_ROUTE}.api.riotgames.com" f"/lol/match/v5/matches/{match_id}"
-        status, match = await get_json(match_url)
-        if status != 200 or match is None:
+        match = await get_match(match_id)
+        if match is None:
             continue
         for p in match["info"]["participants"]:
             if p["puuid"] == puuid:

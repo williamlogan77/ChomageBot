@@ -7,7 +7,7 @@ from discord.ext import commands, tasks
 from main import MyDiscordBot
 from pantheon.utils.exceptions import ServerError
 from utils.rank_sorting_class import Ranker
-from utils.riot_client import get_json
+from utils.riot_client import get_league_entries
 from utils.riot_stats import fetch_recent_kd
 
 # Want to fetch ranks to post from the database
@@ -43,10 +43,9 @@ class FetchFromRiot(commands.Cog):
                 continue
             seen.add(puuid)
             self.bot.logging.info(f"Fetching rank for: {name}")
-            league_url = f"https://euw1.api.riotgames.com/lol/league/v4/entries/by-puuid/{puuid}"
-            status, user_rank = await get_json(league_url)
-            if status != 200 or user_rank is None:
-                self.bot.logging.error(f"Failed to fetch rank for {name}: HTTP {status}")
+            user_rank = await get_league_entries(puuid)
+            if user_rank is None:
+                self.bot.logging.error(f"Failed to fetch rank for {name}")
                 continue
 
             fivev5 = list(filter(lambda x: x["queueType"] == "RANKED_SOLO_5x5", user_rank))

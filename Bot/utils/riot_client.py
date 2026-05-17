@@ -134,15 +134,22 @@ async def get_league_entries(puuid: str) -> list[dict] | None:
 
 
 async def get_match_ids(
-    puuid: str, count: int = 20, queue: int = RANKED_SOLO_QUEUE_ID
+    puuid: str,
+    count: int = 20,
+    queue: int = RANKED_SOLO_QUEUE_ID,
+    start: int = 0,
 ) -> list[str] | None:
     """Recent match IDs for a player, newest first.
 
-    ``queue`` defaults to ranked solo/duo (420). Match-V5 uses the regional
-    host (europe), not the platform host (euw1).
+    ``queue`` defaults to ranked solo/duo (420). ``start`` is the offset into
+    the player's match history (0 = newest). Match-V5 returns up to 100 per
+    page; paginate by incrementing ``start``. A short response (< requested
+    count) signals end of history.
+
+    Match-V5 uses the regional host (europe), not the platform host (euw1).
     """
     url = f"{REGION_HOST}/lol/match/v5/matches/by-puuid/{puuid}/ids"
-    status, body = await _get_json(url, params={"queue": queue, "count": count})
+    status, body = await _get_json(url, params={"queue": queue, "count": count, "start": start})
     if status != 200 or not isinstance(body, list):
         return None
     return body

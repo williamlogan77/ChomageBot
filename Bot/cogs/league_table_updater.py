@@ -13,6 +13,12 @@ from utils.rank_sorting_class import Ranker
 # Want to fetch ranks to post from the database
 # want to fetch from rito every 30s
 
+# Channel + threshold for the loss-streak callout. When a tracked player's
+# most-recent N consecutive games are all losses, the bot pings them once
+# in this channel. The ping rearms after they win again.
+STREAK_PING_CHANNEL = 667751882260742167  # #general
+STREAK_THRESHOLD = 7
+
 
 class FetchFromRiot(commands.Cog):
     def __init__(self, bot: MyDiscordBot):
@@ -23,6 +29,7 @@ class FetchFromRiot(commands.Cog):
         self.previous_ranks = {}
         self.min_games_played = 0
         self.last_updated_by: list[str] = []
+        self.streak_pinged: set[str] = set()
 
         self.ranked_dict: dict | None = None
 
@@ -182,6 +189,59 @@ class FetchFromRiot(commands.Cog):
         # Cap to last 5; reverse so newest game is on the right.
         return "".join(reversed(sequence[:5]))
 
+    async def get_recent_streak(self, puuid):
+        """Return the count of consecutive losses ending at the most recent game.
+
+        Looks at the last ~15 history rows for the player (covering both
+        legacy-summonerId-keyed and real-puuid-keyed rows), reconstructs the
+        outcome sequence (newest first), and counts leading losses. Returns
+        0 if the most recent game was a win or there's no history.
+
+        Within a multi-game-per-cycle diff we don't know the in-cycle order;
+        we conservatively place wins BEFORE losses in the sequence, which
+        means a (1W, 2L) diff at the head reports a 0-game loss streak even
+        if losses could have come last. False-negatives over false-positives
+        for the ping.
+        """
+        async with sqa.connect(self.bot.db_path) as connection:
+            async with connection.execute(
+                "SELECT wins, losses FROM league_history "
+                "WHERE puuid IN ("
+                "    SELECT leagueId FROM league_players WHERE puuid = ?"
+                "    UNION"
+                "    SELECT puuid    FROM league_players WHERE puuid = ?"
+                ") "
+                "AND wins IS NOT NULL AND losses IS NOT NULL "
+                "ORDER BY id DESC LIMIT 15",
+                (puuid, puuid),
+            ) as cursor:
+                rows = await cursor.fetchall()
+        if len(rows) < 2:
+            return 0
+        sequence: list[str] = []
+        for i in range(len(rows) - 1):
+            newer_w, newer_l = rows[i]
+            older_w, older_l = rows[i + 1]
+            delta_w = max(newer_w - older_w, 0)
+            delta_l = max(newer_l - older_l, 0)
+            sequence.extend(["W"] * delta_w + ["L"] * delta_l)
+        streak = 0
+        for outcome in sequence:
+            if outcome == "L":
+                streak += 1
+            else:
+                break
+        return streak
+
+    async def send_streak_ping(self, user_id: int, streak: int) -> None:
+        channel = self.bot.get_channel(STREAK_PING_CHANNEL)
+        if channel is None:
+            self.bot.logging.warning(
+                f"Streak channel {STREAK_PING_CHANNEL} not found, skipping ping"
+            )
+            return
+        await channel.send(f"\U0001f635 <@{user_id}> is on a **{streak}-game loss streak**. F.")
+
     async def get_name(self, puuid):
         async with sqa.connect(self.bot.db_path) as connection:
             async with connection.execute_fetchall(
@@ -238,6 +298,18 @@ class FetchFromRiot(commands.Cog):
 
             if updated_users:
                 self.last_updated_by = updated_users
+
+            # Streak ping: only check players whose LP changed this cycle so
+            # we don't spam Riot's DB on every refresh. Posts once when a
+            # player crosses STREAK_THRESHOLD; rearms when their streak breaks.
+            for user in updated_users:
+                posting_data = self.ranked_dict[user]
+                streak = await self.get_recent_streak(posting_data["puuid"])
+                if streak >= STREAK_THRESHOLD and user not in self.streak_pinged:
+                    await self.send_streak_ping(posting_data["user_id"], streak)
+                    self.streak_pinged.add(user)
+                elif streak < STREAK_THRESHOLD and user in self.streak_pinged:
+                    self.streak_pinged.discard(user)
 
             self.bot.logging.info("Posting ranks")
             self.previous_ranks = self.ranked_dict

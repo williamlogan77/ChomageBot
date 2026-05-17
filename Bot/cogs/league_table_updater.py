@@ -147,6 +147,32 @@ class FetchFromRiot(commands.Cog):
                     await asyncio.sleep(60)
         return
 
+    async def get_last_five_games(self, puuid):
+        async with sqa.connect(self.bot.db_path) as connection:
+            async with connection.execute(
+                "SELECT wins, losses FROM league_history "
+                "WHERE puuid = ? AND wins IS NOT NULL AND losses IS NOT NULL "
+                "ORDER BY id DESC LIMIT 6",
+                (puuid,),
+            ) as cursor:
+                rows = await cursor.fetchall()
+        if not rows:
+            return ""
+        sequence = []
+        for i in range(len(rows) - 1):
+            newer_w, newer_l = rows[i]
+            older_w, older_l = rows[i + 1]
+            delta_w = max(newer_w - older_w, 0)
+            delta_l = max(newer_l - older_l, 0)
+            sequence.extend(["\U0001f7e9"] * delta_w + ["\U0001f7e5"] * delta_l)
+        # Implicit (0,0) baseline for brand-new accounts: only valid when the
+        # oldest fetched row's cumulative game count is small.
+        oldest_w, oldest_l = rows[-1]
+        if oldest_w + oldest_l <= 5:
+            sequence.extend(["\U0001f7e9"] * oldest_w + ["\U0001f7e5"] * oldest_l)
+        # Cap to last 5; reverse so newest game is on the right.
+        return "".join(reversed(sequence[:5]))
+
     async def get_name(self, puuid):
         async with sqa.connect(self.bot.db_path) as connection:
             async with connection.execute_fetchall(
@@ -223,6 +249,8 @@ class FetchFromRiot(commands.Cog):
                 updated_flag = (
                     " \U0001f6a9" if posting["summonerName"] in self.last_updated_by else ""
                 )
+                last_five = await self.get_last_five_games(posting["puuid"])
+                last_five_line = f"Last 5: {last_five}\n" if last_five else ""
                 if posting["tier"].title() == "Master":
                     post = (
                         str(index + 1)
@@ -243,6 +271,7 @@ class FetchFromRiot(commands.Cog):
                         + str("{:.2f}".format(posting["WinRate"]))
                         + "% winrate"
                         + "\n"
+                        + last_five_line
                     )
                 else:
                     post = (
@@ -266,6 +295,7 @@ class FetchFromRiot(commands.Cog):
                         + str("{:.2f}".format(posting["WinRate"]))
                         + "% winrate"
                         + "\n"
+                        + last_five_line
                     )
                 output_list.append(post)
 

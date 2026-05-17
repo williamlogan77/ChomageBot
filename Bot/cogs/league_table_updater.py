@@ -6,9 +6,9 @@ import aiosqlite as sqa
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
-from main import MyDiscordBot  # pylint: disable=E0401
+from main import MyDiscordBot
 from pantheon.utils.exceptions import ServerError
-from utils.rank_sorting_class import Ranker  # pylint: disable=E0401,E0611
+from utils.rank_sorting_class import Ranker
 
 # Want to fetch ranks to post from the database
 # want to fetch from rito every 30s
@@ -18,8 +18,8 @@ class FetchFromRiot(commands.Cog):
     def __init__(self, bot: MyDiscordBot):
         self.bot = bot
         self.bot.logging.info(f"{__name__} loaded")
-        self.post_ranks.start()  # pylint: disable=E1101
-        # self.fetch_ranks_from_riot.start() # pylint: disable=E1101
+        self.post_ranks.start()
+        # self.fetch_ranks_from_riot.start()
         self.previous_ranks = {}
         self.min_games_played = 0
         self.last_updated_by: list[str] = []
@@ -354,9 +354,9 @@ class FetchFromRiot(commands.Cog):
     async def stop_ranks(self, ctx: discord.Interaction):
         await ctx.response.defer()
         msg = await ctx.followup.send("Stopping...", wait=True, ephemeral=True)
-        self.post_ranks.stop()  # pylint: disable=E1101
+        self.post_ranks.stop()
         await asyncio.sleep(30)
-        self.post_ranks.cancel()  # pylint: disable=E1101
+        self.post_ranks.cancel()
         await msg.edit(content="Stopped refreshing of ranks")
         self.bot.logging.info("Stopped the refreshing of ranks posting")
 
@@ -367,10 +367,10 @@ class FetchFromRiot(commands.Cog):
     async def start_ranks(self, ctx: discord.Interaction):
         await ctx.response.defer()
         msg = await ctx.followup.send("Starting...", wait=True, ephemeral=True)
-        if self.post_ranks.is_running():  # pylint: disable=E1101
+        if self.post_ranks.is_running():
             await msg.edit(content="Already running, cannot start")
         else:
-            self.post_ranks.start()  # pylint: disable=E1101
+            self.post_ranks.start()
             await msg.edit(content="Started refreshing of ranks")
             self.bot.logging.info("Started rank refresh")
 

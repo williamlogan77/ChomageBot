@@ -1,9 +1,10 @@
 import glob
 import os
+
 import discord
-from discord.ext.commands import GroupCog
 from discord.app_commands import command
-from main import MyDiscordBot  # pylint: disable=E0401
+from discord.ext.commands import GroupCog
+from main import MyDiscordBot
 
 
 class Refresh(
@@ -44,7 +45,7 @@ class Refresh(
 
         os.chdir("cogs/")
         loaded = 0
-        for idx, cog in enumerate(glob.glob("*.py")):
+        for cog in glob.glob("*.py"):
             if not cog.startswith("sync"):
                 try:
                     self.bot.logging.info(f"Unloading {cog}")

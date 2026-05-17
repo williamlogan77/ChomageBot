@@ -7,10 +7,10 @@ import discord
 import matplotlib.pyplot as plt
 from discord import app_commands
 from discord.ext import commands
-from main import MyDiscordBot  # pylint: disable=E0401
-from utils.add_a_cheg import ChegClass  # pylint: disable=E0401
-from utils.autocomplete import DiscordAttachedLeagueNames  # pylint: disable=E0401
-from utils.rank_sorting_class import Ranker  # pylint: disable=E0401
+from main import MyDiscordBot
+from utils.add_a_cheg import ChegClass
+from utils.autocomplete import DiscordAttachedLeagueNames
+from utils.rank_sorting_class import Ranker
 
 # Start of the current ranked split. Update manually when Riot starts a new split.
 CURRENT_SPLIT_START = "2024-05-15"

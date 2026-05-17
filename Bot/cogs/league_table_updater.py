@@ -22,6 +22,7 @@ class FetchFromRiot(commands.Cog):
         # self.fetch_ranks_from_riot.start() # pylint: disable=E1101
         self.previous_ranks = {}
         self.min_games_played = 0
+        self.last_updated_by: list[str] = []
 
         self.ranked_dict: dict = None  # type: ignore
 
@@ -187,6 +188,7 @@ class FetchFromRiot(commands.Cog):
         #     return
 
         if (self.ranked_dict != self.previous_ranks) or (not self.previous_ranks):
+            updated_users: list[str] = []
             for user in self.ranked_dict.keys():
                 await self.check_name(self.ranked_dict[user]["puuid"])
 
@@ -197,6 +199,10 @@ class FetchFromRiot(commands.Cog):
                     ):
                         print(f"{user} updated", flush=True)
                         await self.update_table(user, self.ranked_dict[user])
+                        updated_users.append(user)
+
+            if updated_users:
+                self.last_updated_by = updated_users
 
             self.bot.logging.info("Posting ranks")
             self.previous_ranks = self.ranked_dict
@@ -214,12 +220,16 @@ class FetchFromRiot(commands.Cog):
 
             output_list = []
             for index, posting in enumerate(sorted_results):
+                updated_flag = (
+                    " \U0001f6a9" if posting["summonerName"] in self.last_updated_by else ""
+                )
                 if posting["tier"].title() == "Master":
                     post = (
                         str(index + 1)
                         + ". "
                         + posting["summonerName"]
                         + f" - <@{posting['user_id']}>"
+                        + updated_flag
                         + "\n"
                         + "Rank: "
                         + posting["tier"].title()
@@ -240,6 +250,7 @@ class FetchFromRiot(commands.Cog):
                         + ". "
                         + posting["summonerName"]
                         + f" - <@{posting['user_id']}>"
+                        + updated_flag
                         + "\n"
                         + "Rank: "
                         + posting["tier"].title()

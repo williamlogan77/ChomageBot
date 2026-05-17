@@ -30,5 +30,18 @@ create table if not exists league_history (
     division TEXT,
     tier TEXT
 );
+create table if not exists match_stats (
+    match_id TEXT not null primary key,
+    puuid TEXT not null,
+    game_start DATETIME not null,
+    queue_id INTEGER not null,
+    champion TEXT not null,
+    win INTEGER not null,
+    kills INTEGER not null,
+    deaths INTEGER not null,
+    assists INTEGER not null,
+    duration_sec INTEGER not null
+);
+create index if not exists idx_match_stats_puuid_time on match_stats (puuid, game_start DESC);
 create unique index if not exists discord_events_event_id_uindex on discord_events (event_id);
 create unique index if not exists users_user_id_uindex on users (user_id);

@@ -89,22 +89,22 @@ class MyDiscordBot(Bot):
 
 
 def setup_db(logger: logging.Logger) -> None:
-    if not os.path.isfile("./db/database.sqlite"):
-        MyDiscordBot.info("Setting up database")
-        with open("./db/database.sqlite", "x", encoding="utf-8") as f:
-            pass
-        with sq.connect("./db/database.sqlite") as connection:
-            cursor = connection.cursor()
-            with open("./db/setup.sql", encoding="utf-8") as f:
-                sql_code = f.read()
-            cursor.executescript(sql_code)
-    else:
-        logger.info("Database exists, setup done.")
+    """Apply ./db/setup.sql to the database. Safe to run on every boot —
+    every statement uses CREATE TABLE/INDEX IF NOT EXISTS, so this is a
+    no-op when the schema is already current.
+    """
+    db_path = "./db/database.sqlite"
+    if not os.path.isfile(db_path):
+        logger.info("Creating empty database file")
+        open(db_path, "x", encoding="utf-8").close()
+    with sq.connect(db_path) as connection:
+        with open("./db/setup.sql", encoding="utf-8") as f:
+            connection.executescript(f.read())
+    logger.info("Database schema applied")
 
 
 async def main(my_token: str) -> None:
-    # my_logger = logging.getLogger()
-    # setup_db(my_logger)
+    setup_db(logging.getLogger())
     dbpath = "./db/database.sqlite"
     server_id = int(os.environ.get("guild_id", "0"))
     if server_id == 0:

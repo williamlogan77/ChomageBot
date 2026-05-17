@@ -13,7 +13,8 @@ from utils.autocomplete import DiscordAttachedLeagueNames
 from utils.rank_sorting_class import Ranker
 
 # Start of the current ranked split. Update manually when Riot starts a new split.
-CURRENT_SPLIT_START = "2024-05-15"
+# 2026 Season 2 "Pandemonium" began 2026-04-29 at noon local server time.
+CURRENT_SPLIT_START = "2026-04-29 12:00:00"
 
 
 class LeagueGraphs(commands.Cog):

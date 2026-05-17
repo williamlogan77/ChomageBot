@@ -24,7 +24,7 @@ class FetchFromRiot(commands.Cog):
         self.min_games_played = 0
         self.last_updated_by: list[str] = []
 
-        self.ranked_dict: dict = None  # type: ignore
+        self.ranked_dict: dict | None = None
 
     async def fetch_users_rank(self, users):
         users_ranks = {}

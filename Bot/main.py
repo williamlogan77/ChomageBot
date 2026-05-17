@@ -121,7 +121,10 @@ async def main(my_token: str) -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main(os.environ.get("token")))  # type: ignore
+    token = os.environ.get("token")
+    if not token:
+        raise ValueError("token env var must be set in .env file")
+    asyncio.run(main(token))
 
 #
 # bot.start(token)

@@ -1,0 +1,30 @@
+name: ruff format
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # tj-actions/changed-files needs history to compute the diff
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install ruff
+        run: pip install "ruff==0.8.*"
+      - name: Detect changed Python files
+        id: changed
+        uses: tj-actions/changed-files@v47
+        with:
+          files: "**/*.py"
+      - name: Ruff format check (changed files only)
+        if: steps.changed.outputs.any_changed == 'true'
+        env:
+          FILES: ${{ steps.changed.outputs.all_changed_files }}
+        run: ruff format --check $FILES

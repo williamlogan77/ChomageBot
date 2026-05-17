@@ -44,8 +44,9 @@ class Refresh(
         self.bot.logging.info("updating cogs")
 
         os.chdir("cogs/")
+        cogs = glob.glob("*.py")
         loaded = 0
-        for cog in glob.glob("*.py"):
+        for cog in cogs:
             if not cog.startswith("sync"):
                 try:
                     self.bot.logging.info(f"Unloading {cog}")
@@ -59,7 +60,7 @@ class Refresh(
         os.chdir("../")
 
         await msg.edit(content="Sucessfully reloaded all cogs.")
-        self.bot.logging.info(f"Synced and reloaded {loaded}/{idx} cogs")
+        self.bot.logging.info(f"Synced and reloaded {loaded}/{len(cogs)} cogs")
 
 
 async def setup(bot: MyDiscordBot):

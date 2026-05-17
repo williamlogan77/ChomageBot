@@ -12,6 +12,9 @@ from utils.add_a_cheg import ChegClass  # pylint: disable=E0401
 from utils.autocomplete import DiscordAttachedLeagueNames  # pylint: disable=E0401
 from utils.rank_sorting_class import Ranker  # pylint: disable=E0401
 
+# Start of the current ranked split. Update manually when Riot starts a new split.
+CURRENT_SPLIT_START = "2024-05-15"
+
 
 class LeagueGraphs(commands.Cog):
     def __init__(self, bot: MyDiscordBot):
@@ -50,10 +53,9 @@ class LeagueGraphs(commands.Cog):
 
             # plt._backend_mod.new_figure_manager_given_figure(1, fig)
         async with sqa.connect(self.bot.db_path) as connection:
-            # need to change date here for relevant split - figure out logic for it
             async with connection.execute(
-                "SELECT * FROM league_history WHERE timestamp > '2024-05-15' AND puuid = ?",
-                (summonerid[0][0],),
+                "SELECT * FROM league_history WHERE timestamp > ? AND puuid = ?",
+                (CURRENT_SPLIT_START, summonerid[0][0]),
             ) as cursor:
                 x_to_plot = []
                 y_to_plot = []
@@ -120,8 +122,8 @@ class LeagueGraphs(commands.Cog):
         # plt._backend_mod.new_figure_manager_given_figure(1, fig)
         async with sqa.connect(self.bot.db_path) as connection:
             async with connection.execute(
-                "SELECT * FROM league_history WHERE timestamp > '2024-05-15' AND puuid = ?",
-                (summonerid[0][0],),
+                "SELECT * FROM league_history WHERE timestamp > ? AND puuid = ?",
+                (CURRENT_SPLIT_START, summonerid[0][0]),
             ) as cursor:
                 score_dict = {}
                 async for point in cursor:

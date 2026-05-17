@@ -64,6 +64,13 @@ class LeagueGraphs(commands.Cog):
                     x_to_plot.append(dt.datetime.strptime(point[2], "%Y-%m-%d %H:%M:%S"))
                     # lp, division, tier = point[3:6]
                     y_to_plot.append(Ranker(*point[3:6][::-1])._score)
+        if not y_to_plot:
+            await ctx.followup.send(
+                f"No ranked games for {league_name} since the current split "
+                f"started ({CURRENT_SPLIT_START})."
+            )
+            return
+
         async with sqa.connect(self.bot.db_path) as connection:
             user = await connection.execute_fetchall(
                 "SELECT league_username FROM league_players WHERE leagueId = ?",
@@ -139,6 +146,13 @@ class LeagueGraphs(commands.Cog):
                 "SELECT league_username FROM league_players WHERE leagueId = ?",
                 (summonerid[0][0],),
             )
+
+        if not score_dict:
+            await ctx.followup.send(
+                f"No ranked games for {league_name} since the current split "
+                f"started ({CURRENT_SPLIT_START})."
+            )
+            return
 
         plt.title(user[0][0])
 

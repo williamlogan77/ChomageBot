@@ -12,9 +12,11 @@ from utils.add_a_cheg import ChegClass
 from utils.autocomplete import DiscordAttachedLeagueNames
 from utils.rank_sorting_class import Ranker
 
-# Start of the current ranked split. Update manually when Riot starts a new split.
-# 2026 Season 2 "Pandemonium" began 2026-04-29 at noon local server time.
-CURRENT_SPLIT_START = "2026-04-29 12:00:00"
+# Start of the current ranked tracking window. Update manually when a new
+# year/season starts. Currently set to the 2026 ranked year opener
+# ('For Demacia', Season 1) — 2026-01-08 noon local server time per
+# Riot's annual cycle announcement. Includes all of 2026's ranked games.
+CURRENT_SPLIT_START = "2026-01-08 12:00:00"
 
 
 class LeagueGraphs(commands.Cog):

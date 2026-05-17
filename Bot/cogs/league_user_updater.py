@@ -27,7 +27,7 @@ class LeagueUsers(commands.Cog):
         # Get PUUID from Account API - this is all we need now
         puuid = (await self.bot.lolapi.get_account_by_riotId(league_name, tagline))["puuid"]
 
-        async with sqa.connect(self.bot.db_path) as db:  # type: ignore
+        async with sqa.connect(self.bot.db_path) as db:
             await db.execute(
                 """REPLACE INTO league_players (
                         discord_user_id,

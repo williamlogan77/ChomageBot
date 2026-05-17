@@ -26,8 +26,19 @@ log = logging.getLogger(__name__)
 DEFAULT_MATCHES_PER_PLAYER = 100
 
 
+async def _is_bot_owner(interaction: discord.Interaction) -> bool:
+    """Slash-command check: only the bot's registered application owner.
+
+    discord.py resolves bot.owner_id from the Discord application's owner
+    on first connect, so no IDs are hardcoded. Returning False fails the
+    check via discord.py's CheckFailure path, which the cog's error
+    handler turns into an ephemeral rejection message.
+    """
+    return await interaction.client.is_owner(interaction.user)
+
+
 class Backfill(commands.Cog):
-    """Admin commands to backfill match_stats from Riot's Match-V5."""
+    """Owner-only commands to backfill match_stats from Riot's Match-V5."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -37,9 +48,11 @@ class Backfill(commands.Cog):
 
     @app_commands.command(
         name="backfill_all",
-        description="(admin) Backfill recent match_stats for every tracked player",
+        description="(owner) Backfill recent match_stats for every tracked player",
     )
     @app_commands.default_permissions(administrator=True)
+    @app_commands.guild_only()
+    @app_commands.check(_is_bot_owner)
     @app_commands.describe(count="Matches to attempt per player (max 100). Default 100.")
     async def backfill_all(self, ctx: discord.Interaction, count: int = DEFAULT_MATCHES_PER_PLAYER):
         await ctx.response.defer()
@@ -69,8 +82,11 @@ class Backfill(commands.Cog):
 
     @app_commands.command(
         name="backfill_status",
-        description="Report progress of the running (or last) backfill",
+        description="(owner) Report progress of the running (or last) backfill",
     )
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.guild_only()
+    @app_commands.check(_is_bot_owner)
     async def backfill_status(self, ctx: discord.Interaction):
         if self._task is None:
             await ctx.response.send_message("No backfill has been started.")
@@ -106,6 +122,21 @@ class Backfill(commands.Cog):
                 self._progress[name] = 0
                 self.bot.logging.error(f"Backfill failed for {name}: {exc!r}")
         self.bot.logging.info("Backfill complete")
+
+    async def cog_app_command_error(
+        self, interaction: discord.Interaction, error: app_commands.AppCommandError
+    ) -> None:
+        if isinstance(error, app_commands.CheckFailure):
+            msg = "Bot owner only."
+        elif isinstance(error, app_commands.NoPrivateMessage):
+            msg = "Run this in the server, not DMs."
+        else:
+            self.bot.logging.error(f"backfill cog error: {error!r}")
+            msg = f"Command failed: {error!r}"
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
 
     async def _backfill_player(self, puuid: str, count: int) -> int:
         match_ids = await get_match_ids(puuid, count=count)

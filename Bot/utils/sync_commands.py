@@ -28,7 +28,6 @@ Reads ``token`` and ``guild_id`` from ../.env (same as main.py).
 from __future__ import annotations
 
 import asyncio
-import glob
 import logging
 import os
 import sys
@@ -67,23 +66,14 @@ async def main() -> None:
         db_path="./db/database.sqlite",
         serverid=guild_id,
     )
-    bot.logging = log  # cogs reference this; set it before loading them
+    bot.logging = log  # cogs reference this
 
-    loaded = 0
-    skipped = []
-    for path in glob.glob("./cogs/*.py"):
-        cog_name = os.path.basename(path)[:-3]
-        try:
-            await bot.load_extension(f"cogs.{cog_name}")
-            loaded += 1
-        except Exception as exc:
-            skipped.append((cog_name, repr(exc)))
-    log.info(f"Loaded {loaded} cog(s); skipped {len(skipped)}")
-    for name, err in skipped:
-        log.warning(f"  skipped {name}: {err}")
-
-    log.info("REST login (no Gateway)...")
+    # bot.login() triggers MyDiscordBot.setup_hook(), which loads every
+    # cog and so populates the command tree. No Gateway connection is
+    # established, so the running bot's session isn't disturbed.
+    log.info("REST login (no Gateway, triggers cog load via setup_hook)...")
     await bot.login(token)
+    log.info(f"Loaded extensions: {sorted(bot.extensions.keys())}")
 
     guild = discord.Object(id=guild_id)
     log.info(f"Syncing commands to guild {guild_id}...")

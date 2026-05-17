@@ -75,12 +75,22 @@ async def main() -> None:
     await bot.login(token)
     log.info(f"Loaded extensions: {sorted(bot.extensions.keys())}")
 
+    # Cogs register their commands globally by default (no `guild` arg on
+    # @app_commands.command). copy_global_to() mirrors them into the guild
+    # so the guild-scoped sync below makes them appear in this server
+    # immediately. The follow-up global sync keeps the same set canonical
+    # so other servers (or DMs, if relevant) eventually see them too.
     guild = discord.Object(id=guild_id)
-    log.info(f"Syncing commands to guild {guild_id}...")
-    synced = await bot.tree.sync(guild=guild)
-    log.info(f"Synced {len(synced)} guild command(s):")
-    for cmd in synced:
+    log.info(f"Copying global commands into guild {guild_id}...")
+    bot.tree.copy_global_to(guild=guild)
+    guild_synced = await bot.tree.sync(guild=guild)
+    log.info(f"Synced {len(guild_synced)} guild command(s):")
+    for cmd in guild_synced:
         log.info(f"  /{cmd.name}")
+
+    log.info("Syncing global commands (may take up to 1h to propagate)...")
+    global_synced = await bot.tree.sync()
+    log.info(f"Synced {len(global_synced)} global command(s)")
 
     await bot.close()
 

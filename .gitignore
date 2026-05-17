@@ -2,3 +2,15 @@
 __pycache__/
 .env
 
+# SQLite working files. The main DB at Bot/db/database.sqlite is tracked
+# as a reference snapshot updated from prod; these working files are
+# transient and shouldn't be committed.
+Bot/db/database.sqlite-shm
+Bot/db/database.sqlite-wal
+
+# Bot runtime dir, created by startup.sh on container start
+Bot/tmp/
+
+# Local-only project override (see CLAUDE.local.md.example)
+CLAUDE.local.md
+

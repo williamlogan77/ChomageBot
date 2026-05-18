@@ -1,3 +1,9 @@
+-- Persist journal mode = WAL on this DB. Avoids "database is locked"
+-- contention between concurrent writers (e.g. backfill writing match_stats
+-- while post_ranks writes league_history). Persistent in the file once set;
+-- this line keeps fresh DBs (from a clean container build) on WAL too.
+pragma journal_mode = wal;
+
 create table if not exists discord_channels (
     channel_id INTEGER not null primary key,
     name TEXT not null,

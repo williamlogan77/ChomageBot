@@ -1,4 +1,5 @@
 import asyncio
+import datetime as dt
 
 import aiosqlite as sqa
 import discord
@@ -31,6 +32,7 @@ class FetchFromRiot(commands.Cog):
         self.last_updated_by: list[str] = []
         self.streak_pinged: set[str] = set()
         self.previous_positions: dict[str, int] = {}
+        self.post_ranks_last_fired: dt.datetime | None = None
 
         self.ranked_dict: dict | None = None
 
@@ -397,7 +399,25 @@ class FetchFromRiot(commands.Cog):
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
 
+        # Watchdog input: heartbeat cog reads this and reloads us if it
+        # goes stale (typically because a Gateway disconnect left the
+        # @tasks.loop in a state where it never fires again).
+        self.post_ranks_last_fired = dt.datetime.now()
         return
+
+    @post_ranks.error
+    async def post_ranks_error(self, exc: BaseException) -> None:
+        """Auto-restart post_ranks on unhandled error.
+
+        Default @tasks.loop behaviour on exception is to log + stop the
+        loop. That leaves the leaderboard frozen until manual recovery.
+        Log, back off briefly, then restart so transient errors heal
+        themselves.
+        """
+        self.bot.logging.error(f"post_ranks errored: {exc!r}, restarting in 60s")
+        await asyncio.sleep(60)
+        if not self.post_ranks.is_running():
+            self.post_ranks.start()
 
     @app_commands.command(
         name="set_minimum_games_played",

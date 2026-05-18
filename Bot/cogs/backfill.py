@@ -102,6 +102,22 @@ class Backfill(commands.Cog):
         )
 
     @app_commands.command(
+        name="backfill_cancel",
+        description="Cancel the running backfill (resumable — already-stored matches are kept)",
+    )
+    @app_commands.guild_only()
+    async def backfill_cancel(self, ctx: discord.Interaction):
+        if self._task is None or self._task.done():
+            await ctx.response.send_message("No backfill is running.", ephemeral=True)
+            return
+        self._task.cancel()
+        self.bot.logging.info("Backfill cancelled by /backfill_cancel")
+        await ctx.response.send_message(
+            "Cancelled. Re-run /backfill_all later to pick up where it left off.",
+            ephemeral=True,
+        )
+
+    @app_commands.command(
         name="backfill_status",
         description="Progress of the running (or last) backfill + stream (ephemeral)",
     )
@@ -175,7 +191,7 @@ class Backfill(commands.Cog):
         for puuid, name in rows:
             try:
                 inserted = await self._backfill_player(
-                    puuid, count=STREAM_RECENT_COUNT, all_history=False
+                    puuid, count=STREAM_RECENT_COUNT, all_history=False, name=name
                 )
                 if inserted > 0:
                     self._stream_total_inserts += inserted
@@ -197,27 +213,38 @@ class Backfill(commands.Cog):
         all_history: bool,
     ) -> None:
         for puuid, name in players:
+            self.bot.logging.info(
+                f"Backfill: starting {name} (all_history={all_history}, count={count})"
+            )
             try:
-                inserted = await self._backfill_player(puuid, count, all_history)
+                inserted = await self._backfill_player(puuid, count, all_history, name=name)
                 self._progress[name] = inserted
-                self.bot.logging.info(f"Backfill: {name} +{inserted} matches")
+                self.bot.logging.info(f"Backfill: {name} done, +{inserted} matches total")
             except Exception as exc:
                 self._progress[name] = -2
                 self.bot.logging.error(f"Backfill failed for {name}: {exc!r}")
-        self.bot.logging.info("Backfill complete")
+        self.bot.logging.info("Backfill: all players complete")
 
-    async def _backfill_player(self, puuid: str, count: int, all_history: bool = False) -> int:
+    async def _backfill_player(
+        self, puuid: str, count: int, all_history: bool = False, name: str | None = None
+    ) -> int:
         """Pull match IDs for the player and insert any not already stored.
 
         With ``all_history=False``, fetches a single page of up to ``count``
         IDs. With ``all_history=True``, paginates by incrementing ``start``
         until Riot returns a short page (signalling end of history).
         Returns the total number of newly inserted matches.
+
+        ``name`` is purely for log readability; falls back to a truncated
+        puuid when not given (the stream loop always passes it).
         """
         inserted_total = 0
         start = 0
+        page_num = 0
+        label = name or f"{puuid[:8]}..."
 
         while True:
+            page_num += 1
             page_size = PAGE_SIZE if all_history else count
             ids = await get_match_ids(puuid, count=page_size, start=start)
             if not ids:
@@ -234,7 +261,15 @@ class Backfill(commands.Cog):
 
             to_fetch = [mid for mid in ids if mid not in existing]
             if to_fetch:
-                inserted_total += await self._insert_matches(puuid, to_fetch)
+                page_new = await self._insert_matches(puuid, to_fetch)
+                inserted_total += page_new
+                # Page-level log only when the page actually delivered new rows.
+                # Steady-state stream calls (all matches already in DB) stay quiet.
+                if page_new > 0:
+                    self.bot.logging.info(
+                        f"Backfill: {label} page {page_num} "
+                        f"(start={start}, +{page_new} new, total {inserted_total})"
+                    )
 
             # Stop when Riot returned less than we asked for (end of history)
             # or when we've satisfied a bounded request.

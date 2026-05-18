@@ -56,9 +56,17 @@ class LeagueGraphs(commands.Cog):
 
             # plt._backend_mod.new_figure_manager_given_figure(1, fig)
         async with sqa.connect(self.bot.db_path) as connection:
+            # Older history rows are keyed by the legacy 47-char summoner ID
+            # (league_players.leagueId), newer rows by the real 78-char puuid.
+            # Match on either via a UNION subquery so legacy-tracked players
+            # (e.g. DARWIN DARWIN N) actually see their post-migration games.
             async with connection.execute(
-                "SELECT * FROM league_history WHERE timestamp > ? AND puuid = ?",
-                (CURRENT_SPLIT_START, summonerid[0][0]),
+                "SELECT * FROM league_history WHERE timestamp > ? AND puuid IN ("
+                "    SELECT leagueId FROM league_players WHERE league_username = ?"
+                "    UNION"
+                "    SELECT puuid FROM league_players WHERE league_username = ?"
+                ") ORDER BY timestamp ASC",
+                (CURRENT_SPLIT_START, league_name, league_name),
             ) as cursor:
                 x_to_plot = []
                 y_to_plot = []
@@ -131,9 +139,15 @@ class LeagueGraphs(commands.Cog):
 
         # plt._backend_mod.new_figure_manager_given_figure(1, fig)
         async with sqa.connect(self.bot.db_path) as connection:
+            # See generate_singular: match both legacy leagueId and modern
+            # puuid via UNION so legacy-tracked players surface correctly.
             async with connection.execute(
-                "SELECT * FROM league_history WHERE timestamp > ? AND puuid = ?",
-                (CURRENT_SPLIT_START, summonerid[0][0]),
+                "SELECT * FROM league_history WHERE timestamp > ? AND puuid IN ("
+                "    SELECT leagueId FROM league_players WHERE league_username = ?"
+                "    UNION"
+                "    SELECT puuid FROM league_players WHERE league_username = ?"
+                ") ORDER BY timestamp ASC",
+                (CURRENT_SPLIT_START, league_name, league_name),
             ) as cursor:
                 score_dict = {}
                 async for point in cursor:

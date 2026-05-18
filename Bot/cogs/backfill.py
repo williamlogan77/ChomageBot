@@ -247,18 +247,28 @@ class Backfill(commands.Cog):
         return inserted_total
 
     async def _insert_matches(self, puuid: str, match_ids: list[str]) -> int:
+        """Fetch + insert match details one at a time, opening a fresh
+        connection per write.
+
+        Why per-match: bundling the whole page under one transaction
+        held the writer lock across N network calls (~50-500ms each),
+        which starved /refresh_ranks and other writers and tripped the
+        5-second busy_timeout. Opening a new connection only around the
+        insert holds the lock for milliseconds — other writers can
+        interleave freely under WAL.
+        """
         inserted = 0
-        async with sqa.connect(self.bot.db_path) as db:
-            for mid in match_ids:
-                match = await get_match(mid)
-                if match is None:
+        for mid in match_ids:
+            match = await get_match(mid)
+            if match is None:
+                continue
+            for participant in match["info"]["participants"]:
+                if participant["puuid"] != puuid:
                     continue
-                for participant in match["info"]["participants"]:
-                    if participant["puuid"] != puuid:
-                        continue
-                    game_start = dt.datetime.fromtimestamp(
-                        match["info"]["gameStartTimestamp"] / 1000.0
-                    ).strftime("%Y-%m-%d %H:%M:%S")
+                game_start = dt.datetime.fromtimestamp(
+                    match["info"]["gameStartTimestamp"] / 1000.0
+                ).strftime("%Y-%m-%d %H:%M:%S")
+                async with sqa.connect(self.bot.db_path) as db:
                     await db.execute(
                         "INSERT OR IGNORE INTO match_stats "
                         "(match_id, puuid, game_start, queue_id, champion, "
@@ -277,9 +287,9 @@ class Backfill(commands.Cog):
                             match["info"]["gameDuration"],
                         ),
                     )
-                    inserted += 1
-                    break
-            await db.commit()
+                    await db.commit()
+                inserted += 1
+                break
         return inserted
 
 

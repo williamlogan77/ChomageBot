@@ -204,6 +204,20 @@ class Backfill(commands.Cog):
     async def before_stream(self) -> None:
         await self.bot.wait_until_ready()
 
+    @stream_matches.error
+    async def stream_matches_error(self, exc: BaseException) -> None:
+        """Auto-restart stream_matches on unhandled error.
+
+        Default @tasks.loop behaviour on exception is log + stop. Without
+        this, a single transient error (e.g. flaky Riot response) would
+        permanently halt the stream and new matches would silently stop
+        being recorded.
+        """
+        self.bot.logging.error(f"stream_matches errored: {exc!r}, restarting in 60s")
+        await asyncio.sleep(60)
+        if not self.stream_matches.is_running():
+            self.stream_matches.start()
+
     # --- shared per-player routine ------------------------------------
 
     async def _do_backfill(

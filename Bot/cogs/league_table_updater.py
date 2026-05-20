@@ -36,6 +36,18 @@ class FetchFromRiot(commands.Cog):
 
         self.ranked_dict: dict | None = None
 
+    def cog_unload(self) -> None:
+        """Cancel the @tasks.loop on unload.
+
+        Without this, discord.py leaves the existing post_ranks task
+        running after the cog is unloaded, and a subsequent reload (via
+        auto_reload or heartbeat.watchdog) starts another one on top.
+        Two days of manual touch-recoveries produced ~3 concurrent
+        post_ranks loops that interleaved at ~9-second offsets, eating
+        the Riot rate-limit budget continuously and starving /kda etc.
+        """
+        self.post_ranks.cancel()
+
     async def fetch_users_rank(self, users):
         users_ranks = {}
         seen: set[str] = set()

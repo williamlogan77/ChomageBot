@@ -50,8 +50,21 @@ _lock = asyncio.Lock()
 _timestamps: deque[float] = deque()
 
 
+_WAIT_LOG_THRESHOLD_SECONDS = 5.0
+
+
 async def _wait_for_slot() -> None:
-    """Block until both rate-limit windows have headroom for one more request."""
+    """Block until both rate-limit windows have headroom for one more request.
+
+    Logs a WARN when the total accumulated wait exceeds
+    ``_WAIT_LOG_THRESHOLD_SECONDS`` — quiet on steady state, but loud the
+    moment something starts saturating the Riot budget (e.g. an orphan
+    post_ranks loop, a large /backfill_all in flight, or a Riot incident
+    capping us at 429s). Without this signal we missed three days of
+    accumulating orphan @tasks.loop iterations.
+    """
+    started = time.monotonic()
+    waited = False
     while True:
         async with _lock:
             now = time.monotonic()
@@ -69,9 +82,17 @@ async def _wait_for_slot() -> None:
 
             if wait <= 0:
                 _timestamps.append(now)
+                if waited:
+                    total = now - started
+                    if total > _WAIT_LOG_THRESHOLD_SECONDS:
+                        log.warning(
+                            f"Riot rate-limit wait took {total:.1f}s "
+                            f"({len(_timestamps)} requests in flight)"
+                        )
                 return
 
         # Release the lock while sleeping so other coroutines can re-check.
+        waited = True
         log.debug(f"Riot rate limit reached, waiting {wait:.2f}s")
         await asyncio.sleep(wait)
 

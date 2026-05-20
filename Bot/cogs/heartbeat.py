@@ -21,6 +21,7 @@ cog, then ``__init__`` calls ``.start()`` again on the new instance.
 import datetime as dt
 import logging
 
+import discord
 from discord.ext import commands, tasks
 
 log = logging.getLogger(__name__)
@@ -101,6 +102,23 @@ class Heartbeat(commands.Cog):
     @watchdog.before_loop
     async def before_watchdog(self) -> None:
         await self.bot.wait_until_ready()
+
+    @commands.Cog.listener()
+    async def on_interaction(self, interaction: discord.Interaction) -> None:
+        """Log every slash-command invocation for debug visibility.
+
+        Fires for ALL interactions; we filter to application-commands so
+        button/modal/select interactions aren't logged here. The cog's own
+        commands and other cogs' commands all flow through the same
+        dispatcher, so this single listener covers the whole bot.
+        """
+        if interaction.type != discord.InteractionType.application_command:
+            return
+        cmd = interaction.command.qualified_name if interaction.command else "?"
+        channel = getattr(interaction.channel, "name", interaction.channel_id)
+        self.bot.logging.info(
+            f"/{cmd} invoked by {interaction.user} (id={interaction.user.id}) " f"in #{channel}"
+        )
 
 
 async def setup(bot: commands.Bot):

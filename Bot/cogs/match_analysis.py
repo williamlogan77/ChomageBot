@@ -65,6 +65,7 @@ PLACEHOLDER_VALUE = "__placeholder__"
 # matching entry in ``analysis.ALL_PLOTS`` to expose a new chart.
 CHART_DEFS = [
     ("Summary", "📑", analysis.plot_stats_summary, "Stats summary"),
+    ("Impact", "🧪", analysis.plot_feature_impact, "Feature impact — what predicts a win?"),
     ("Activity", "📅", analysis.plot_activity_over_time, "Activity over time"),
     ("Cumulative WR", "📊", analysis.plot_cumulative_winrate, "Cumulative win rate"),
     ("Progression", "📈", analysis.plot_player_progression, "Lifetime progression"),
@@ -108,10 +109,11 @@ def _build_panel_embed() -> discord.Embed:
         name="What's in here",
         value=(
             "📑 **Summary** — headline numbers at a glance (start here)\n"
+            "🧪 **Impact** — which factors actually move your WR (with p-values)\n"
             "📅 **Activity** — games / month + WR by month\n"
             "📊 **Cumulative WR** · 📈 **Progression** (% of career)\n"
             "⚔️ **KDA** · ⏱️ **Duration** · 🏆 **Champs W/L** (Wilson CI) · 🎯 **Champ curves**\n"
-            "🕐 **Hour** · 🗓️ **Day** · 🔥 **Heatmap**\n"
+            "🕐 **Hour** · 🗓️ **Day** · 🔥 **Heatmap**  (χ² p-values on temporal effects)\n"
             "😤 **Tilt** · ⏰ **Gap** since previous game\n"
             "🤝 **Duos** — same-team partnerships and their winrate"
         ),

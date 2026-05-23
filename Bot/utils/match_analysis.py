@@ -180,6 +180,75 @@ def wilson_ci(wins: int, games: int, z: float = 1.96) -> tuple[float, float]:
     return (max(0.0, (centre - margin) / denom), min(1.0, (centre + margin) / denom))
 
 
+def chi2_pvalue(chi2: float, df: int) -> float:
+    """Wilson-Hilferty cube-root chi² survival approximation, no scipy.
+
+    Accurate to <0.01 of p once df ≥ 5 and chi² is in a reasonable range.
+    Used for "is this bucketed-winrate pattern real or noise?" callouts.
+    """
+    import math
+
+    if df <= 0 or chi2 <= 0:
+        return 1.0
+    z = ((chi2 / df) ** (1.0 / 3.0) - (1.0 - 2.0 / (9.0 * df))) / math.sqrt(2.0 / (9.0 * df))
+    return 0.5 * math.erfc(z / math.sqrt(2.0))
+
+
+def chi2_homogeneity(counts: np.ndarray, totals: np.ndarray) -> tuple[float, int, float]:
+    """Chi-square test of "does P(win) differ across buckets?".
+
+    Given each bucket's win count + total game count, computes the
+    pooled overall WR, the expected wins under the null (no effect),
+    and returns (chi² stat, degrees of freedom, p-value). Buckets with
+    zero games are dropped.
+    """
+    counts = np.asarray(counts, dtype=float)
+    totals = np.asarray(totals, dtype=float)
+    mask = totals > 0
+    counts = counts[mask]
+    totals = totals[mask]
+    if len(totals) < 2 or totals.sum() == 0:
+        return (0.0, 0, 1.0)
+    p_pool = counts.sum() / totals.sum()
+    if p_pool <= 0 or p_pool >= 1:
+        return (0.0, 0, 1.0)
+    exp_win = totals * p_pool
+    exp_loss = totals * (1.0 - p_pool)
+    obs_loss = totals - counts
+    # Standard 2-row contingency chi²; df = (rows-1)*(cols-1) = k-1 for two outcomes.
+    with np.errstate(invalid="ignore", divide="ignore"):
+        chi2 = float(
+            np.sum((counts - exp_win) ** 2 / exp_win)
+            + np.sum((obs_loss - exp_loss) ** 2 / exp_loss)
+        )
+    df = len(totals) - 1
+    return (chi2, df, chi2_pvalue(chi2, df))
+
+
+def _p_marker(p: float) -> str:
+    """A short human-readable significance tag for a p-value."""
+    if p < 0.001:
+        return "p<0.001"
+    if p < 0.01:
+        return f"p={p:.3f}"
+    if p < 0.05:
+        return f"p={p:.3f}"
+    return f"p={p:.2f}"
+
+
+def _p_verdict(p: float) -> str:
+    """Plain-English verdict to follow the p-value."""
+    if p < 0.001:
+        return "very likely real"
+    if p < 0.01:
+        return "likely real"
+    if p < 0.05:
+        return "probably real"
+    if p < 0.1:
+        return "suggestive"
+    return "consistent with noise"
+
+
 def load_matches(db_path: Path = DEFAULT_DB) -> pd.DataFrame:
     """Load match_stats joined with league_players + users; derive features.
 
@@ -630,6 +699,8 @@ def plot_hour_of_day(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
     if d.empty:
         return _empty_figure("No games to plot")
     by_hour = d.groupby("hour")["win"].agg(["count", "mean"]).reindex(range(24), fill_value=0)
+    wins = (by_hour["count"] * by_hour["mean"]).round().astype(int).to_numpy()
+    _chi2, _dof, pval = chi2_homogeneity(wins, by_hour["count"].astype(int).to_numpy())
     return _temporal_dual_axis(
         counts=by_hour["count"],
         winrate_mask=by_hour["count"] > 0,
@@ -639,7 +710,10 @@ def plot_hour_of_day(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
         x_labels=[f"{h:02d}" for h in range(24)],
         xlabel="Hour of day (local)",
         title=_title("Hour of day — volume + win rate", player),
-        subtitle="Grey bars = games played at that hour. Blue line = win rate at that hour.",
+        subtitle=(
+            "Grey bars = games at that hour. Blue line = win rate. "
+            f"χ² test for any hour effect: {_p_marker(pval)} ({_p_verdict(pval)})."
+        ),
     )
 
 
@@ -649,6 +723,8 @@ def plot_day_of_week(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
     if d.empty:
         return _empty_figure("No games to plot")
     by_dow = d.groupby("dow")["win"].agg(["count", "mean"]).reindex(range(7), fill_value=0)
+    wins = (by_dow["count"] * by_dow["mean"]).round().astype(int).to_numpy()
+    _chi2, _dof, pval = chi2_homogeneity(wins, by_dow["count"].astype(int).to_numpy())
     return _temporal_dual_axis(
         counts=by_dow["count"],
         winrate_mask=by_dow["count"] > 0,
@@ -658,7 +734,10 @@ def plot_day_of_week(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
         x_labels=DOW_LABELS,
         xlabel="Day of week",
         title=_title("Day of week — volume + win rate", player),
-        subtitle="Grey bars = games per day. Blue line = win rate that day.",
+        subtitle=(
+            "Grey bars = games per day. Blue line = win rate. "
+            f"χ² for any day effect: {_p_marker(pval)} ({_p_verdict(pval)})."
+        ),
     )
 
 
@@ -713,6 +792,10 @@ def plot_streak_recovery(df: pd.DataFrame, player: str | None = None) -> plt.Fig
     )
     g = _bin_winrate(d, "streak_bucket")
 
+    wins = (g["games"] * g["winrate"]).round().astype(int).to_numpy()
+    totals = g["games"].astype(int).to_numpy()
+    chi2, dof, pval = chi2_homogeneity(wins, totals)
+
     fig, ax = plt.subplots(figsize=(11, 4.6))
     ax.bar(range(len(g)), g["winrate"], color=PALETTE["accent_orange"], width=0.7)
     ax.set_xticks(range(len(g)))
@@ -722,7 +805,7 @@ def plot_streak_recovery(df: pd.DataFrame, player: str | None = None) -> plt.Fig
     ax.set_title(_title("Tilt check — win rate vs entering loss streak", player))
     _subtitle(
         ax,
-        "Downward step from left to right = tilt is real. Flat = each game is independent.",
+        f"Downward step = tilt is real. χ² test across buckets: {_p_marker(pval)} ({_p_verdict(pval)}).",
     )
     ax.set_ylim(0, 1.1)
     _baseline(ax)
@@ -739,6 +822,9 @@ def plot_time_since_prev(df: pd.DataFrame, player: str | None = None) -> plt.Fig
     if d.empty:
         return _empty_figure("No games to plot")
     g = _bin_winrate(d.dropna(subset=["gap_bucket"]), "gap_bucket")
+    wins = (g["games"] * g["winrate"]).round().astype(int).to_numpy()
+    totals = g["games"].astype(int).to_numpy()
+    chi2, dof, pval = chi2_homogeneity(wins, totals)
 
     fig, ax = plt.subplots(figsize=(11, 4.6))
     ax.bar(range(len(g)), g["winrate"], color=PALETTE["accent_teal"], width=0.7)
@@ -749,7 +835,7 @@ def plot_time_since_prev(df: pd.DataFrame, player: str | None = None) -> plt.Fig
     ax.set_title(_title("Win rate vs gap since previous game", player))
     _subtitle(
         ax,
-        "Back-to-back queueing vs fresh session — does either help or hurt?",
+        f"Back-to-back vs fresh session. χ² across buckets: {_p_marker(pval)} ({_p_verdict(pval)}).",
     )
     ax.set_ylim(0, 1.1)
     _baseline(ax)
@@ -1118,6 +1204,166 @@ def plot_activity_over_time(df: pd.DataFrame, player: str | None = None) -> plt.
     return fig
 
 
+def compute_feature_impacts(
+    df: pd.DataFrame, player: str | None = None, min_games: int = 25
+) -> pd.DataFrame:
+    """Marginal effect of each candidate factor on win probability.
+
+    For each feature ``f`` we split the games into "f is true" and "f is
+    false" buckets and compute ``P(win | f) - P(win | ¬f)`` as the
+    effect size. Sign tells the direction, magnitude how much it matters.
+    Each split also gets a chi-square p-value and Wilson 95% CIs on
+    each side so the caller can see which effects are statistically
+    backed.
+
+    Returns a DataFrame sorted by absolute effect size, with columns:
+    feature, effect_pp, n_yes, n_no, wr_yes, wr_no, ci_yes, ci_no, p.
+    """
+    d = _filter_player(df, player)
+    if d.empty:
+        return pd.DataFrame()
+
+    overall_wr = d["win"].mean()
+    if "duo_partner_in_match" not in d.columns:
+        # Cheap on-the-fly column: was there ANOTHER tracked person on
+        # this same match's same team? Used as the "duo" feature.
+        same_team_pairs = d[["match_id", "win", "person"]].merge(
+            df[["match_id", "win", "person"]], on=["match_id", "win"]
+        )
+        same_team_pairs = same_team_pairs[
+            same_team_pairs["person_x"] != same_team_pairs["person_y"]
+        ]
+        with_duo = set(same_team_pairs[["match_id", "person_x"]].itertuples(index=False, name=None))
+        d = d.copy()
+        d["had_tracked_duo"] = [
+            (mid, p) in with_duo for mid, p in zip(d["match_id"], d["person"], strict=False)
+        ]
+    else:
+        d = d.copy()
+
+    # Bucket helpers — boolean masks describe one side of each split.
+    kda_75 = d["kda"].quantile(0.75)
+    kda_25 = d["kda"].quantile(0.25)
+    most_played_champ = d["champion"].value_counts().idxmax() if not d.empty else None
+
+    features: list[tuple[str, pd.Series]] = [
+        ("High KDA (top 25%)", d["kda"] >= kda_75),
+        ("Low KDA (bottom 25%)", d["kda"] <= kda_25),
+        ("Short game (<25min)", d["duration_min"] < 25),
+        ("Long game (≥35min)", d["duration_min"] >= 35),
+        ("Late night (00-04h)", d["hour"].between(0, 4)),
+        ("Evening peak (18-23h)", d["hour"].between(18, 23)),
+        ("Weekend", d["dow"] >= 5),
+        ("After loss streak ≥3", d["loss_streak_in"] >= 3),
+        ("Back-to-back (<10m gap)", d["gap_since_prev_min"] < 10),
+        ("Long break (>6h gap)", d["gap_since_prev_min"] > 360),
+        ("Same-team tracked partner", d["had_tracked_duo"]),
+    ]
+    if most_played_champ is not None:
+        features.append((f"Picked {most_played_champ}", d["champion"] == most_played_champ))
+
+    rows = []
+    for name, mask in features:
+        mask = mask.fillna(False).astype(bool)
+        yes = d[mask]
+        no = d[~mask]
+        n_yes, n_no = len(yes), len(no)
+        if n_yes < min_games or n_no < min_games:
+            continue
+        wr_yes = yes["win"].mean()
+        wr_no = no["win"].mean()
+        ci_yes = wilson_ci(int(yes["win"].sum()), n_yes)
+        ci_no = wilson_ci(int(no["win"].sum()), n_no)
+        chi2, _df, pval = chi2_homogeneity(
+            np.array([int(yes["win"].sum()), int(no["win"].sum())], dtype=float),
+            np.array([n_yes, n_no], dtype=float),
+        )
+        rows.append(
+            {
+                "feature": name,
+                "effect_pp": (wr_yes - wr_no) * 100,
+                "n_yes": n_yes,
+                "n_no": n_no,
+                "wr_yes": wr_yes,
+                "wr_no": wr_no,
+                "ci_yes": ci_yes,
+                "ci_no": ci_no,
+                "p": pval,
+                "overall_wr": overall_wr,
+            }
+        )
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    return out.iloc[out["effect_pp"].abs().sort_values(ascending=False).index].reset_index(
+        drop=True
+    )
+
+
+def plot_feature_impact(
+    df: pd.DataFrame, player: str | None = None, min_games: int = 25, top: int = 10
+) -> plt.Figure:
+    """Ranked "what predicts a win?" chart.
+
+    For every candidate factor (high KDA, weekend, after loss streak,
+    same-team partner, picked your main, …) we compute the percentage-
+    point shift in win rate when the factor is true vs false. Bars are
+    sorted by absolute shift; statistically significant ones (p<0.05)
+    are drawn solid, non-significant ones faded to grey.
+    """
+    impacts = compute_feature_impacts(df, player=player, min_games=min_games)
+    if impacts.empty:
+        return _empty_figure(f"Not enough games to compare factors (need ≥{min_games} each side)")
+
+    impacts = impacts.head(top).iloc[::-1]  # reverse so largest sits on top
+    y = np.arange(len(impacts))
+
+    colours = []
+    for _, r in impacts.iterrows():
+        sig = r["p"] < 0.05
+        if not sig:
+            colours.append(PALETTE["neutral"])
+        elif r["effect_pp"] > 0:
+            colours.append(PALETTE["win"])
+        else:
+            colours.append(PALETTE["loss"])
+
+    fig_h = max(4.6, len(impacts) * 0.45)
+    fig, ax = plt.subplots(figsize=(13, fig_h))
+    ax.barh(y, impacts["effect_pp"], color=colours, height=0.7)
+    ax.axvline(0, color=PALETTE["text"], linewidth=0.8)
+    ax.set_yticks(y)
+    ax.set_yticklabels(impacts["feature"])
+    ax.set_xlabel("Win rate when factor true MINUS when false (percentage points)")
+    ax.set_title(_title("Feature impact — what actually moves your win rate?", player))
+    _subtitle(
+        ax,
+        "Solid bars = p<0.05 (likely real). Faded grey = compatible with noise.",
+    )
+    _polish_ax(ax)
+
+    # Annotate each row with detail: "+8.4pp · 56% vs 47% · n=420/2100 · p=0.001"
+    for yi, (_, r) in enumerate(impacts.iterrows()):
+        sign_pad = 1 if r["effect_pp"] >= 0 else -1
+        ax.annotate(
+            f"{r['effect_pp']:+.1f}pp  ·  {r['wr_yes']:.0%} vs {r['wr_no']:.0%}  "
+            f"·  n={int(r['n_yes'])} vs {int(r['n_no'])}  ·  {_p_marker(r['p'])}",
+            xy=(r["effect_pp"], yi),
+            xytext=(6 * sign_pad, 0),
+            textcoords="offset points",
+            va="center",
+            ha="left" if r["effect_pp"] >= 0 else "right",
+            fontsize=9,
+            color=PALETTE["text"],
+        )
+
+    # Symmetric x-axis around zero so positive/negative bars are comparable.
+    max_abs = max(8, float(impacts["effect_pp"].abs().max()) + 4)
+    ax.set_xlim(-max_abs, max_abs)
+    fig.tight_layout()
+    return fig
+
+
 def plot_stats_summary(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
     """Text-only "card" view of the headline numbers for the selected person
     (or aggregate). Designed as the at-a-glance landing page — every other
@@ -1368,17 +1614,18 @@ def summary_table(df: pd.DataFrame) -> pd.DataFrame:
 #: should display them. Each takes (df, player=None) -> Figure.
 ALL_PLOTS = [
     ("01_stats_summary", plot_stats_summary),
-    ("02_activity_over_time", plot_activity_over_time),
-    ("03_cumulative_winrate", plot_cumulative_winrate),
-    ("04_player_progression", plot_player_progression),
-    ("05_kda_vs_outcome", plot_kda_vs_outcome),
-    ("06_duration_vs_outcome", plot_duration_vs_outcome),
-    ("07_champion_winrate", plot_champion_winrate),
-    ("08_champion_learning_curve", plot_champion_learning_curve),
-    ("09_hour_of_day", plot_hour_of_day),
-    ("10_day_of_week", plot_day_of_week),
-    ("11_hour_dow_heatmap", plot_hour_dow_heatmap),
-    ("12_streak_recovery", plot_streak_recovery),
-    ("13_time_since_prev", plot_time_since_prev),
-    ("14_duo_winrate", plot_duo_winrate),
+    ("02_feature_impact", plot_feature_impact),
+    ("03_activity_over_time", plot_activity_over_time),
+    ("04_cumulative_winrate", plot_cumulative_winrate),
+    ("05_player_progression", plot_player_progression),
+    ("06_kda_vs_outcome", plot_kda_vs_outcome),
+    ("07_duration_vs_outcome", plot_duration_vs_outcome),
+    ("08_champion_winrate", plot_champion_winrate),
+    ("09_champion_learning_curve", plot_champion_learning_curve),
+    ("10_hour_of_day", plot_hour_of_day),
+    ("11_day_of_week", plot_day_of_week),
+    ("12_hour_dow_heatmap", plot_hour_dow_heatmap),
+    ("13_streak_recovery", plot_streak_recovery),
+    ("14_time_since_prev", plot_time_since_prev),
+    ("15_duo_winrate", plot_duo_winrate),
 ]

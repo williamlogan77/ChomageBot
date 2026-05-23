@@ -693,15 +693,61 @@ def _annotate_bars(ax, x, heights, counts, fmt: str = "{:.0%}") -> None:
         )
 
 
+def _is_aggregate(player: str | None) -> bool:
+    """True when the selection means "no filter" (all players)."""
+    return player is None or player in ("", "all", "__all__")
+
+
+def _display_label(player: str | None) -> str | None:
+    """Strip the dropdown prefix so we can show the bare name in a UI label."""
+    if _is_aggregate(player):
+        return None
+    if player.startswith("account:"):
+        return player[len("account:") :]
+    if player.startswith("person:"):
+        return player[len("person:") :]
+    return player
+
+
 def _title(base: str, player: str | None) -> str:
-    return base if player is None else f"{base}  ·  {player}"
+    label = _display_label(player)
+    return base if label is None else f"{base}  ·  {label}"
 
 
 def _filter_player(df: pd.DataFrame, player: str | None) -> pd.DataFrame:
-    """Filter rows to one ``person`` (Discord-aggregated). ``player`` here
-    is a person key — pass the canonical display name to filter, or None
-    for the all-players aggregate."""
-    return df if player is None else df[df["person"] == player]
+    """Filter rows to one Discord person OR one Riot account.
+
+    ``player`` is a prefixed dropdown key:
+      - aggregate sentinels (None / "" / "all" / "__all__") → unfiltered
+      - "person:<name>" → df[df["person"] == name]
+      - "account:<name>" → df[df["riot_account"] == name]
+      - bare name (legacy) → person match
+    """
+    if _is_aggregate(player):
+        return df
+    if player.startswith("account:"):
+        return df[df["riot_account"] == player[len("account:") :]]
+    if player.startswith("person:"):
+        return df[df["person"] == player[len("person:") :]]
+    return df[df["person"] == player]
+
+
+def _resolve_person(df: pd.DataFrame, player: str | None) -> str | None:
+    """Map any dropdown key to its owning ``person`` name (or None for aggregate).
+
+    Rank history, LP events and duo/h2h data are person-keyed, so an
+    ``account:<X>`` selection has to fall back to the person that owns
+    that Riot account when those charts run.
+    """
+    if _is_aggregate(player):
+        return None
+    if player.startswith("account:"):
+        acct = player[len("account:") :]
+        row = df[df["riot_account"] == acct]
+        return str(row["person"].iloc[0]) if not row.empty else None
+    if player.startswith("person:"):
+        return player[len("person:") :]
+    return player
 
 
 def _empty_figure(message: str) -> plt.Figure:
@@ -955,12 +1001,12 @@ def plot_champion_picks(
     if d.empty:
         return _empty_figure("No games to analyse")
 
-    if player is None:
+    if _is_aggregate(player):
         baseline_wr = float(d["win"].mean())
         baseline_label = f"group baseline ({baseline_wr:.0%})"
     else:
         baseline_wr = float(d["win"].mean())
-        baseline_label = f"{player}'s baseline ({baseline_wr:.0%})"
+        baseline_label = f"{_display_label(player)}'s baseline ({baseline_wr:.0%})"
 
     champ_stats = d.groupby("champion")["win"].agg(["count", "sum", "mean"])
     champ_stats = champ_stats[champ_stats["count"] >= min_games]
@@ -1238,8 +1284,9 @@ def plot_player_comparison(
                 color = PALETTE["text"]
             ax.text(j, i, text, ha="center", va="center", fontsize=8.5, color=color)
 
-    if player is not None and player in people:
-        idx = people.index(player)
+    focal_person = _resolve_person(df, player)
+    if focal_person is not None and focal_person in people:
+        idx = people.index(focal_person)
         for y_edge in (idx - 0.5, idx + 0.5):
             ax.axhline(
                 y_edge,
@@ -1768,7 +1815,7 @@ def plot_lp_economics(df: pd.DataFrame, player: str | None = None) -> plt.Figure
     if events.empty:
         return _empty_figure("No LP events in league_history yet")
 
-    if player is None:
+    if _is_aggregate(player):
         # Top-N most-tracked people. Match-stats game count, not LP-event
         # count, so the people shown line up with the rest of the panel.
         top_people = df.groupby("person").size().sort_values(ascending=False).head(8).index.tolist()
@@ -1853,13 +1900,16 @@ def plot_lp_economics(df: pd.DataFrame, player: str | None = None) -> plt.Figure
         return fig
 
     # --- Single-person view ---
-    sub = events[events["person"] == player]
+    # LP events are person-keyed — resolve any account-selection to its owner.
+    focal_person = _resolve_person(df, player)
+    label = _display_label(player) or "this player"
+    sub = events[events["person"] == focal_person] if focal_person else events.iloc[0:0]
     if sub.empty:
-        return _empty_figure(f"No LP events recorded for {player}")
+        return _empty_figure(f"No LP events recorded for {label}")
     wins = sub.loc[sub["outcome"] == "win", "delta_score"].astype(float)
     losses = sub.loc[sub["outcome"] == "loss", "delta_score"].astype(float)
     if wins.empty or losses.empty:
-        return _empty_figure(f"{player} has no recorded LP events for both win and loss")
+        return _empty_figure(f"{label} has no recorded LP events for both win and loss")
 
     avg_w, avg_l = float(wins.mean()), float(losses.mean())
     n = len(sub)
@@ -1959,7 +2009,7 @@ def plot_rank_trajectory(df: pd.DataFrame, player: str | None = None) -> plt.Fig
     if ranks.empty:
         return _empty_figure("No rank history available")
 
-    if player is None:
+    if _is_aggregate(player):
         # Pick top-N most-active people in match_stats so the rank chart
         # lines up with the same people the rest of the panel describes.
         top_people = df.groupby("person").size().sort_values(ascending=False).head(6).index.tolist()
@@ -1996,9 +2046,16 @@ def plot_rank_trajectory(df: pd.DataFrame, player: str | None = None) -> plt.Fig
         return fig
 
     # --- Single-person view: rank line + WR overlay ---
-    sub = ranks[ranks["person"] == player].sort_values("timestamp").reset_index(drop=True)
+    # Rank history is person-keyed — drop to the owning person.
+    focal_person = _resolve_person(df, player)
+    label = _display_label(player) or "this player"
+    sub = (
+        ranks[ranks["person"] == focal_person].sort_values("timestamp").reset_index(drop=True)
+        if focal_person
+        else ranks.iloc[0:0]
+    )
     if sub.empty:
-        return _empty_figure(f"No rank history for {player}")
+        return _empty_figure(f"No rank history for {label}")
 
     fig, ax_rank = plt.subplots(figsize=(13, 5.4))
     ax_rank.plot(
@@ -2014,7 +2071,9 @@ def plot_rank_trajectory(df: pd.DataFrame, player: str | None = None) -> plt.Fig
     ax_rank.tick_params(axis="y", colors=PALETTE["primary"])
 
     # WR overlay on twin axis — sourced from match_stats, not history.
-    matches = df[df["person"] == player].sort_values("game_start").reset_index(drop=True)
+    # When an account is selected, the overlay narrows to that account; a
+    # person selection rolls up all their Riot accounts.
+    matches = _filter_player(df, player).sort_values("game_start").reset_index(drop=True)
     if not matches.empty:
         matches = matches.copy()
         matches["rolling_20_wr"] = matches["win"].rolling(window=20, min_periods=5).mean()
@@ -2188,7 +2247,7 @@ def plot_player_progression(
         # Slope in win-rate per 1% of career.
         return float(np.polyfit(pct[mask], roll[mask], 1)[0])
 
-    if player is None:
+    if _is_aggregate(player):
         people = df.groupby("person").size()
         people = people[people >= min_games].sort_values(ascending=False).index.tolist()
         if not people:
@@ -2213,9 +2272,9 @@ def plot_player_progression(
             )
         ax.legend(loc="lower right", fontsize=8.5, ncol=2)
     else:
-        sub = df[df["person"] == player]
+        sub = _filter_player(df, player)
         if sub.empty:
-            return _empty_figure(f"No games for {player}")
+            return _empty_figure(f"No games for {_display_label(player) or 'this player'}")
         pct, roll = _series(sub)
         ax.plot(pct, roll, label=f"Rolling-{window} WR", color=PALETTE["primary"], linewidth=2.4)
         slope = _slope(pct, roll)
@@ -2349,7 +2408,7 @@ def plot_duo_winrate(
 
     fig, axes = plt.subplots(1, 2, figsize=(16, max(4.6, top * 0.45)))
 
-    if player is None:
+    if _is_aggregate(player):
         # --- Left: top duos by games together ---
         ax = axes[0]
         d = duos.head(top).iloc[::-1]
@@ -2432,16 +2491,26 @@ def plot_duo_winrate(
         return fig
 
     # --- Per-person view ---
-    solo_wr = df[df["person"] == player]["win"].mean() if not df.empty else 0.5
+    # Duos / h2h are computed at person granularity — resolve the dropdown
+    # key (account or person) to the owning person for partner lookups.
+    focal_person = _resolve_person(df, player)
+    display_name = _display_label(player) or "this player"
+    solo_wr = (
+        df[df["person"] == focal_person]["win"].mean() if focal_person and not df.empty else 0.5
+    )
 
     # Left: this player's partners.
     ax = axes[0]
-    partner_rows = duos[(duos["a"] == player) | (duos["b"] == player)].copy()
+    partner_rows = (
+        duos[(duos["a"] == focal_person) | (duos["b"] == focal_person)].copy()
+        if focal_person
+        else duos.iloc[0:0]
+    )
     if partner_rows.empty:
         ax.text(
             0.5,
             0.5,
-            f"No duos for {player} with ≥{min_games} games",
+            f"No duos for {display_name} with ≥{min_games} games",
             ha="center",
             va="center",
             color=PALETTE["muted"],
@@ -2450,7 +2519,7 @@ def plot_duo_winrate(
         ax.set_axis_off()
     else:
         partner_rows["partner"] = partner_rows.apply(
-            lambda r: r["b"] if r["a"] == player else r["a"], axis=1
+            lambda r: r["b"] if r["a"] == focal_person else r["a"], axis=1
         )
         partner_rows = (
             partner_rows.sort_values("games", ascending=False)
@@ -2491,12 +2560,16 @@ def plot_duo_winrate(
 
     # Right: this player's head-to-head record vs each opponent.
     ax = axes[1]
-    h_player = h2h[(h2h["a"] == player) | (h2h["b"] == player)].copy()
+    h_player = (
+        h2h[(h2h["a"] == focal_person) | (h2h["b"] == focal_person)].copy()
+        if focal_person
+        else h2h.iloc[0:0]
+    )
     if h_player.empty:
         ax.text(
             0.5,
             0.5,
-            f"No head-to-heads for {player} with ≥{h2h_min_games} games",
+            f"No head-to-heads for {display_name} with ≥{h2h_min_games} games",
             ha="center",
             va="center",
             color=PALETTE["muted"],
@@ -2506,10 +2579,10 @@ def plot_duo_winrate(
     else:
         # Normalise: ``own_wr`` = focal player's win-rate vs this opponent.
         h_player["opponent"] = h_player.apply(
-            lambda r: r["b"] if r["a"] == player else r["a"], axis=1
+            lambda r: r["b"] if r["a"] == focal_person else r["a"], axis=1
         )
         h_player["own_wr"] = np.where(
-            h_player["a"] == player, h_player["a_winrate"], 1 - h_player["a_winrate"]
+            h_player["a"] == focal_person, h_player["a_winrate"], 1 - h_player["a_winrate"]
         )
         h_player = (
             h_player.sort_values("games", ascending=False)
@@ -2521,7 +2594,7 @@ def plot_duo_winrate(
         ax.axvline(0.5, color=PALETTE["muted"], linestyle="--", linewidth=1.0, label="even (50%)")
         ax.set_yticks(range(len(h_player)))
         ax.set_yticklabels(h_player["opponent"])
-        ax.set_xlabel(f"{player}'s WR vs opponent")
+        ax.set_xlabel(f"{display_name}'s WR vs opponent")
         ax.set_xlim(0, 1)
         ax.set_title(_title("Head-to-head by opponent", player))
         _subtitle(ax, "Above 50% = you beat them more often. Bar colour = direction.")
@@ -2611,7 +2684,7 @@ def plot_activity_over_time(df: pd.DataFrame, player: str | None = None) -> plt.
     d["year"] = d["game_start"].dt.year
     d["month_num"] = d["game_start"].dt.month
 
-    if player is None:
+    if _is_aggregate(player):
         # Per (year, month, person) WR, then macro-average across people.
         # Mirrors plot_hour_dow_heatmap's aggregate rule but with a higher
         # threshold (5 games per cell per person) — months are coarser
@@ -3084,7 +3157,7 @@ def _build_logistic_design(
     # Always appended LAST so callers can split factor vs person-FE columns
     # by slicing on n_person_fe_cols.
     n_person_fe_cols = 0
-    if include_person_fe and player is None and d["person"].nunique() > 1:
+    if include_person_fe and _is_aggregate(player) and d["person"].nunique() > 1:
         people = d["person"].value_counts().index.tolist()
         baseline = people[0]
         for p in people[1:]:
@@ -3196,7 +3269,7 @@ def plot_logistic_coefficients(
     ax.set_yticklabels(coefs_df["name"])
     ax.set_xlabel("Log-odds (95% CI whiskers)")
 
-    n_people = df["person"].nunique() if player is None else 1
+    n_people = df["person"].nunique() if _is_aggregate(player) else 1
     title_macro = (
         f"controlling for person ({n_people} people)" if n_people > 1 else "single-person fit"
     )
@@ -3335,22 +3408,24 @@ def plot_stats_summary(df: pd.DataFrame, player: str | None = None) -> plt.Figur
             trend_pp_career = slope_per_pct * 100
 
     duos = compute_duos(df, min_games=5)
-    duo_label = "Most-played duo" if player is None else "Best duo partner"
+    duo_label = "Most-played duo" if _is_aggregate(player) else "Best duo partner"
     duo_value = "—"
     duo_sublabel = "needs ≥5 same-team games"
     duo_accent = PALETTE["neutral"]
     duo_value_color = PALETTE["text"]
+    # Duos are person-keyed — an account selection inherits its person's duos.
+    focal_person = _resolve_person(df, player)
     if not duos.empty:
-        if player is None:
+        if _is_aggregate(player):
             row = duos.sort_values("games", ascending=False).iloc[0]
             duo_value = f"{row['a']} + {row['b']}"
             duo_sublabel = f"{int(row['games'])} games · {row['winrate']:.0%} WR"
             duo_accent = PALETTE["win"] if row["winrate"] >= 0.5 else PALETTE["loss"]
-        else:
-            partners = duos[(duos["a"] == player) | (duos["b"] == player)].copy()
+        elif focal_person is not None:
+            partners = duos[(duos["a"] == focal_person) | (duos["b"] == focal_person)].copy()
             if not partners.empty:
                 partners["partner"] = partners.apply(
-                    lambda r: r["b"] if r["a"] == player else r["a"], axis=1
+                    lambda r: r["b"] if r["a"] == focal_person else r["a"], axis=1
                 )
                 row = partners.sort_values("winrate", ascending=False).iloc[0]
                 duo_value = str(row["partner"])
@@ -3366,11 +3441,11 @@ def plot_stats_summary(df: pd.DataFrame, player: str | None = None) -> plt.Figur
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
 
-    title_who = player or "all players"
+    title_who = _display_label(player) or "all players"
     fig.suptitle(f"Stats summary — {title_who}", fontsize=18, fontweight="bold", y=0.965)
 
-    n_people = df["person"].nunique() if player is None else 1
-    if player is None:
+    n_people = df["person"].nunique() if _is_aggregate(player) else 1
+    if _is_aggregate(player):
         sub_text = (
             f"{games:,} games across {n_people} tracked people. "
             "Each card shows the aggregate headline; values are macro-averaged where applicable."

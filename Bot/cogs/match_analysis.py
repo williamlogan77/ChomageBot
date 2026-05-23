@@ -1,14 +1,16 @@
-"""Persistent match-stats control panel + ephemeral chart explorer.
+"""Persistent match-stats control panel + public chart explorer.
 
 A single message sits in the dedicated match-stats channel. Two ways to
 enter the explorer from the panel:
 
-  - Pick a player from the dropdown → ephemeral preset to that person.
-  - Click a chart button → ephemeral preset to "all players" + that chart.
+  - Pick a player (or one of their Riot accounts) from the dropdown →
+    chart preset to that selection.
+  - Click a chart button → chart preset to "all players" + that chart.
 
-Either way an ``_ExplorerView`` opens for the clicker only. Inside the
-ephemeral they get the same player dropdown + chart-switcher buttons so
-they can keep pivoting without spamming the channel.
+Either way an ``_ExplorerView`` chart posts publicly so everyone in the
+channel can see it. The in-message dropdown + chart-switcher buttons
+are locked to the original clicker via ``interaction_check`` so randos
+can't hijack someone else's view.
 
 The panel survives bot restarts: every component has a stable
 ``custom_id`` and the view is re-registered on cog load. Use
@@ -44,10 +46,6 @@ PNG_DPI = 110
 PANEL_CHANNEL_ID = 1507729687529652234
 
 EXPLORER_TIMEOUT_SECONDS = 900
-
-# Discord select menus cap at 25 options total. Reserve slot 0 for the
-# "All players" aggregate, leaving 24 person slots.
-SELECT_PERSON_LIMIT = 24
 
 # Stable prefix for every persistent component's custom_id. Changing
 # this orphans existing panel messages — clicks won't dispatch to the
@@ -117,10 +115,12 @@ def _build_panel_embed() -> discord.Embed:
         description=(
             "Browse what factors influence wins vs. losses across every "
             "tracked Ranked Solo/Duo game.\n\n"
-            "**Use the dropdown** to focus on one person (their Riot accounts "
-            "are aggregated), or **click a chart button** to open the all-"
-            "players view. A private explorer opens for you — only you see it.\n\n"
-            "Inside the explorer you can pivot between charts and players "
+            "**Use the dropdown** to focus on one person (Riot accounts roll "
+            "up) or drill into a single Riot account, or **click a chart "
+            "button** to open the all-players view. The chart posts publicly "
+            "in the channel — only the person who opened it can pivot the "
+            "view from the in-message buttons.\n\n"
+            "Inside the chart you can pivot between charts and players "
             "without leaving the message."
         ),
         color=discord.Color.blurple(),
@@ -146,30 +146,63 @@ def _build_panel_embed() -> discord.Embed:
     return embed
 
 
-def _build_person_options(person_rows) -> list[discord.SelectOption]:
-    """Translate the ``people_summary`` rows into select options. Each
-    option's value is the canonical ``person`` key; the label includes
-    a (N accounts) suffix when a person has multiple Riot accounts so
-    the user can see the aggregation at a glance.
+def _build_person_options(df) -> list[discord.SelectOption]:
+    """Translate the matches dataframe into select options.
+
+    Layout: slot 0 = "All players" aggregate. Then for each Discord person
+    (most-active first) a rollup row valued ``person:<name>``, and if that
+    person has multiple Riot accounts the individual accounts follow
+    indented underneath as ``account:<riot_account>``. Single-account
+    people skip the drill-down (the rollup IS the account view).
+
+    Discord caps select options at 25 — we fill in priority order and stop.
     """
     options = [
         discord.SelectOption(
             label="All players (aggregate)", value=ALL_VALUE, emoji="🌐", default=True
         )
     ]
-    for row in person_rows[:SELECT_PERSON_LIMIT]:
-        suffix = f"  ·  {row['account_count']} accounts" if row["account_count"] > 1 else ""
-        label = f"{row['person']}{suffix}"
-        # SelectOption labels max 100 chars — truncate just in case.
-        if len(label) > 100:
-            label = label[:97] + "…"
+    if df is None or len(df) == 0:
+        return options
+
+    person_totals = df.groupby("person").size().sort_values(ascending=False)
+    account_totals = df.groupby(["person", "riot_account"]).size()
+    used = 1  # slot 0 already taken
+    for person, p_games in person_totals.items():
+        if used >= 25:
+            break
+        accounts = account_totals.loc[person].sort_values(ascending=False)
+        n_accts = len(accounts)
+
+        if n_accts > 1:
+            label = f"{person}  ·  {n_accts} accts"
+            description = f"{int(p_games):,} games (all accounts)"
+        else:
+            label = str(person)
+            description = f"{int(p_games):,} games"
         options.append(
             discord.SelectOption(
-                label=label,
-                value=str(row["person"]),
-                description=f"{int(row['games']):,} games",
+                label=label[:100],
+                value=f"person:{person}"[:100],
+                emoji="👤",
+                description=description[:100],
             )
         )
+        used += 1
+
+        # Drill-down: list individual Riot accounts only for multi-account people.
+        if n_accts > 1:
+            for acct, a_games in accounts.items():
+                if used >= 25:
+                    break
+                options.append(
+                    discord.SelectOption(
+                        label=f"  ↳ {acct}"[:100],
+                        value=f"account:{acct}"[:100],
+                        description=f"{int(a_games):,} games · in {person}"[:100],
+                    )
+                )
+                used += 1
     return options
 
 
@@ -186,8 +219,7 @@ class _ExplorerView(discord.ui.View):
         self.chart_idx = chart_idx
         self.person: str | None = person
 
-        person_rows = analysis.people_summary(df).to_dict("records")
-        options = _build_person_options(person_rows)
+        options = _build_person_options(df)
         for opt in options:
             opt.default = (person is None and opt.value == ALL_VALUE) or (
                 person is not None and opt.value == person
@@ -219,7 +251,7 @@ class _ExplorerView(discord.ui.View):
 
     async def _on_person_select(self, interaction: discord.Interaction) -> None:
         chosen = self._select.values[0]
-        self.person = None if chosen == ALL_VALUE else chosen
+        self.person = None if chosen in (ALL_VALUE, "all") else chosen
         for opt in self._select.options:
             opt.default = opt.value == chosen
         await self._rerender(interaction)
@@ -258,7 +290,7 @@ class _ExplorerView(discord.ui.View):
             await interaction.followup.send(f"Chart failed: {exc!r}", ephemeral=True)
             return
 
-        who = self.person or "all players"
+        who = analysis._display_label(self.person) or "all players"
         embed = discord.Embed(title=f"{emoji} {title} — {who}")
         embed.set_image(url="attachment://chart.png")
         file = _figure_to_file(fig)
@@ -269,16 +301,16 @@ class _ExplorerView(discord.ui.View):
 
 
 class MatchStatsPanel(discord.ui.View):
-    """Persistent control panel. ``person_options`` is set at post-time
-    from a DB query; the persistence-registration instance can pass None
-    (its options don't matter for callback dispatch — discord.py routes
-    by custom_id)."""
+    """Persistent control panel. ``df`` is set at post-time from a DB
+    query; the persistence-registration instance can pass None (its
+    options don't matter for callback dispatch — discord.py routes by
+    custom_id)."""
 
-    def __init__(self, person_rows=None):
+    def __init__(self, df=None):
         super().__init__(timeout=None)
 
-        if person_rows is not None:
-            options = _build_person_options(person_rows)
+        if df is not None:
+            options = _build_person_options(df)
         else:
             # Persistence stub — at least one option is required for the
             # select to validate.
@@ -319,6 +351,7 @@ class MatchStatsPanel(discord.ui.View):
             )
             return
         # discord.py passes the chosen value(s) via interaction.data["values"].
+        # Values are now prefixed: "all" / "__all__" / "person:..." / "account:...".
         chosen = interaction.data["values"][0]
         if chosen == PLACEHOLDER_VALUE:
             await interaction.response.send_message(
@@ -326,8 +359,8 @@ class MatchStatsPanel(discord.ui.View):
                 ephemeral=True,
             )
             return
-        person = None if chosen == ALL_VALUE else chosen
-        # Default chart for a person pick = Activity (calendar-time view).
+        person = None if chosen in (ALL_VALUE, "all") else chosen
+        # Default chart for a person pick = Summary card.
         await cog.open_explorer(interaction, chart_idx=0, person=person)
 
     def _make_chart_callback(self, idx: int):
@@ -388,13 +421,12 @@ class MatchAnalysis(commands.Cog):
         # list reflects the freshest tracked-player set.
         try:
             df = await asyncio.to_thread(analysis.load_matches, self.bot.db_path)
-            person_rows = analysis.people_summary(df).to_dict("records") if not df.empty else []
         except Exception as exc:
             self.bot.logging.error(f"match_stats_panel data load failed: {exc!r}")
             await ctx.followup.send(f"Failed to load match data: {exc!r}", ephemeral=True)
             return
 
-        view = MatchStatsPanel(person_rows=person_rows)
+        view = MatchStatsPanel(df=df if not df.empty else None)
         try:
             msg = await channel.send(embed=_build_panel_embed(), view=view)
         except discord.Forbidden:
@@ -407,9 +439,11 @@ class MatchAnalysis(commands.Cog):
             await ctx.followup.send(f"Failed to post panel: {exc!r}", ephemeral=True)
             return
 
+        n_people = int(df["person"].nunique()) if not df.empty else 0
+        n_accounts = int(df["riot_account"].nunique()) if not df.empty else 0
         await ctx.followup.send(
             f"Panel posted in <#{channel.id}> → [jump]({msg.jump_url}).\n"
-            f"Dropdown lists {len(person_rows)} players. "
+            f"Dropdown lists {n_people} people ({n_accounts} Riot accounts total). "
             "If there's a previous panel above this one, delete it manually — "
             "both will work but you probably don't want two.",
             ephemeral=True,
@@ -419,9 +453,10 @@ class MatchAnalysis(commands.Cog):
         self, interaction: discord.Interaction, chart_idx: int, person: str | None
     ) -> None:
         """Entry point called by panel components: load data, render the
-        requested chart for the requested person, and send an ephemeral
-        explorer to the clicker."""
-        await interaction.response.defer(ephemeral=True)
+        requested chart for the requested person, and post the chart as a
+        public message. The chart-switcher buttons inside are restricted
+        to the original clicker via interaction_check."""
+        await interaction.response.defer()
         try:
             df = await asyncio.to_thread(analysis.load_matches, self.bot.db_path)
         except Exception as exc:
@@ -443,7 +478,7 @@ class MatchAnalysis(commands.Cog):
             await interaction.followup.send(f"Chart failed: {exc!r}", ephemeral=True)
             return
 
-        who = person or "all players"
+        who = analysis._display_label(person) or "all players"
         embed = discord.Embed(title=f"{emoji} {title} — {who}")
         embed.set_footer(
             text=(
@@ -455,7 +490,7 @@ class MatchAnalysis(commands.Cog):
         embed.set_image(url="attachment://chart.png")
         file = _figure_to_file(fig)
         view = _ExplorerView(df, invoker_id=interaction.user.id, chart_idx=chart_idx, person=person)
-        await interaction.followup.send(embed=embed, file=file, view=view, ephemeral=True)
+        await interaction.followup.send(embed=embed, file=file, view=view)
 
 
 async def setup(bot: commands.Bot) -> None:

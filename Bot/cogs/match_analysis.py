@@ -64,6 +64,7 @@ PLACEHOLDER_VALUE = "__placeholder__"
 # charts exist + how they appear in the UI. Add an entry here and a
 # matching entry in ``analysis.ALL_PLOTS`` to expose a new chart.
 CHART_DEFS = [
+    ("Summary", "📑", analysis.plot_stats_summary, "Stats summary"),
     ("Activity", "📅", analysis.plot_activity_over_time, "Activity over time"),
     ("Cumulative WR", "📊", analysis.plot_cumulative_winrate, "Cumulative win rate"),
     ("Progression", "📈", analysis.plot_player_progression, "Lifetime progression"),
@@ -106,9 +107,10 @@ def _build_panel_embed() -> discord.Embed:
     embed.add_field(
         name="What's in here",
         value=(
+            "📑 **Summary** — headline numbers at a glance (start here)\n"
             "📅 **Activity** — games / month + WR by month\n"
             "📊 **Cumulative WR** · 📈 **Progression** (% of career)\n"
-            "⚔️ **KDA** · ⏱️ **Duration** · 🏆 **Champs W/L** · 🎯 **Champ curves**\n"
+            "⚔️ **KDA** · ⏱️ **Duration** · 🏆 **Champs W/L** (Wilson CI) · 🎯 **Champ curves**\n"
             "🕐 **Hour** · 🗓️ **Day** · 🔥 **Heatmap**\n"
             "😤 **Tilt** · ⏰ **Gap** since previous game\n"
             "🤝 **Duos** — same-team partnerships and their winrate"

@@ -4138,6 +4138,26 @@ def plot_logistic_coefficients(
     return fig
 
 
+def auc(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """Mann-Whitney U area under the ROC curve.
+
+    Equivalent to the probability that a random positive sample scores
+    higher than a random negative sample. Returns 0.5 when one class is
+    empty (degenerate; the model has nothing to discriminate).
+    """
+    y_true = np.asarray(y_true, dtype=float)
+    y_pred = np.asarray(y_pred, dtype=float)
+    pos = y_pred[y_true > 0.5]
+    neg = y_pred[y_true <= 0.5]
+    if len(pos) == 0 or len(neg) == 0:
+        return 0.5
+    all_scores = np.concatenate([pos, neg])
+    ranks = np.argsort(np.argsort(all_scores, kind="stable"), kind="stable") + 1
+    sum_pos = ranks[: len(pos)].sum()
+    u = sum_pos - len(pos) * (len(pos) + 1) / 2
+    return float(u / (len(pos) * len(neg)))
+
+
 def _build_calibration_design(
     df: pd.DataFrame,
     player: str | None,
@@ -4342,16 +4362,7 @@ def plot_model_calibration(df: pd.DataFrame, player: str | None = None) -> plt.F
     log_loss = float(-(y_te * np.log(p_safe) + (1 - y_te) * np.log(1 - p_safe)).mean())
     brier = float(((p - y_te) ** 2).mean())
 
-    pos = p[y_te > 0.5]
-    neg = p[y_te <= 0.5]
-    if len(pos) == 0 or len(neg) == 0:
-        auc_val = 0.5
-    else:
-        all_scores = np.concatenate([pos, neg])
-        ranks = np.argsort(np.argsort(all_scores, kind="stable"), kind="stable") + 1
-        sum_pos = ranks[: len(pos)].sum()
-        u = sum_pos - len(pos) * (len(pos) + 1) / 2
-        auc_val = float(u / (len(pos) * len(neg)))
+    auc_val = auc(y_te, p)
 
     # Trivial baselines — what you'd get predicting train-mean WR for everyone.
     p_bar = float(y_tr.mean())
@@ -4513,6 +4524,145 @@ def plot_model_calibration(df: pd.DataFrame, player: str | None = None) -> plt.F
         color=PALETTE["muted"],
     )
     fig.tight_layout(rect=[0, 0.04, 1, 0.96])
+    return fig
+
+
+def _per_player_auc(df: pd.DataFrame, person: str) -> float | None:
+    """Fit the calibration logit on this person's first half and return
+    holdout AUC. ``None`` when the split can't produce a usable model
+    (too few games, no class variance, or empty design)."""
+    d = df[df["person"] == person].sort_values("game_start").reset_index(drop=True)
+    if len(d) < 60:
+        return None
+
+    cut = d["game_start"].median()
+    train_df = d[d["game_start"] <= cut]
+    test_df = d[d["game_start"] > cut]
+    if len(train_df) < 30 or len(test_df) < 30:
+        return None
+
+    # ``player=None`` here means "no filter on the slice we already cut";
+    # the FE-people branch in _build_calibration_design is gated on
+    # nunique(person) > 1, which is false for a single-person df, so the
+    # person dummies drop out cleanly.
+    X_tr, y_tr, _cols, _n_fe, spec = _build_calibration_design(train_df, None)
+    if X_tr.size == 0 or len(np.unique(y_tr)) < 2:
+        return None
+
+    beta, _se, _ll = logistic_fit(X_tr, y_tr, l2=0.5)
+    X_te, y_te, _c, _n, _ = _build_calibration_design(test_df, None, spec=spec)
+    if X_te.size == 0 or len(np.unique(y_te)) < 2:
+        return None
+
+    z = np.clip(X_te @ beta[1:] + beta[0], -30.0, 30.0)
+    p = 1.0 / (1.0 + np.exp(-z))
+    return auc(y_te, p)
+
+
+def plot_per_player_predictability(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """OOS AUC per person — is the 0.498 aggregate uniform noise, or is
+    it averaging high-predictability players with low ones?
+
+    Refits the calibration logit on each eligible player's chronological
+    first half and reports holdout AUC on the second half. Bars sorted
+    descending; green > 0.55 (real signal), red < 0.45 (anti-signal),
+    grey in between (noise band). A 0.50 reference line marks chance.
+    """
+    counts = df["person"].value_counts()
+    eligible = [p for p, n in counts.items() if n >= 100]
+
+    rows: list[dict] = []
+    for person in eligible:
+        score = _per_player_auc(df, person)
+        if score is None:
+            continue
+        rows.append({"person": person, "auc": score, "n": int(counts[person])})
+
+    if len(rows) < 3:
+        return _empty_figure("Need ≥3 players with 100+ games")
+
+    rows.sort(key=lambda r: r["auc"], reverse=True)
+    median_auc = float(np.median([r["auc"] for r in rows]))
+
+    is_single = not _is_aggregate(player)
+    focus_person = _resolve_person(df, player) if is_single else None
+    focus_row = next((r for r in rows if r["person"] == focus_person), None)
+    if is_single and focus_row is None:
+        return _empty_figure("Not enough games for this player to validate")
+
+    if is_single:
+        display = [focus_row]
+    else:
+        display = rows
+
+    n_bars = len(display)
+    fig, ax = plt.subplots(figsize=(11, max(3.2, 0.55 * n_bars + 1.6)))
+
+    y_pos = np.arange(n_bars)
+    aucs = [r["auc"] for r in display]
+    labels = [f"{r['person']}  (n={r['n']})" for r in display]
+
+    def _bar_color(v: float) -> str:
+        if v > 0.55:
+            return PALETTE["win"]
+        if v < 0.45:
+            return PALETTE["loss"]
+        return PALETTE["neutral"]
+
+    colors = [_bar_color(v) for v in aucs]
+    ax.barh(y_pos, aucs, color=colors, edgecolor="white", linewidth=0.8, zorder=2)
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(labels)
+    ax.invert_yaxis()
+
+    ax.axvline(0.5, color=PALETTE["muted"], linewidth=1.0, linestyle="--", alpha=0.7, zorder=1)
+    if not is_single:
+        ax.axvline(
+            median_auc,
+            color=PALETTE["accent_purple"],
+            linewidth=1.0,
+            linestyle=":",
+            alpha=0.8,
+            zorder=1,
+            label=f"Group median {median_auc:.3f}",
+        )
+        ax.legend(loc="lower right", frameon=False, fontsize=9)
+
+    # Annotate each bar with the AUC and game count.
+    x_max = max(0.65, max(aucs) + 0.04)
+    x_min = min(0.35, min(aucs) - 0.02)
+    ax.set_xlim(x_min, x_max)
+    for i, r in enumerate(display):
+        ax.text(
+            r["auc"] + 0.005,
+            i,
+            f"{r['auc']:.3f}  ·  n={r['n']}",
+            ha="left",
+            va="center",
+            fontsize=9,
+            color=PALETTE["text"],
+        )
+
+    ax.set_xlabel("Out-of-sample AUC (holdout half)")
+    ax.set_title(_title("Per-player predictability", player), fontsize=14, fontweight="bold")
+
+    if is_single:
+        delta = focus_row["auc"] - median_auc
+        verdict = "more" if delta > 0 else "less"
+        _subtitle(
+            ax,
+            f"Your AUC: {focus_row['auc']:.3f}, median across group: {median_auc:.3f}. "
+            f"You are {verdict} predictable than peers (Δ {delta:+.3f}).",
+        )
+    else:
+        _subtitle(
+            ax,
+            "OOS AUC by player. >0.55 = real predictive signal exists. "
+            "≈0.50 = outcomes are pure noise for this player.",
+        )
+
+    _polish_ax(ax)
+    fig.tight_layout()
     return fig
 
 
@@ -4841,4 +4991,5 @@ ALL_PLOTS = [
     ("21_duo_winrate", plot_duo_winrate),
     ("22_model_calibration", plot_model_calibration),
     ("23_actions_card", plot_actions_card),
+    ("24_per_player_predictability", plot_per_player_predictability),
 ]

@@ -80,6 +80,7 @@ CHART_DEFS = [
     ("KDA", "⚔️", analysis.plot_kda_vs_outcome, "KDA vs outcome"),
     ("Duration", "⏱️", analysis.plot_duration_vs_outcome, "Game duration vs outcome"),
     ("Champs W/L", "🏆", analysis.plot_champion_winrate, "Champion winners vs losers"),
+    ("Picks", "✨", analysis.plot_champion_picks, "Champion picks — Bayesian-shrunk WR delta"),
     ("Champ curves", "🎯", analysis.plot_champion_learning_curve, "Champion learning curves"),
     ("Hour", "🕐", analysis.plot_hour_of_day, "Hour of day"),
     ("Day", "🗓️", analysis.plot_day_of_week, "Day of week"),

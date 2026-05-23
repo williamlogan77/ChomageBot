@@ -632,173 +632,6 @@ _RANK_TICK_LABELS: list[tuple[float, str]] = [
 ]
 
 
-# --- Synthetic LP interpolation across bot-outage gaps ---------------------
-
-# Tier order used by Ranker._score; index = league_idx.
-_TIER_ORDER = ["Iron", "Bronze", "Silver", "Gold", "Platinum", "Emerald", "Diamond", "Master"]
-_DIVISION_ORDER = ["IV", "III", "II", "I"]
-
-# Per-Ranker._score: each tier band is 401 wide (1000 - 599 adjustment).
-_TIER_BAND = 401
-
-# Baseline per-game LP magnitudes that match observed steady-state MMR
-# averages across this bot's players (post-gap real polls cluster around
-# +22 on wins and -18 on losses).
-_BASELINE_LP_W = 22.0
-_BASELINE_LP_L = -20.0
-
-# Fallback clamp range for per-W / per-L LP when the baseline scaling
-# blows up (e.g. when a gap crosses a Riot season reset and the anchor
-# delta has the wrong sign relative to the match outcomes).
-_LP_W_RANGE = (10.0, 40.0)
-_LP_L_RANGE = (-40.0, -10.0)
-
-
-def _score_to_rank(rank_score: float) -> tuple[str, str, int]:
-    """Inverse of ``Ranker._score`` — pick the (tier, division, lp) whose
-    score is closest to ``rank_score``.
-
-    Master+ has no divisions in Riot's UI but Ranker._score still encodes
-    them as Master IV+lp; we return "I" for Master so the synthetic rows
-    line up with how the bot stores Master snapshots.
-    """
-    score = max(0, int(round(rank_score)))
-    league_idx = min(score // _TIER_BAND, len(_TIER_ORDER) - 1)
-    score_in_tier = score - league_idx * _TIER_BAND
-    # Score-in-tier maxes at 400 (Iron I 99LP -> 399; the +1 from the
-    # 401-wide band lands on the next tier's Iron IV 0).
-    score_in_tier = max(0, min(score_in_tier, 399))
-    div_idx = min(score_in_tier // 100, 3)
-    lp = score_in_tier - div_idx * 100
-    tier = _TIER_ORDER[league_idx]
-    division = _DIVISION_ORDER[div_idx] if tier != "Master" else "I"
-    return tier, division, int(lp)
-
-
-def _solve_gap_lp(total_delta: float, n_w: int, n_l: int) -> tuple[float, float]:
-    """Pick per-win / per-loss LP values that sum to ``total_delta`` over
-    ``n_w`` wins and ``n_l`` losses.
-
-    Strategy:
-      1. Start from the typical +22 / -20 Riot averages and scale uniformly
-         so the totals hit the anchor delta. If the scale lands in
-         [0.5, 2.0] keep it.
-      2. Otherwise (sign flip across a Riot season reset, etc.) fall back
-         to a symmetric solve clamped to plausible ranges. The caller
-         distributes any residual across the last few rows so the
-         endpoint still lands on the next real poll.
-    """
-    if n_w + n_l == 1:
-        # Single match — the delta IS the LP event, no estimation needed.
-        if n_w == 1:
-            return total_delta, _BASELINE_LP_L
-        return _BASELINE_LP_W, total_delta
-    if n_w == 0:
-        return _BASELINE_LP_W, max(min(total_delta / max(n_l, 1), _LP_L_RANGE[1]), _LP_L_RANGE[0])
-    if n_l == 0:
-        return max(min(total_delta / max(n_w, 1), _LP_W_RANGE[1]), _LP_W_RANGE[0]), _BASELINE_LP_L
-
-    predicted = n_w * _BASELINE_LP_W + n_l * _BASELINE_LP_L
-    if predicted != 0:
-        scale = total_delta / predicted
-        if 0.5 <= scale <= 2.0:
-            return _BASELINE_LP_W * scale, _BASELINE_LP_L * scale
-
-    # Fallback: symmetric solve, clamped. The avg per game centres the
-    # estimate around the actual observed delta; +/-10 separates W and L
-    # magnitudes to match the typical ~2-LP gap between win and loss.
-    avg = total_delta / (n_w + n_l)
-    lp_w = max(min(avg + 10.0, _LP_W_RANGE[1]), _LP_W_RANGE[0])
-    lp_l = max(min(avg - 10.0, _LP_L_RANGE[1]), _LP_L_RANGE[0])
-    return lp_w, lp_l
-
-
-def compute_synthetic_lp_history(
-    real_history_df: pd.DataFrame, matches_df: pd.DataFrame
-) -> pd.DataFrame:
-    """Estimate per-match LP snapshots across bot-outage gaps.
-
-    For each person, find consecutive ``real_history_df`` rows separated
-    by more than ``RANK_GAP_HOURS`` of wall-clock time AND that have
-    actual match_stats rows in the intervening window. Solve for typical
-    per-W / per-L LP magnitudes that bridge the two anchor scores, then
-    walk the gap matches chronologically and emit one synthetic row per
-    match with the same columns ``load_rank_history`` returns:
-    ``person, timestamp, rank_score, tier, division, lp``.
-
-    The output is meant to be drawn as a dashed overlay between the
-    surrounding real polls — it is an *estimate* anchored to the real
-    pre/post-gap LP and does NOT distinguish match-by-match MMR drift.
-    """
-    cols = ["person", "timestamp", "rank_score", "tier", "division", "lp"]
-    if real_history_df.empty or matches_df.empty:
-        return pd.DataFrame(columns=cols)
-
-    gap_seconds = RANK_GAP_HOURS * 3600
-    synth_rows: list[dict] = []
-
-    for person, sub in real_history_df.groupby("person"):
-        sub = sub.sort_values("timestamp").reset_index(drop=True)
-        if len(sub) < 2:
-            continue
-        person_matches = matches_df[matches_df["person"] == person]
-        if person_matches.empty:
-            continue
-        gap_h = sub["timestamp"].diff().dt.total_seconds()
-        for i in np.where(gap_h.to_numpy() > gap_seconds)[0]:
-            prev = sub.iloc[i - 1]
-            nxt = sub.iloc[i]
-            gap_matches = person_matches[
-                (person_matches["game_start"] > prev["timestamp"])
-                & (person_matches["game_start"] < nxt["timestamp"])
-            ].sort_values("game_start")
-            if gap_matches.empty:
-                continue
-            wins = gap_matches["win"].astype(bool).to_numpy()
-            n_w = int(wins.sum())
-            n_l = int(len(wins) - n_w)
-            total_delta = float(nxt["rank_score"] - prev["rank_score"])
-            lp_w, lp_l = _solve_gap_lp(total_delta, n_w, n_l)
-
-            # Walk matches, accumulating score from prev anchor.
-            running_score = float(prev["rank_score"])
-            per_row_scores = np.empty(len(gap_matches), dtype=float)
-            for j, is_win in enumerate(wins):
-                running_score += lp_w if is_win else lp_l
-                per_row_scores[j] = running_score
-
-            # Distribute the endpoint residual across the last few rows
-            # so the dashed line lands exactly on the next anchor instead
-            # of drifting off by an integer-rounding remainder. Linear
-            # ramp from 0 at the start of the smoothing window to
-            # `residual` at the final row.
-            target = float(nxt["rank_score"])
-            residual = target - per_row_scores[-1]
-            n_smooth = min(len(per_row_scores), 5)
-            if n_smooth > 0 and abs(residual) > 1e-9:
-                ramp = np.linspace(residual / n_smooth, residual, n_smooth)
-                per_row_scores[-n_smooth:] += ramp
-                per_row_scores[-1] = target
-
-            for j, (_, m) in enumerate(gap_matches.iterrows()):
-                score = max(0.0, per_row_scores[j])
-                tier, division, lp = _score_to_rank(score)
-                synth_rows.append(
-                    {
-                        "person": person,
-                        "timestamp": m["game_start"],
-                        "rank_score": score,
-                        "tier": tier,
-                        "division": division,
-                        "lp": lp,
-                    }
-                )
-
-    if not synth_rows:
-        return pd.DataFrame(columns=cols)
-    return pd.DataFrame(synth_rows, columns=cols).reset_index(drop=True)
-
-
 def compute_lp_events(db_path: Path = DEFAULT_DB) -> pd.DataFrame:
     """Per-game LP events derived from league_history diffs.
 
@@ -2488,90 +2321,6 @@ def _find_global_gaps(
     return [(ts.iloc[i - 1], ts.iloc[i]) for i in gap_idx]
 
 
-def _plot_synthetic_segments(
-    ax,
-    real_sub: pd.DataFrame,
-    person_synth: pd.DataFrame,
-    colour: str,
-    *,
-    linewidth: float = 1.4,
-    label: str | None = None,
-) -> None:
-    """Draw the dashed synthetic-LP line for one person.
-
-    Each synthetic gap is rendered as its own dashed segment with the
-    surrounding real anchor points prepended/appended so the line touches
-    the solid real-polled curve at both ends instead of floating.
-    """
-    if person_synth.empty:
-        return
-    real_sorted = real_sub.sort_values("timestamp").reset_index(drop=True)
-    real_ts = real_sorted["timestamp"]
-    seen_label = False
-    # Each synthetic segment lives entirely between two consecutive real
-    # rows; group by (prev_anchor, next_anchor) timestamp pair.
-    synth_sorted = person_synth.sort_values("timestamp").reset_index(drop=True)
-    # Identify segment boundaries: row i starts a new segment if there
-    # is no prior synth row OR the prior row's timestamp falls in a
-    # different (prev,next) anchor window.
-    segment_starts: list[int] = [0]
-    prev_anchor_ts: list[pd.Timestamp] = []
-    next_anchor_ts: list[pd.Timestamp] = []
-    last_prev = last_next = None
-    for i, ts in enumerate(synth_sorted["timestamp"]):
-        idx = int(real_ts.searchsorted(ts, side="right"))
-        if idx == 0 or idx >= len(real_ts):
-            continue
-        prev = real_ts.iloc[idx - 1]
-        nxt = real_ts.iloc[idx]
-        if last_prev is None:
-            last_prev, last_next = prev, nxt
-            prev_anchor_ts.append(prev)
-            next_anchor_ts.append(nxt)
-        elif prev != last_prev or nxt != last_next:
-            segment_starts.append(i)
-            prev_anchor_ts.append(prev)
-            next_anchor_ts.append(nxt)
-            last_prev, last_next = prev, nxt
-    segment_starts.append(len(synth_sorted))
-
-    for seg_i in range(len(segment_starts) - 1):
-        s, e = segment_starts[seg_i], segment_starts[seg_i + 1]
-        seg = synth_sorted.iloc[s:e]
-        if seg.empty:
-            continue
-        prev_ts = prev_anchor_ts[seg_i]
-        next_ts = next_anchor_ts[seg_i]
-        prev_score = real_sorted.loc[real_sorted["timestamp"] == prev_ts, "rank_score"].iloc[0]
-        next_score = real_sorted.loc[real_sorted["timestamp"] == next_ts, "rank_score"].iloc[0]
-        xs = [prev_ts, *seg["timestamp"].tolist(), next_ts]
-        ys = [float(prev_score), *seg["rank_score"].astype(float).tolist(), float(next_score)]
-        kwargs = {
-            "color": colour,
-            "linewidth": linewidth,
-            "alpha": 0.55,
-            "linestyle": "--",
-        }
-        if label and not seen_label:
-            kwargs["label"] = label
-            seen_label = True
-        ax.plot(xs, ys, **kwargs)
-
-
-def _unfilled_gaps(
-    gaps: list[tuple[pd.Timestamp, pd.Timestamp]], synthetic: pd.DataFrame
-) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
-    """Return only the gap windows that have NO synthetic rows inside.
-
-    Gaps the synthetic line already bridges are visually conveyed by the
-    dashed segment — shading them too would double up.
-    """
-    if synthetic.empty:
-        return list(gaps)
-    ts = synthetic["timestamp"]
-    return [(start, end) for start, end in gaps if not ((ts > start) & (ts < end)).any()]
-
-
 def plot_rank_trajectory(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
     """Rank score over time, drawn from league_history.
 
@@ -2591,8 +2340,6 @@ def plot_rank_trajectory(df: pd.DataFrame, player: str | None = None) -> plt.Fig
     if ranks.empty:
         return _empty_figure("No rank history available")
 
-    synthetic = compute_synthetic_lp_history(ranks, df)
-
     if _is_aggregate(player):
         # Pick top-N most-active people in match_stats so the rank chart
         # lines up with the same people the rest of the panel describes.
@@ -2600,15 +2347,12 @@ def plot_rank_trajectory(df: pd.DataFrame, player: str | None = None) -> plt.Fig
         ranks = ranks[ranks["person"].isin(top_people)]
         if ranks.empty:
             return _empty_figure("No rank history for the tracked top players")
-        synthetic = synthetic[synthetic["person"].isin(top_people)]
 
         fig, ax = plt.subplots(figsize=(13, 5.4))
-        any_synth = False
         for idx, name in enumerate(top_people):
             sub = ranks[ranks["person"] == name].sort_values("timestamp").reset_index(drop=True)
             if sub.empty:
                 continue
-            colour = SERIES_CYCLE[idx % len(SERIES_CYCLE)]
             # Insert NaN at the start of any RANK_GAP_HOURS-wide gap
             # so matplotlib breaks the line there instead of drawing a
             # fake straight line across a no-data window.
@@ -2617,21 +2361,17 @@ def plot_rank_trajectory(df: pd.DataFrame, player: str | None = None) -> plt.Fig
             ax.plot(
                 sub["timestamp"],
                 plot_rank,
-                color=colour,
+                color=SERIES_CYCLE[idx % len(SERIES_CYCLE)],
                 linewidth=1.6,
                 alpha=0.85,
                 label=name,
             )
-            person_synth = synthetic[synthetic["person"] == name]
-            if not person_synth.empty:
-                any_synth = True
-                _plot_synthetic_segments(ax, sub, person_synth, colour, linewidth=1.4)
 
-        # Shade GLOBAL outage windows that are NOT covered by synthetic
-        # data — the dashed fill already conveys "estimated" for those.
+        # Shade GLOBAL outage windows: intervals where every displayed
+        # person had no poll. Use the already-filtered top-6 ranks so we
+        # only shade where the visible series all went silent.
         global_gaps = _find_global_gaps(ranks, RANK_GAP_HOURS)
-        unfilled_gaps = _unfilled_gaps(global_gaps, synthetic)
-        for start, end in unfilled_gaps:
+        for start, end in global_gaps:
             ax.axvspan(start, end, color=PALETTE["neutral"], alpha=0.15, zorder=0)
 
         _rank_axis(ax)
@@ -2640,21 +2380,15 @@ def plot_rank_trajectory(df: pd.DataFrame, player: str | None = None) -> plt.Fig
         ax.set_title(_title("Rank trajectory — top 6 most-active people", player))
         gap_note = (
             f"  Grey bands = bot-outage windows (no polls from anyone); "
-            f"{len(unfilled_gaps)} gap(s) without match data."
-            if unfilled_gaps
-            else ""
-        )
-        synth_note = (
-            "  Dashed segments = estimated LP from match outcomes "
-            "(real polls were missing for that period)."
-            if any_synth
+            f"{len(global_gaps)} gap(s) detected."
+            if global_gaps
             else ""
         )
         _subtitle(
             ax,
             "Higher = better rank. Each line is one Discord person; "
             f"{len(ranks):,} LP snapshots across {ranks['person'].nunique()} people."
-            f"{gap_note}{synth_note}",
+            f"{gap_note}",
         )
         ax.legend(loc="lower left", ncol=2, fontsize=9)
         _polish_ax(ax)
@@ -2686,22 +2420,17 @@ def plot_rank_trajectory(df: pd.DataFrame, player: str | None = None) -> plt.Fig
         linewidth=2.0,
         label="Rank",
     )
-    person_synth = synthetic[synthetic["person"] == focal_person]
-    has_synth = not person_synth.empty
-    if has_synth:
-        _plot_synthetic_segments(
-            ax_rank, sub, person_synth, PALETTE["primary"], linewidth=1.8, label="Estimated rank"
-        )
-    # Shade no-data periods that synthetic doesn't cover — the dashed
-    # estimate already visualises "no real polls, just match outcomes".
+    # Shade each gap so the no-data region is visible behind the
+    # broken line.
     gap_mask = sub["inter_snapshot_h"] > RANK_GAP_HOURS
-    all_gaps = [
-        (sub["timestamp"].iloc[i - 1], sub["timestamp"].iloc[i])
-        for i in np.where(gap_mask.to_numpy())[0]
-    ]
-    unfilled_gaps = _unfilled_gaps(all_gaps, person_synth)
-    for start, end in unfilled_gaps:
-        ax_rank.axvspan(start, end, color=PALETTE["neutral"], alpha=0.15, zorder=0)
+    for i in np.where(gap_mask.to_numpy())[0]:
+        ax_rank.axvspan(
+            sub["timestamp"].iloc[i - 1],
+            sub["timestamp"].iloc[i],
+            color=PALETTE["neutral"],
+            alpha=0.15,
+            zorder=0,
+        )
     _rank_axis(ax_rank)
     ax_rank.set_xlabel("Date")
     ax_rank.set_ylabel("Rank", color=PALETTE["primary"])
@@ -2767,21 +2496,16 @@ def plot_rank_trajectory(df: pd.DataFrame, player: str | None = None) -> plt.Fig
     )
 
     ax_rank.set_title(_title("Rank trajectory + rolling WR", player))
+    gap_count = int(gap_mask.sum())
     gap_note = (
-        f" Grey bands = no-data periods (bot outage); {len(unfilled_gaps)} gap(s) without match data."
-        if unfilled_gaps
-        else ""
-    )
-    synth_note = (
-        " Dashed segments = estimated LP from match outcomes "
-        "(real polls were missing for that period)."
-        if has_synth
+        f" Grey bands = no-data periods (bot outage); {gap_count} gap(s) detected."
+        if gap_count
         else ""
     )
     _subtitle(
         ax_rank,
         f"Solid blue = rank ({len(sub):,} LP snapshots). Dashed orange = match-stats rolling-20 WR."
-        f"{gap_note}{synth_note}",
+        f"{gap_note}",
     )
     _polish_ax(ax_rank)
     fig.autofmt_xdate()

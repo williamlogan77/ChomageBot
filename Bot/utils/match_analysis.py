@@ -1539,8 +1539,13 @@ def plot_hour_dow_heatmap(df: pd.DataFrame, player: str | None = None) -> plt.Fi
 
 
 def plot_streak_recovery(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
-    """Win rate of the NEXT game, bucketed by loss streak going into it. If
-    tilt is real, longer entering streaks should produce lower win rates."""
+    """Win rate of the NEXT game, bucketed by loss streak going into it
+    (left), plus the survival curve of an already-running loss streak
+    (right). Together they answer "does tilt kick in for the next game?"
+    and "once you're tilting, how long does it last?".
+    """
+    from matplotlib.ticker import PercentFormatter
+
     d = _filter_player(df, player)
     if d.empty:
         return _empty_figure("No games to plot")
@@ -1560,7 +1565,10 @@ def plot_streak_recovery(df: pd.DataFrame, player: str | None = None) -> plt.Fig
     totals = pooled["games"].astype(int).to_numpy()
     _chi2, _dof, pval = chi2_homogeneity(wins, totals)
 
-    fig, ax = plt.subplots(figsize=(11, 4.6))
+    fig, axes = plt.subplots(1, 2, figsize=(15, 4.6))
+
+    # --- Left panel: existing P(next win | entering streak) bars ----------
+    ax = axes[0]
     ax.bar(range(len(g)), g["winrate"], color=PALETTE["accent_orange"], width=0.7)
     if macro_n > 1:
         ax.errorbar(
@@ -1586,6 +1594,97 @@ def plot_streak_recovery(df: pd.DataFrame, player: str | None = None) -> plt.Fig
     _baseline(ax)
     _annotate_bars(ax, range(len(g)), g["winrate"], g["games"])
     _polish_ax(ax)
+
+    # --- Right panel: streak survival curves ------------------------------
+    # Sort within-person by game_start so shift(-k) actually looks at the
+    # next chronological game for that person.
+    surv_df = df.copy().sort_values(["person", "game_start"]).reset_index(drop=True)
+    surv_df = _filter_player(surv_df, player)
+    K_MAX = 6
+    K_RANGE = list(range(1, K_MAX + 1))
+    starts = [1, 2, 3, 5, 10]
+    is_macro = _is_aggregate(player)
+
+    # alive_after_k = next k games are all losses (within the same person);
+    # has_k_future masks rows that don't have k future games and must be
+    # dropped BEFORE averaging (NaN==0 → False would otherwise bias S down).
+    shifted = {k: surv_df.groupby("person")["win"].shift(-k) for k in K_RANGE}
+    has_future = {k: shifted[k].notna() for k in K_RANGE}
+    is_loss_next = {k: (shifted[k] == 0) for k in K_RANGE}
+    # streak still alive after k more = all of next-1..next-k were losses
+    alive = {}
+    running = is_loss_next[1].copy()
+    alive[1] = running
+    for k in range(2, K_MAX + 1):
+        running = running & is_loss_next[k]
+        alive[k] = running
+
+    ax_r = axes[1]
+    drawn_any = False
+    for idx, s in enumerate(starts):
+        at_risk_mask = surv_df["loss_streak_in"] == s
+        ys = []
+        for k in K_RANGE:
+            mask_k = at_risk_mask & has_future[k]
+            if is_macro:
+                per_person = (
+                    pd.DataFrame(
+                        {
+                            "person": surv_df.loc[mask_k, "person"],
+                            "alive": alive[k].loc[mask_k].astype(float),
+                        }
+                    )
+                    .groupby("person")["alive"]
+                    .agg(["size", "mean"])
+                )
+                per_person = per_person[per_person["size"] >= 10]
+                if len(per_person) >= 2:
+                    ys.append(float(per_person["mean"].mean()))
+                else:
+                    ys.append(np.nan)
+            else:
+                vals = alive[k].loc[mask_k]
+                if len(vals) >= 10:
+                    ys.append(float(vals.astype(float).mean()))
+                else:
+                    ys.append(np.nan)
+
+        ys = np.array(ys, dtype=float)
+        if not np.isfinite(ys).any():
+            continue
+        drawn_any = True
+        ax_r.plot(
+            K_RANGE,
+            ys,
+            marker="o",
+            color=SERIES_CYCLE[idx % len(SERIES_CYCLE)],
+            label=f"starting at {s}L",
+        )
+
+    # Independent (Bernoulli p=0.5) reference: P(k losses in a row) = 0.5^k.
+    ax_r.plot(
+        K_RANGE,
+        [0.5**k for k in K_RANGE],
+        linestyle=(0, (4, 4)),
+        color=PALETTE["muted"],
+        linewidth=1.2,
+        alpha=0.8,
+        label="independent 50%",
+    )
+    ax_r.set_xticks(K_RANGE)
+    ax_r.set_xlabel("Additional losses (k)")
+    ax_r.set_ylabel("P(streak still alive)")
+    ax_r.set_ylim(0, 1.0)
+    ax_r.yaxis.set_major_formatter(PercentFormatter(1.0))
+    ax_r.set_title(_title("Loss-streak survival curves", player))
+    _subtitle(
+        ax_r,
+        "Probability the losing streak continues. Below the dashed line = better than independent; above = worse (tilt).",
+    )
+    if drawn_any:
+        ax_r.legend(loc="upper right")
+    _polish_ax(ax_r)
+
     fig.tight_layout()
     return fig
 

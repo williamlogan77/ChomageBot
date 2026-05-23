@@ -354,6 +354,28 @@ def _p_verdict(p: float) -> str:
     return "consistent with noise"
 
 
+def _factors_verdict(r2: float) -> str:
+    """Plain-English verdict on how much the model's factors explain.
+
+    Drives the subtitle of the logistic-regression chart so the reader
+    knows whether the numbers above represent a real driver of outcomes
+    or are statistical decoration on top of variance the model never had
+    a shot at (teammates, draft, matchmaking).
+    """
+    if r2 < 0.01:
+        return (
+            "Factors barely move the needle — outcomes are dominated by "
+            "teammates / draft / matchmaking."
+        )
+    if r2 < 0.05:
+        return (
+            "Factors explain a small but real slice — most variance is still " "outside the model."
+        )
+    if r2 < 0.15:
+        return "Factors are a meaningful driver — but luck and teammates still dominate."
+    return "Factors are a strong driver of outcomes."
+
+
 def load_matches(db_path: Path = DEFAULT_DB) -> pd.DataFrame:
     """Load match_stats joined with league_players + users; derive features.
 
@@ -2910,20 +2932,23 @@ def _card_text(
 
 
 def _build_logistic_design(
-    df: pd.DataFrame, player: str | None
-) -> tuple[np.ndarray, np.ndarray, list[str]]:
+    df: pd.DataFrame, player: str | None, *, include_person_fe: bool = True
+) -> tuple[np.ndarray, np.ndarray, list[str], int]:
     """Build the design matrix for win-probability logistic regression.
 
     Continuous features are standardised (z-score) so their coefficients
     are comparable: each one is "log-odds shift per +1 standard deviation".
-    Binary features are 0/1. When ``player is None`` we add person fixed
-    effects (one-hot dummies, drop one as baseline) so the headline
-    coefficients are net of "who's playing" — the biggest source of
-    confounding given the 200:1 game-count spread.
+    Binary features are 0/1. When ``player is None`` and
+    ``include_person_fe`` we add person fixed effects (one-hot dummies,
+    drop one as baseline) so the headline coefficients are net of
+    "who's playing" — the biggest source of confounding given the 200:1
+    game-count spread. Person dummies are always the trailing columns of
+    ``X``; the caller gets back ``n_person_fe_cols`` so it can slice them
+    out for a person-only sub-fit when decomposing R².
     """
     d = _filter_player(df, player).copy()
     if d.empty:
-        return np.empty((0, 0)), np.empty(0), []
+        return np.empty((0, 0)), np.empty(0), [], 0
 
     same_team = d[["match_id", "win", "person"]].merge(
         df[["match_id", "win", "person"]], on=["match_id", "win"]
@@ -2975,7 +3000,10 @@ def _build_logistic_design(
         cols.append(name)
 
     # Person fixed effects (only when aggregating; baseline = most-played).
-    if player is None and d["person"].nunique() > 1:
+    # Always appended LAST so callers can split factor vs person-FE columns
+    # by slicing on n_person_fe_cols.
+    n_person_fe_cols = 0
+    if include_person_fe and player is None and d["person"].nunique() > 1:
         people = d["person"].value_counts().index.tolist()
         baseline = people[0]
         for p in people[1:]:
@@ -2984,12 +3012,13 @@ def _build_logistic_design(
                 continue
             parts.append(vals[:, None])
             cols.append(f"[person] {p} vs {baseline}")
+            n_person_fe_cols += 1
 
     if not parts:
-        return np.empty((0, 0)), np.empty(0), []
+        return np.empty((0, 0)), np.empty(0), [], 0
     X = np.hstack(parts)
     y = d["win"].to_numpy(dtype=float)
-    return X, y, cols
+    return X, y, cols, n_person_fe_cols
 
 
 def plot_logistic_coefficients(
@@ -3006,7 +3035,7 @@ def plot_logistic_coefficients(
     Bars: log-odds units. Solid green/red if p<0.05, faded grey if not.
     Annotation: standardised coef, odds ratio, and p-value.
     """
-    X, y, cols = _build_logistic_design(df, player)
+    X, y, cols, n_person_fe_cols = _build_logistic_design(df, player)
     if X.size == 0 or len(np.unique(y)) < 2:
         return _empty_figure("Not enough data to fit logistic regression")
 
@@ -3025,18 +3054,33 @@ def plot_logistic_coefficients(
     if not rows:
         return _empty_figure("No usable factors after filtering")
 
-    # McFadden pseudo-R² vs intercept-only null. Analytical form: under the
-    # null the MLE is p_bar = y.mean(), so loglik_null collapses to
-    # n_w*log(p_bar) + n_l*log(1 - p_bar). _build_logistic_design already
-    # filters degenerate y, but guard p_bar ∈ {0,1} anyway.
+    # Three-way McFadden decomposition. The full R² is flattered by the
+    # person fixed-effect dummies absorbing variance, so we also fit a
+    # person-only model and subtract: r2_factors = r2_full - r2_fe is the
+    # honest "how much do the features add on top of just knowing who's
+    # playing?" number. In single-person mode there are no FE dummies
+    # and r2_factors == r2_full.
     p_bar = float(y.mean())
     if 0.0 < p_bar < 1.0:
         n_w = float(y.sum())
         n_l = float(len(y) - n_w)
         loglik_null = n_w * math.log(p_bar) + n_l * math.log(1.0 - p_bar)
-        mcfadden_r2 = 1.0 - (loglik_full / loglik_null) if loglik_null != 0 else 0.0
     else:
-        mcfadden_r2 = 0.0
+        loglik_null = 0.0
+
+    if loglik_null != 0.0:
+        r2_full = 1.0 - (loglik_full / loglik_null)
+    else:
+        r2_full = 0.0
+
+    if n_person_fe_cols > 0 and loglik_null != 0.0:
+        X_fe = X[:, -n_person_fe_cols:]
+        _, _, loglik_fe = logistic_fit(X_fe, y, l2=0.5)
+        r2_fe: float | None = 1.0 - (loglik_fe / loglik_null)
+        r2_factors = r2_full - r2_fe
+    else:
+        r2_fe = None
+        r2_factors = r2_full
 
     coefs_df = (
         pd.DataFrame(rows)
@@ -3076,22 +3120,19 @@ def plot_logistic_coefficients(
         f"controlling for person ({n_people} people)" if n_people > 1 else "single-person fit"
     )
     ax.set_title(_title(f"Logistic regression — {title_macro}", player))
-    if mcfadden_r2 < 0.05:
-        _subtitle(
-            ax,
-            f"McFadden pseudo-R² = {mcfadden_r2:.2%} — model explains essentially none "
-            "of the variance; outcomes are dominated by factors not in the model "
-            "(teammate quality, draft, etc.). "
-            "Solid bars = p<0.05 (real signal). Faded grey = no evidence. "
-            "Continuous features are per +1σ; binary features are vs the off state.",
+    verdict_line = _factors_verdict(r2_factors)
+    if r2_fe is not None:
+        subtitle = (
+            f"Person identity alone explains {r2_fe:.1%} of variance; the factors add "
+            f"{r2_factors:+.1%} on top (full = {r2_full:.1%}). {verdict_line}\n"
+            "Solid bars = p<0.05 (real signal). Faded grey = no evidence."
         )
     else:
-        _subtitle(
-            ax,
-            f"McFadden pseudo-R² = {mcfadden_r2:.2%}. "
-            "Solid bars = p<0.05 (real signal). Faded grey = no evidence. "
-            "Continuous features are per +1σ; binary features are vs the off state.",
+        subtitle = (
+            f"McFadden pseudo-R² = {r2_full:.1%}. {verdict_line}\n"
+            "Solid bars = p<0.05 (real signal). Faded grey = no evidence."
         )
+    _subtitle(ax, subtitle)
     _polish_ax(ax)
 
     # Annotation placement: solid (significant) coloured bars wider than

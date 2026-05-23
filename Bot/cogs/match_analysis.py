@@ -65,6 +65,12 @@ PLACEHOLDER_VALUE = "__placeholder__"
 # matching entry in ``analysis.ALL_PLOTS`` to expose a new chart.
 CHART_DEFS = [
     ("Summary", "📑", analysis.plot_stats_summary, "Stats summary"),
+    (
+        "Logit",
+        "🧠",
+        analysis.plot_logistic_coefficients,
+        "Logistic regression — controlled coefficients",
+    ),
     ("Impact", "🧪", analysis.plot_feature_impact, "Feature impact — what predicts a win?"),
     ("Activity", "📅", analysis.plot_activity_over_time, "Activity over time"),
     ("Cumulative WR", "📊", analysis.plot_cumulative_winrate, "Cumulative win rate"),

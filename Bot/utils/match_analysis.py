@@ -64,6 +64,18 @@ PALETTE = {
     "spine": "#cfd4d9",
 }
 
+# Soft, grey, capless whisker style for every ax.errorbar call.
+# Hard black caps + thick lines were stealing visual weight from the bar
+# fills they're meant to annotate; muted grey + no caps recedes correctly.
+WHISKER_STYLE = {
+    "fmt": "none",
+    "capsize": 0,
+    "ecolor": PALETTE["muted"],
+    "elinewidth": 0.9,
+    "alpha": 0.45,
+}
+
+
 # Hand-picked cycle for multi-series charts (progression, learning curves).
 # Avoids matplotlib's default tab10 which clashes with our win/loss greens
 # and reds when overlapping.
@@ -874,11 +886,7 @@ def plot_kda_vs_outcome(df: pd.DataFrame, player: str | None = None) -> plt.Figu
             range(len(g)),
             g["winrate"],
             yerr=[g["winrate"] - g["ci_lo"], g["ci_hi"] - g["winrate"]],
-            fmt="none",
-            ecolor=PALETTE["text"],
-            capsize=3,
-            linewidth=1.0,
-            alpha=0.6,
+            **WHISKER_STYLE,
         )
     axes[1].set_xticks(range(len(g)))
     axes[1].set_xticklabels(g["kda_bucket"])
@@ -919,11 +927,7 @@ def plot_duration_vs_outcome(df: pd.DataFrame, player: str | None = None) -> plt
             range(len(g)),
             g["winrate"],
             yerr=[g["winrate"] - g["ci_lo"], g["ci_hi"] - g["winrate"]],
-            fmt="none",
-            ecolor=PALETTE["text"],
-            capsize=3,
-            linewidth=1.0,
-            alpha=0.6,
+            **WHISKER_STYLE,
         )
     axes[0].set_xticks(range(len(g)))
     axes[0].set_xticklabels(g["duration_bucket"])
@@ -1008,11 +1012,7 @@ def plot_champion_winrate(
             means,
             y,
             xerr=[means - lo, hi - means],
-            fmt="none",
-            ecolor=PALETTE["text"],
-            capsize=3,
-            linewidth=1.0,
-            alpha=0.7,
+            **WHISKER_STYLE,
         )
         ax.axvline(0.5, color=PALETTE["muted"], linewidth=0.8, linestyle=(0, (4, 4)), alpha=0.55)
         ax.set_yticks(y)
@@ -1310,15 +1310,21 @@ def plot_player_comparison(
     z = np.where(col_std > 0, z, 0.0)
     z[np.isnan(values)] = np.nan
 
-    fig, ax = plt.subplots(figsize=(13, max(4, len(metrics) * 0.5 + 2)))
+    # Add a row of vertical breathing room when any person label is long
+    # (>18 chars including the "(N games)" suffix), to keep angled x-axis
+    # labels from clipping into the bottom of the heatmap.
+    y_labels = [f"{p}  ({int(people_games[p])} games)" for p in people]
+    has_long_label = any(len(lbl) > 18 for lbl in y_labels)
+    row_h = 0.55 if has_long_label else 0.5
+    fig, ax = plt.subplots(figsize=(13, max(4, len(people) * row_h + 2.5)))
     cmap = plt.get_cmap("RdYlGn").copy()
     cmap.set_bad("#f3f4f6")
     masked_z = np.ma.masked_invalid(z)
     im = ax.imshow(masked_z, aspect="auto", cmap=cmap, vmin=-1.5, vmax=1.5)
 
-    y_labels = [f"{p}  ({int(people_games[p])} games)" for p in people]
+    label_fontsize = 9 if has_long_label else 10
     ax.set_yticks(np.arange(len(people)))
-    ax.set_yticklabels(y_labels)
+    ax.set_yticklabels(y_labels, fontsize=label_fontsize)
     ax.set_xticks(np.arange(len(metrics)))
     ax.set_xticklabels(metrics, rotation=30, ha="right")
 
@@ -1347,7 +1353,7 @@ def plot_player_comparison(
             else:
                 text = f"{v:.2f}"
                 color = PALETTE["text"]
-            ax.text(j, i, text, ha="center", va="center", fontsize=8.5, color=color)
+            ax.text(j, i, text, ha="center", va="center", fontsize=8, color=color, clip_on=True)
 
     focal_person = _resolve_person(df, player)
     if focal_person is not None and focal_person in people:
@@ -1640,11 +1646,7 @@ def plot_streak_recovery(df: pd.DataFrame, player: str | None = None) -> plt.Fig
             range(len(g)),
             g["winrate"],
             yerr=[g["winrate"] - g["ci_lo"], g["ci_hi"] - g["winrate"]],
-            fmt="none",
-            ecolor=PALETTE["text"],
-            capsize=3,
-            linewidth=1.0,
-            alpha=0.6,
+            **WHISKER_STYLE,
         )
     ax.set_xticks(range(len(g)))
     ax.set_xticklabels(g["streak_bucket"])
@@ -1775,11 +1777,7 @@ def plot_time_since_prev(df: pd.DataFrame, player: str | None = None) -> plt.Fig
             range(len(g)),
             g["winrate"],
             yerr=[g["winrate"] - g["ci_lo"], g["ci_hi"] - g["winrate"]],
-            fmt="none",
-            ecolor=PALETTE["text"],
-            capsize=3,
-            linewidth=1.0,
-            alpha=0.6,
+            **WHISKER_STYLE,
         )
     ax.set_xticks(range(len(g)))
     ax.set_xticklabels(g["gap_bucket"])
@@ -1918,11 +1916,7 @@ def plot_session_analysis(df: pd.DataFrame, player: str | None = None) -> plt.Fi
             list(xs),
             g3["winrate"],
             yerr=[g3["winrate"] - g3["ci_lo"], g3["ci_hi"] - g3["winrate"]],
-            fmt="none",
-            ecolor=PALETTE["text"],
-            capsize=3,
-            linewidth=1.0,
-            alpha=0.6,
+            **WHISKER_STYLE,
         )
     ax.set_xticks(list(xs))
     ax.set_xticklabels(g3["session_length_bucket"], rotation=0)
@@ -3103,10 +3097,17 @@ def plot_feature_impact(
     # bars and faded-grey (non-significant) bars stay outside to remain
     # readable against the chart background.
     for yi, (_, r) in enumerate(impacts.iterrows()):
-        q_tag = "q<0.001" if r["p_adj"] < 0.001 else f"q={r['p_adj']:.3f}"
+        # If raw p and BH-adjusted q round to the same value within 1%,
+        # show only p — the arrow + q just repeats information.
+        p_tag = _p_marker(r["p"])
+        if abs(r["p"] - r["p_adj"]) < 0.01:
+            stat_tag = p_tag
+        else:
+            q_tag = "q<0.001" if r["p_adj"] < 0.001 else f"q={r['p_adj']:.3f}"
+            stat_tag = f"{p_tag} {q_tag}"
         label = (
             f"{r['effect_pp']:+.1f}pp  ·  {r['wr_yes']:.0%} vs {r['wr_no']:.0%}  "
-            f"·  n={int(r['n_yes'])} vs {int(r['n_no'])}  ·  {_p_marker(r['p'])} → {q_tag}"
+            f"·  n={int(r['n_yes'])} vs {int(r['n_no'])}  ·  {stat_tag}"
         )
         is_grey = not (r["p_adj"] < 0.05)
         if abs(r["effect_pp"]) > 5 and not is_grey:
@@ -3218,7 +3219,16 @@ def _card_text(
     sublabel: str = "",
     value_color: str = "#222",
 ) -> None:
-    """Lay out label / value / sublabel inside an already-drawn card."""
+    """Lay out label / value / sublabel inside an already-drawn card.
+
+    The value text is the headline number and it must fit within the
+    card width. Two safety nets handle long strings (duo names like
+    "Langers69 + Chief Morri Porri", long champion names):
+    1. Hard truncate at 28 chars with an ellipsis so absurd values can't
+       blow past the right edge.
+    2. Step the fontsize down for medium-length values (>16 chars) and
+       further for long ones (>24 chars) so the box still breathes.
+    """
     pad_x = w * 0.07
     text_x = x + pad_x
     # Top label, small uppercase grey.
@@ -3233,6 +3243,14 @@ def _card_text(
         fontweight="bold",
         zorder=4,
     )
+    if len(value) > 28:
+        value = value[:27] + "…"
+    if len(value) > 24:
+        value_fontsize = 11
+    elif len(value) > 16:
+        value_fontsize = 14
+    else:
+        value_fontsize = 18
     # Big value, vertically centred-ish.
     ax.text(
         text_x,
@@ -3240,7 +3258,7 @@ def _card_text(
         value,
         ha="left",
         va="center",
-        fontsize=18,
+        fontsize=value_fontsize,
         color=value_color,
         fontweight="bold",
         zorder=4,
@@ -3431,11 +3449,7 @@ def plot_logistic_coefficients(
         coefs_df["coef"],
         y_pos,
         xerr=1.96 * coefs_df["se"],
-        fmt="none",
-        ecolor=PALETTE["text"],
-        capsize=3,
-        linewidth=1.0,
-        alpha=0.6,
+        **WHISKER_STYLE,
     )
     ax.axvline(0, color=PALETTE["text"], linewidth=0.8)
     ax.set_yticks(y_pos)
@@ -3472,11 +3486,15 @@ def plot_logistic_coefficients(
     # to stay readable.
     for yi, r in coefs_df.iterrows():
         odds_ratio_pct = (r["or"] - 1) * 100
-        q_tag = "q<0.001" if r["p_adj"] < 0.001 else f"q={r['p_adj']:.3f}"
-        label = (
-            f"{r['coef']:+.2f}  ·  OR {r['or']:.2f} "
-            f"({odds_ratio_pct:+.0f}%)  ·  {_p_marker(r['p'])} → {q_tag}"
-        )
+        # If raw p and BH-adjusted q round to the same value within 1%,
+        # show only p — the arrow + q just repeats information.
+        p_tag = _p_marker(r["p"])
+        if abs(r["p"] - r["p_adj"]) < 0.01:
+            stat_tag = p_tag
+        else:
+            q_tag = "q<0.001" if r["p_adj"] < 0.001 else f"q={r['p_adj']:.3f}"
+            stat_tag = f"{p_tag} {q_tag}"
+        label = f"{r['coef']:+.2f}  ·  OR {r['or']:.2f} " f"({odds_ratio_pct:+.0f}%)  ·  {stat_tag}"
         is_grey = not (r["p_adj"] < 0.05)
         if abs(r["coef"]) > 0.5 and not is_grey:
             if r["coef"] >= 0:

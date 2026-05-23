@@ -1461,6 +1461,254 @@ def plot_player_comparison(
     return fig
 
 
+def plot_actions_card(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Prescriptive 'what should you DO' card grid — per player.
+
+    Six tiles in a 3x2 grid. Each tile distils one corroborated finding
+    into a single concrete action: play / drop a champ, stop at N losses,
+    MMR verdict, best duo partner, hour to avoid. Green stripe = positive
+    action with statistical backing, red = negative warning, grey = no
+    signal strong enough to act on.
+
+    Aggregate view is intentionally empty — prescriptions only make sense
+    per-person, and the per-person card already shows the headline
+    actions for that player.
+    """
+    if _is_aggregate(player):
+        return _empty_figure("Pick a player from the dropdown — actions are per-person.")
+
+    d = _filter_player(df, player)
+    label = _display_label(player) or "this player"
+    if d.empty:
+        return _empty_figure(f"No games for {label}")
+
+    baseline_wr = float(d["win"].mean())
+    games_total = len(d)
+    focal_person = _resolve_person(df, player)
+
+    # --- Tile 1 + 2: Champion picks ---------------------------------------
+    champ_pick_value = "—"
+    champ_pick_sub = "no champion with confident lift"
+    champ_pick_accent = PALETTE["neutral"]
+    champ_pick_color = PALETTE["muted"]
+    champ_drop_value = "—"
+    champ_drop_sub = "no champion with confident drag"
+    champ_drop_accent = PALETTE["neutral"]
+    champ_drop_color = PALETTE["muted"]
+
+    champ_stats = d.groupby("champion")["win"].agg(["count", "sum", "mean"])
+    champ_stats = champ_stats[champ_stats["count"] >= 5]
+    if not champ_stats.empty:
+        champ_stats = champ_stats.rename(columns={"count": "n", "sum": "wins", "mean": "raw_wr"})
+        champ_stats["shrunk_wr"] = [
+            bayesian_shrunk_wr(int(w), int(n), baseline_wr, 10.0)
+            for w, n in zip(champ_stats["wins"], champ_stats["n"], strict=False)
+        ]
+        cis = [
+            wilson_ci(int(w), int(n))
+            for w, n in zip(champ_stats["wins"], champ_stats["n"], strict=False)
+        ]
+        champ_stats["ci_lo"] = [c[0] for c in cis]
+        champ_stats["ci_hi"] = [c[1] for c in cis]
+        champ_stats["delta_pp"] = (champ_stats["shrunk_wr"] - baseline_wr) * 100
+
+        confident_up = champ_stats[
+            (champ_stats["ci_lo"] > baseline_wr) & (champ_stats["delta_pp"] > 0)
+        ].sort_values("delta_pp", ascending=False)
+        if not confident_up.empty:
+            top_row = confident_up.iloc[0]
+            champ_pick_value = str(top_row.name)
+            champ_pick_sub = f"+{top_row['delta_pp']:.1f}pp lift  ·  n={int(top_row['n'])} games"
+            champ_pick_accent = PALETTE["win"]
+            champ_pick_color = PALETTE["win"]
+
+        confident_down = champ_stats[
+            (champ_stats["ci_hi"] < baseline_wr) & (champ_stats["delta_pp"] < 0)
+        ].sort_values("delta_pp", ascending=True)
+        if not confident_down.empty:
+            bot_row = confident_down.iloc[0]
+            champ_drop_value = str(bot_row.name)
+            champ_drop_sub = f"{bot_row['delta_pp']:.1f}pp lift  ·  n={int(bot_row['n'])} games"
+            champ_drop_accent = PALETTE["loss"]
+            champ_drop_color = PALETTE["loss"]
+
+    # --- Tile 3: Stop at N losses ----------------------------------------
+    # Scan s = 2..6, find smallest s where Wilson CI of P(win|s prior
+    # losses) excludes 0.50. Require >=5 observations at that streak
+    # length so a single fluke L doesn't trigger a degenerate CI.
+    stop_value = "no signal"
+    stop_sub = "streak independence holds for you"
+    stop_accent = PALETTE["neutral"]
+    stop_color = PALETTE["muted"]
+    streak_in = d["loss_streak_in"].astype(int)
+    for s in range(2, 7):
+        mask = streak_in == s
+        n_s = int(mask.sum())
+        if n_s < 5:
+            continue
+        wins_s = int(d.loc[mask, "win"].sum())
+        lo, hi = wilson_ci(wins_s, n_s)
+        if lo > 0.5 or hi < 0.5:
+            stop_value = f"{s}L"
+            stop_sub = f"CI {lo:.0%}-{hi:.0%}  ·  n={n_s}"
+            stop_accent = PALETTE["accent_orange"] if hi < 0.5 else PALETTE["win"]
+            stop_color = stop_accent
+            break
+
+    # --- Tile 4: MMR verdict ---------------------------------------------
+    mmr_value = "—"
+    mmr_sub = "no LP events recorded"
+    mmr_accent = PALETTE["neutral"]
+    mmr_color = PALETTE["muted"]
+    try:
+        events = compute_lp_events(DEFAULT_DB)
+    except Exception:
+        events = pd.DataFrame()
+    if focal_person and not events.empty:
+        sub = events[events["person"] == focal_person]
+        if not sub.empty:
+            n_evt = len(sub)
+            net_per_100 = float(sub["delta_score"].sum() / n_evt * 100)
+            if net_per_100 > 50:
+                verdict = "climbing fast"
+                mmr_accent = PALETTE["win"]
+            elif net_per_100 > 5:
+                verdict = "climbing"
+                mmr_accent = PALETTE["win"]
+            elif net_per_100 < -50:
+                verdict = "falling fast"
+                mmr_accent = PALETTE["loss"]
+            elif net_per_100 < -5:
+                verdict = "falling"
+                mmr_accent = PALETTE["loss"]
+            else:
+                verdict = "treading water"
+                mmr_accent = PALETTE["primary"]
+            mmr_value = f"{net_per_100:+.0f}/100"
+            mmr_sub = f"{verdict}  ·  n={n_evt} LP events"
+            mmr_color = mmr_accent
+
+    # --- Tile 5: Duo partner ---------------------------------------------
+    duo_value = "no clear lift"
+    duo_sub = "solo or random partners"
+    duo_accent = PALETTE["neutral"]
+    duo_color = PALETTE["muted"]
+    if focal_person:
+        duos = compute_duos(df, min_games=5)
+        if not duos.empty:
+            partners = duos[(duos["a"] == focal_person) | (duos["b"] == focal_person)].copy()
+            if not partners.empty:
+                partners["partner"] = partners.apply(
+                    lambda r: r["b"] if r["a"] == focal_person else r["a"], axis=1
+                )
+                partners["lift"] = partners["winrate"] - baseline_wr
+                qualified = partners[(partners["lift"] > 0.05) & (partners["games"] >= 10)]
+                if not qualified.empty:
+                    best = qualified.sort_values("winrate", ascending=False).iloc[0]
+                    duo_value = str(best["partner"])
+                    duo_sub = f"+{best['lift'] * 100:.1f}pp lift  ·  n={int(best['games'])} games"
+                    duo_accent = PALETTE["win"]
+                    duo_color = PALETTE["win"]
+
+    # --- Tile 6: Avoid hour ----------------------------------------------
+    hour_value = "no bad hours"
+    hour_sub = "all hours within noise"
+    hour_accent = PALETTE["neutral"]
+    hour_color = PALETTE["muted"]
+    hour_stats = d.groupby("hour")["win"].agg(["count", "sum", "mean"])
+    hour_stats = hour_stats[hour_stats["count"] >= 10]
+    if not hour_stats.empty:
+        flagged = []
+        for hr, row in hour_stats.iterrows():
+            lo, hi = wilson_ci(int(row["sum"]), int(row["count"]))
+            if hi < baseline_wr:
+                flagged.append((int(hr), float(row["mean"]), lo, hi, int(row["count"])))
+        if flagged:
+            # Worst hour = lowest WR among flagged.
+            flagged.sort(key=lambda t: t[1])
+            hr, wr_h, _lo, _hi, n_h = flagged[0]
+            hour_value = f"{hr:02d}:00"
+            hour_sub = f"{wr_h:.0%} WR vs {baseline_wr:.0%}  ·  CI excludes baseline  ·  n={n_h}"
+            hour_accent = PALETTE["loss"]
+            hour_color = PALETTE["loss"]
+
+    # --- Render -----------------------------------------------------------
+    fig = plt.figure(figsize=(13, 6.6))
+    ax = fig.add_subplot(111)
+    ax.set_axis_off()
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    fig.suptitle(
+        f"Actions for {label} — what the data says to do",
+        fontsize=18,
+        fontweight="bold",
+        y=0.965,
+    )
+    fig.text(
+        0.5,
+        0.905,
+        f"{games_total:,} games  ·  baseline WR {baseline_wr:.0%}. "
+        "Green = confident positive action, red = confident warning, grey = no signal.",
+        ha="center",
+        fontsize=10,
+        color=PALETTE["muted"],
+        style="italic",
+    )
+
+    margin_x, margin_y = 0.035, 0.04
+    gap_x, gap_y = 0.022, 0.035
+    n_cols, n_rows = 3, 2
+    grid_top = 0.86
+    grid_bottom = margin_y
+    card_w = (1 - 2 * margin_x - (n_cols - 1) * gap_x) / n_cols
+    card_h = (grid_top - grid_bottom - (n_rows - 1) * gap_y) / n_rows
+
+    def cell(col: int, row: int) -> tuple[float, float]:
+        x = margin_x + col * (card_w + gap_x)
+        y = grid_top - card_h - row * (card_h + gap_y)
+        return x, y
+
+    def tile(col, row, label_text, value, sublabel, accent, value_color):
+        x, y = cell(col, row)
+        _draw_card(ax, x, y, card_w, card_h, accent=accent)
+        _card_text(
+            ax,
+            x,
+            y,
+            card_w,
+            card_h,
+            label=label_text,
+            value=value,
+            sublabel=sublabel,
+            value_color=value_color,
+        )
+
+    tile(
+        0,
+        0,
+        "🎯 Play this champ more",
+        champ_pick_value,
+        champ_pick_sub,
+        champ_pick_accent,
+        champ_pick_color,
+    )
+    tile(
+        1,
+        0,
+        "❌ Drop this champ",
+        champ_drop_value,
+        champ_drop_sub,
+        champ_drop_accent,
+        champ_drop_color,
+    )
+    tile(2, 0, "🛑 Stop at N losses", stop_value, stop_sub, stop_accent, stop_color)
+    tile(0, 1, "💰 MMR verdict", mmr_value, mmr_sub, mmr_accent, mmr_color)
+    tile(1, 1, "🤝 Duo with", duo_value, duo_sub, duo_accent, duo_color)
+    tile(2, 1, "🕐 Avoid this hour", hour_value, hour_sub, hour_accent, hour_color)
+
+    return fig
+
+
 def plot_champion_learning_curve(
     df: pd.DataFrame, player: str | None = None, top: int = 5, window: int = 5
 ) -> plt.Figure:
@@ -4592,4 +4840,5 @@ ALL_PLOTS = [
     ("20_session_analysis", plot_session_analysis),
     ("21_duo_winrate", plot_duo_winrate),
     ("22_model_calibration", plot_model_calibration),
+    ("23_actions_card", plot_actions_card),
 ]

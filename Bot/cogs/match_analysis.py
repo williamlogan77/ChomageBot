@@ -73,6 +73,7 @@ CHART_DEFS = [
     ),
     ("Impact", "🧪", analysis.plot_feature_impact, "Feature impact — what predicts a win?"),
     ("Activity", "📅", analysis.plot_activity_over_time, "Activity over time"),
+    ("Rank", "🏅", analysis.plot_rank_trajectory, "Rank trajectory (with WR overlay)"),
     ("Cumulative WR", "📊", analysis.plot_cumulative_winrate, "Cumulative win rate"),
     ("Progression", "📈", analysis.plot_player_progression, "Lifetime progression"),
     ("KDA", "⚔️", analysis.plot_kda_vs_outcome, "KDA vs outcome"),

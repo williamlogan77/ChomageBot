@@ -2543,13 +2543,16 @@ def plot_duo_winrate(
 
 
 def plot_activity_over_time(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
-    """Calendar-time view — games per month + the monthly win rate.
+    """Calendar-time view — games per month + the monthly win rate, with a
+    year × month win-rate heatmap on the right to separate seasonal effects
+    from year-over-year drift.
 
-    Counters the apples-vs-oranges issue of the progression chart by
-    plotting absolute date on the x-axis. For the aggregate view this
-    shows when the friend group was actually active and whether month-
-    over-month win rate has any drift. For one player it's their
+    Left panel: when the friend group was actually active and whether
+    month-over-month win rate has any trend. For one player it's their
     individual session pattern.
+
+    Right panel: same months side-by-side across years so e.g. "every
+    September is a slump" stands out from "we got worse this year".
     """
     d = _filter_player(df, player)
     if d.empty:
@@ -2559,7 +2562,10 @@ def plot_activity_over_time(df: pd.DataFrame, player: str | None = None) -> plt.
     d["month"] = d["game_start"].dt.to_period("M").dt.to_timestamp()
     by_month = d.groupby("month").agg(games=("win", "size"), winrate=("win", "mean")).reset_index()
 
-    fig, ax_vol = plt.subplots(figsize=(13, 4.8))
+    fig, axes = plt.subplots(1, 2, figsize=(16, 4.8))
+
+    # --- Left: games / month + WR line ------------------------------------
+    ax_vol = axes[0]
     ax_wr = ax_vol.twinx()
 
     ax_vol.bar(
@@ -2572,6 +2578,7 @@ def plot_activity_over_time(df: pd.DataFrame, player: str | None = None) -> plt.
     ax_vol.set_xlabel("Month")
     ax_vol.set_ylabel("Games / month", color=PALETTE["muted"])
     ax_vol.set_axisbelow(True)
+    ax_vol.tick_params(axis="x", rotation=45)
 
     enough = by_month["games"] >= 5  # don't draw winrate on near-empty months
     ax_wr.plot(
@@ -2591,19 +2598,96 @@ def plot_activity_over_time(df: pd.DataFrame, player: str | None = None) -> plt.
     ax_wr.spines["right"].set_visible(False)
     ax_wr.spines["top"].set_visible(False)
 
-    fig.suptitle(_title("Activity over time — games / month + win rate", player))
-    fig.text(
-        0.5,
-        0.92,
-        "Grey bars = games that month. Blue line = winrate that month (months with <5 games skipped).",
-        ha="center",
-        va="top",
-        fontsize=10,
-        color=PALETTE["muted"],
-        style="italic",
+    ax_vol.set_title(_title("Activity over time — games / month + win rate", player))
+    _subtitle(
+        ax_vol,
+        "Grey bars = games that month. Blue line = winrate that month "
+        "(months with <5 games skipped).",
     )
-    fig.autofmt_xdate()
-    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    _polish_ax(ax_vol)
+
+    # --- Right: year × month WR heatmap -----------------------------------
+    ax_heat = axes[1]
+    d["year"] = d["game_start"].dt.year
+    d["month_num"] = d["game_start"].dt.month
+
+    if player is None:
+        # Per (year, month, person) WR, then macro-average across people.
+        # Mirrors plot_hour_dow_heatmap's aggregate rule but with a higher
+        # threshold (5 games per cell per person) — months are coarser
+        # buckets than hour-of-week so the sample size bar is higher.
+        per_person = (
+            d.groupby(["year", "month_num", "person"])
+            .agg(person_games=("win", "size"), person_wins=("win", "sum"))
+            .reset_index()
+        )
+        per_person = per_person[per_person["person_games"] >= 5]
+        per_person["person_wr"] = per_person["person_wins"] / per_person["person_games"]
+        wr = per_person.pivot_table(
+            index="year", columns="month_num", values="person_wr", aggfunc="mean"
+        )
+        contrib_people = per_person.pivot_table(
+            index="year", columns="month_num", values="person", aggfunc="nunique"
+        )
+        # Require ≥2 contributing people so a single dominant player
+        # can't define the cell.
+        wr = wr.where(contrib_people.fillna(0) >= 2)
+        sub_heat = (
+            "Compare same-month across years to separate seasonal effects "
+            "from year-over-year improvement. ≥5 games per person, ≥2 people per cell."
+        )
+    else:
+        pooled = (
+            d.groupby(["year", "month_num"])
+            .agg(games=("win", "size"), winrate=("win", "mean"))
+            .reset_index()
+        )
+        pooled = pooled[pooled["games"] >= 5]
+        wr = pooled.pivot_table(index="year", columns="month_num", values="winrate")
+        sub_heat = (
+            "Compare same-month across years to separate seasonal effects "
+            "from year-over-year improvement. Cells with <5 games dimmed."
+        )
+
+    years_desc = sorted(d["year"].unique(), reverse=True)
+    wr = wr.reindex(index=years_desc, columns=range(1, 13))
+
+    cmap = plt.get_cmap("RdYlGn").copy()
+    cmap.set_bad(color="#f3f4f6")
+    im = ax_heat.imshow(wr.values, aspect="auto", cmap=cmap, vmin=0.3, vmax=0.7)
+
+    ax_heat.set_yticks(range(len(years_desc)))
+    ax_heat.set_yticklabels(years_desc)
+    ax_heat.set_xticks(range(12))
+    ax_heat.set_xticklabels(
+        ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    )
+    ax_heat.set_xlabel("Month")
+    ax_heat.set_ylabel("Year")
+    ax_heat.set_title(_title("Year × month win-rate", player))
+    _subtitle(ax_heat, sub_heat)
+    ax_heat.grid(False)
+
+    for r in range(wr.shape[0]):
+        for c in range(wr.shape[1]):
+            v = wr.values[r, c]
+            if pd.isna(v):
+                continue
+            ax_heat.text(
+                c,
+                r,
+                f"{v * 100:.0f}%",
+                ha="center",
+                va="center",
+                fontsize=9,
+                color=PALETTE["text"],
+            )
+
+    cbar = fig.colorbar(im, ax=ax_heat, label="Win rate", shrink=0.8, pad=0.02)
+    cbar.outline.set_visible(False)
+    _polish_ax(ax_heat)
+
+    fig.tight_layout()
     return fig
 
 

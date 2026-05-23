@@ -36,8 +36,14 @@ create table if not exists league_history (
     division TEXT,
     tier TEXT
 );
+-- Composite PK on (match_id, puuid) so when two tracked players share a
+-- game, BOTH rows survive the backfill's INSERT OR IGNORE. A single-column
+-- PK on match_id alone silently dropped the second player's row and broke
+-- duo / head-to-head detection. Existing DBs get migrated via
+-- scripts/migrate_match_stats_composite_pk.py — `if not exists` here only
+-- covers fresh installs.
 create table if not exists match_stats (
-    match_id TEXT not null primary key,
+    match_id TEXT not null,
     puuid TEXT not null,
     game_start DATETIME not null,
     queue_id INTEGER not null,
@@ -46,7 +52,8 @@ create table if not exists match_stats (
     kills INTEGER not null,
     deaths INTEGER not null,
     assists INTEGER not null,
-    duration_sec INTEGER not null
+    duration_sec INTEGER not null,
+    primary key (match_id, puuid)
 );
 create index if not exists idx_match_stats_puuid_time on match_stats (puuid, game_start DESC);
 create unique index if not exists discord_events_event_id_uindex on discord_events (event_id);

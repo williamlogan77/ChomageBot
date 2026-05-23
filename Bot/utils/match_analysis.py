@@ -2024,94 +2024,252 @@ def compute_duos(df: pd.DataFrame, min_games: int = 5) -> pd.DataFrame:
     return agg.sort_values("games", ascending=False).reset_index(drop=True)
 
 
+def compute_head_to_head(df: pd.DataFrame, min_games: int = 3) -> pd.DataFrame:
+    """All opposite-team encounters between tracked players.
+
+    Mirror of :func:`compute_duos` but joins on match_id ALONE (without
+    win), then keeps the rows where the two players had different win
+    values — i.e. they were on opposite teams of the same game.
+
+    Returns columns: ``a``, ``b``, ``games`` (encounters), ``a_wins``
+    (times person ``a`` beat ``b``), ``a_winrate``. Pair ordering is
+    alphabetical (``a < b``) so each pair appears once; the WR is from
+    ``a``'s perspective.
+    """
+    m = df[["match_id", "win", "person"]].drop_duplicates()
+    pairs = m.merge(m, on="match_id", suffixes=("_x", "_y"))
+    pairs = pairs[(pairs["person_x"] < pairs["person_y"]) & (pairs["win_x"] != pairs["win_y"])]
+    if pairs.empty:
+        return pd.DataFrame(columns=["a", "b", "games", "a_wins", "a_winrate"])
+    agg = (
+        pairs.groupby(["person_x", "person_y"])
+        .agg(games=("win_x", "size"), a_wins=("win_x", "sum"))
+        .reset_index()
+        .rename(columns={"person_x": "a", "person_y": "b"})
+    )
+    agg["a_winrate"] = agg["a_wins"] / agg["games"]
+    agg = agg[agg["games"] >= min_games]
+    return agg.sort_values("games", ascending=False).reset_index(drop=True)
+
+
 def plot_duo_winrate(
-    df: pd.DataFrame, player: str | None = None, min_games: int = 10, top: int = 12
+    df: pd.DataFrame,
+    player: str | None = None,
+    min_games: int = 10,
+    h2h_min_games: int = 4,
+    top: int = 10,
 ) -> plt.Figure:
-    """Same-team duo analysis.
+    """Two-panel social view: same-team duos (left) + head-to-head (right).
 
-    Aggregate view: top ``top`` most-played duos, bars coloured by win rate.
+    Same-team detection joins on ``(match_id, win)`` — two tracked
+    players with the same outcome in the same match were on one side.
+    Head-to-head joins on ``match_id`` and keeps rows where ``win``
+    differs — opposite teams in the same game.
 
-    Per-player view: each partner the focal player has played with at
-    least ``min_games`` times — bar = winrate together, annotated with
-    sample count. A dotted line shows the player's overall solo win
-    rate for reference.
+    Aggregate view: left = top duos by games together; right = top
+    head-to-head encounters by frequency, bars centred on 50% so the
+    favoured side reads at a glance.
+
+    Per-person view: left = partners with their WR vs that person's
+    solo baseline; right = opponents with that person's record against
+    each (dashed line = even 50%).
     """
     duos = compute_duos(df, min_games=min_games)
-    if duos.empty:
-        return _empty_figure(f"No same-team duos with ≥{min_games} games")
+    h2h = compute_head_to_head(df, min_games=h2h_min_games)
+    if duos.empty and h2h.empty:
+        return _empty_figure("No multi-tracked-player matches yet")
+
+    fig, axes = plt.subplots(1, 2, figsize=(16, max(4.6, top * 0.45)))
 
     if player is None:
-        d = duos.head(top).iloc[::-1]  # reverse so highest-volume sits at top of barh
-        labels = d["a"] + "  +  " + d["b"]
-        fig_h = max(4.5, len(d) * 0.4)
-        fig, ax = plt.subplots(figsize=(13, fig_h))
-        colours = [PALETTE["win"] if wr >= 0.5 else PALETTE["loss"] for wr in d["winrate"]]
-        ax.barh(range(len(d)), d["games"], color=colours, height=0.7)
-        ax.set_yticks(range(len(d)))
-        ax.set_yticklabels(labels)
-        ax.set_xlabel("Games played together (same team)")
-        ax.set_title(_title(f"Top duos (≥{min_games} same-team games together)", player))
-        _subtitle(ax, "Bar length = games together. Green/red = winrate above/below 50%.")
+        # --- Left: top duos by games together ---
+        ax = axes[0]
+        d = duos.head(top).iloc[::-1]
+        if d.empty:
+            ax.text(
+                0.5,
+                0.5,
+                f"No duos with ≥{min_games} games",
+                ha="center",
+                va="center",
+                color=PALETTE["muted"],
+                transform=ax.transAxes,
+            )
+            ax.set_axis_off()
+        else:
+            labels = d["a"] + "  +  " + d["b"]
+            colours = [PALETTE["win"] if wr >= 0.5 else PALETTE["loss"] for wr in d["winrate"]]
+            ax.barh(range(len(d)), d["games"], color=colours, height=0.7)
+            ax.set_yticks(range(len(d)))
+            ax.set_yticklabels(labels)
+            ax.set_xlabel("Games played together (same team)")
+            ax.set_title(_title(f"Top duos (≥{min_games} together)", player))
+            _subtitle(ax, "Bar length = games together. Green/red = WR above/below 50%.")
+            _polish_ax(ax)
+            for yi, (g, wr) in enumerate(zip(d["games"], d["winrate"], strict=False)):
+                ax.annotate(
+                    f"{int(g)} · {wr:.0%}",
+                    xy=(g, yi),
+                    xytext=(6, 0),
+                    textcoords="offset points",
+                    va="center",
+                    fontsize=9,
+                    color=PALETTE["text"],
+                )
+
+        # --- Right: top head-to-heads by frequency, centred on 50% ---
+        ax = axes[1]
+        h = h2h.head(top).iloc[::-1]
+        if h.empty:
+            ax.text(
+                0.5,
+                0.5,
+                f"No head-to-heads with ≥{h2h_min_games} games",
+                ha="center",
+                va="center",
+                color=PALETTE["muted"],
+                transform=ax.transAxes,
+            )
+            ax.set_axis_off()
+        else:
+            # Always orient with the favoured side on the right.
+            h = h.copy()
+            h["left"] = np.where(h["a_winrate"] >= 0.5, h["b"], h["a"])
+            h["right"] = np.where(h["a_winrate"] >= 0.5, h["a"], h["b"])
+            h["right_wr"] = np.where(h["a_winrate"] >= 0.5, h["a_winrate"], 1 - h["a_winrate"])
+            h["delta_pp"] = (h["right_wr"] - 0.5) * 100  # always positive
+            labels = h["left"] + "  vs  " + h["right"]
+            ax.barh(range(len(h)), h["delta_pp"], color=PALETTE["primary"], height=0.7)
+            ax.axvline(0, color=PALETTE["text"], linewidth=0.8)
+            ax.set_yticks(range(len(h)))
+            ax.set_yticklabels(labels)
+            ax.set_xlabel("Favoured side's WR over 50%  (percentage points)")
+            ax.set_title(_title(f"Top head-to-heads (≥{h2h_min_games} encounters)", player))
+            _subtitle(
+                ax,
+                "Right name = winner of the matchup. Bar length = how lopsided.",
+            )
+            _polish_ax(ax)
+            for yi, row in h.reset_index(drop=True).iterrows():
+                ax.annotate(
+                    f"{int(row['games'])} games · {row['right_wr']:.0%}",
+                    xy=(row["delta_pp"], yi),
+                    xytext=(6, 0),
+                    textcoords="offset points",
+                    va="center",
+                    fontsize=9,
+                    color=PALETTE["text"],
+                )
+        fig.tight_layout()
+        return fig
+
+    # --- Per-person view ---
+    solo_wr = df[df["person"] == player]["win"].mean() if not df.empty else 0.5
+
+    # Left: this player's partners.
+    ax = axes[0]
+    partner_rows = duos[(duos["a"] == player) | (duos["b"] == player)].copy()
+    if partner_rows.empty:
+        ax.text(
+            0.5,
+            0.5,
+            f"No duos for {player} with ≥{min_games} games",
+            ha="center",
+            va="center",
+            color=PALETTE["muted"],
+            transform=ax.transAxes,
+        )
+        ax.set_axis_off()
+    else:
+        partner_rows["partner"] = partner_rows.apply(
+            lambda r: r["b"] if r["a"] == player else r["a"], axis=1
+        )
+        partner_rows = (
+            partner_rows.sort_values("games", ascending=False)
+            .head(top)
+            .sort_values("winrate", ascending=True)
+        )
+        colours = [
+            PALETTE["win"] if wr >= solo_wr else PALETTE["loss"] for wr in partner_rows["winrate"]
+        ]
+        ax.barh(range(len(partner_rows)), partner_rows["winrate"], color=colours, height=0.7)
+        ax.axvline(
+            solo_wr,
+            color=PALETTE["muted"],
+            linestyle="--",
+            linewidth=1.0,
+            label=f"solo baseline ({solo_wr:.0%})",
+        )
+        ax.set_yticks(range(len(partner_rows)))
+        ax.set_yticklabels(partner_rows["partner"])
+        ax.set_xlabel("WR same-team with partner")
+        ax.set_xlim(0, 1)
+        ax.set_title(_title("Duo WR by partner", player))
+        _subtitle(ax, "Green = partner lifts you above baseline; red = drags below.")
+        ax.legend(loc="lower right")
         _polish_ax(ax)
-        for yi, (g, wr) in enumerate(zip(d["games"], d["winrate"], strict=False)):
+        for yi, (wr, n) in enumerate(
+            zip(partner_rows["winrate"], partner_rows["games"], strict=False)
+        ):
             ax.annotate(
-                f"{int(g)} games · {wr:.0%} WR",
-                xy=(g, yi),
+                f"{wr:.0%} · n={int(n)}",
+                xy=(wr, yi),
                 xytext=(6, 0),
                 textcoords="offset points",
                 va="center",
                 fontsize=9,
                 color=PALETTE["text"],
             )
-        fig.tight_layout()
-        return fig
 
-    # Per-player view — partners only.
-    partner_rows = duos[(duos["a"] == player) | (duos["b"] == player)].copy()
-    if partner_rows.empty:
-        return _empty_figure(f"No same-team duos for {player} with ≥{min_games} games")
-    partner_rows["partner"] = partner_rows.apply(
-        lambda r: r["b"] if r["a"] == player else r["a"], axis=1
-    )
-    partner_rows = partner_rows.sort_values("games", ascending=False).head(top)
-    partner_rows = partner_rows.sort_values("winrate", ascending=True)
-
-    solo_wr = df[df["person"] == player]["win"].mean()
-
-    fig_h = max(4.2, len(partner_rows) * 0.45)
-    fig, ax = plt.subplots(figsize=(13, fig_h))
-    colours = [
-        PALETTE["win"] if wr >= solo_wr else PALETTE["loss"] for wr in partner_rows["winrate"]
-    ]
-    ax.barh(range(len(partner_rows)), partner_rows["winrate"], color=colours, height=0.7)
-    ax.axvline(
-        solo_wr,
-        color=PALETTE["muted"],
-        linestyle="--",
-        linewidth=1.0,
-        label=f"{player}'s overall WR ({solo_wr:.0%})",
-    )
-    ax.set_yticks(range(len(partner_rows)))
-    ax.set_yticklabels(partner_rows["partner"])
-    ax.set_xlabel("Win rate when on the same team")
-    ax.set_xlim(0, 1)
-    ax.set_title(_title(f"Duo win rate by partner (≥{min_games} games each)", player))
-    _subtitle(
-        ax,
-        "Dashed line = solo baseline. Green = partner lifts you above it; red = drags below.",
-    )
-    ax.legend(loc="lower right")
-    _polish_ax(ax)
-    for yi, (wr, n) in enumerate(zip(partner_rows["winrate"], partner_rows["games"], strict=False)):
-        ax.annotate(
-            f"{wr:.0%} · n={int(n)}",
-            xy=(wr, yi),
-            xytext=(6, 0),
-            textcoords="offset points",
+    # Right: this player's head-to-head record vs each opponent.
+    ax = axes[1]
+    h_player = h2h[(h2h["a"] == player) | (h2h["b"] == player)].copy()
+    if h_player.empty:
+        ax.text(
+            0.5,
+            0.5,
+            f"No head-to-heads for {player} with ≥{h2h_min_games} games",
+            ha="center",
             va="center",
-            fontsize=9,
-            color=PALETTE["text"],
+            color=PALETTE["muted"],
+            transform=ax.transAxes,
         )
+        ax.set_axis_off()
+    else:
+        # Normalise: ``own_wr`` = focal player's win-rate vs this opponent.
+        h_player["opponent"] = h_player.apply(
+            lambda r: r["b"] if r["a"] == player else r["a"], axis=1
+        )
+        h_player["own_wr"] = np.where(
+            h_player["a"] == player, h_player["a_winrate"], 1 - h_player["a_winrate"]
+        )
+        h_player = (
+            h_player.sort_values("games", ascending=False)
+            .head(top)
+            .sort_values("own_wr", ascending=True)
+        )
+        colours = [PALETTE["win"] if wr >= 0.5 else PALETTE["loss"] for wr in h_player["own_wr"]]
+        ax.barh(range(len(h_player)), h_player["own_wr"], color=colours, height=0.7)
+        ax.axvline(0.5, color=PALETTE["muted"], linestyle="--", linewidth=1.0, label="even (50%)")
+        ax.set_yticks(range(len(h_player)))
+        ax.set_yticklabels(h_player["opponent"])
+        ax.set_xlabel(f"{player}'s WR vs opponent")
+        ax.set_xlim(0, 1)
+        ax.set_title(_title("Head-to-head by opponent", player))
+        _subtitle(ax, "Above 50% = you beat them more often. Bar colour = direction.")
+        ax.legend(loc="lower right")
+        _polish_ax(ax)
+        for yi, (wr, n) in enumerate(zip(h_player["own_wr"], h_player["games"], strict=False)):
+            ax.annotate(
+                f"{wr:.0%} · n={int(n)}",
+                xy=(wr, yi),
+                xytext=(6, 0),
+                textcoords="offset points",
+                va="center",
+                fontsize=9,
+                color=PALETTE["text"],
+            )
+
     fig.tight_layout()
     return fig
 

@@ -3045,15 +3045,12 @@ def compute_feature_impacts(
         d = d.copy()
 
     # Bucket helpers — boolean masks describe one side of each split.
-    kda_75 = d["kda"].quantile(0.75)
-    kda_25 = d["kda"].quantile(0.25)
+    # Pre-game factors only: KDA + duration are outcome-derived (a rephrasing
+    # of the win), so including them here would be data leakage. Same scope
+    # as `_build_logistic_design`.
     most_played_champ = d["champion"].value_counts().idxmax() if not d.empty else None
 
     features: list[tuple[str, pd.Series]] = [
-        ("High KDA (top 25%)", d["kda"] >= kda_75),
-        ("Low KDA (bottom 25%)", d["kda"] <= kda_25),
-        ("Short game (<25min)", d["duration_min"] < 25),
-        ("Long game (≥35min)", d["duration_min"] >= 35),
         ("Late night (00-04h)", d["hour"].between(0, 4)),
         ("Evening peak (18-23h)", d["hour"].between(18, 23)),
         ("Weekend", d["dow"] >= 5),
@@ -3138,7 +3135,7 @@ def plot_feature_impact(
 ) -> plt.Figure:
     """Ranked "what predicts a win?" chart.
 
-    For every candidate factor (high KDA, weekend, after loss streak,
+    For every candidate pre-game factor (weekend, after loss streak,
     same-team partner, picked your main, …) we compute the percentage-
     point shift in win rate when the factor is true vs false. Bars are
     sorted by absolute shift; bars whose BH-adjusted q<0.05 are drawn
@@ -3168,12 +3165,13 @@ def plot_feature_impact(
     ax.set_yticks(y)
     ax.set_yticklabels(impacts["feature"])
     ax.set_xlabel("Win rate when factor true MINUS when false (percentage points)")
-    ax.set_title(_title("Feature impact — what actually moves your win rate?", player))
+    ax.set_title(_title("Feature impact — what actually moves your wins?", player))
     n_people = int(impacts["n_people"].max()) if "n_people" in impacts.columns else 1
     _subtitle(
         ax,
         f"Solid bars = q<0.05 (likely real). Faded grey = noise. {_macro_label(n_people)}. "
-        "q = BH-adjusted p; solid bars require q<0.05 (FDR-controlled at 5%).",
+        "q = BH-adjusted p; solid bars require q<0.05 (FDR-controlled at 5%).\n"
+        "Pre-game factors only — KDA + duration excluded (they're outcome-derived, not predictors).",
     )
     _polish_ax(ax)
 

@@ -12,6 +12,7 @@ a fresh Figure that the caller is responsible for closing.
 
 from __future__ import annotations
 
+import math
 import sqlite3
 from pathlib import Path
 
@@ -994,22 +995,53 @@ def plot_champion_picks(
     )
     _polish_ax(ax)
 
+    # Wide solid bars (|delta_pp| > 5) get the label tucked inside in
+    # white; narrow bars and faded-grey (low-confidence) bars stay
+    # outside to remain readable. Threshold matches plot_feature_impact.
     for yi, (_, r) in enumerate(picks.iterrows()):
-        sign_pad = 1 if r["delta_pp"] >= 0 else -1
-        ax.annotate(
+        label = (
             f"{r['delta_pp']:+.1f}pp  ·  raw {r['raw_wr']:.0%} → shrunk {r['shrunk_wr']:.0%}  "
-            f"·  n={int(r['n'])}",
-            xy=(r["delta_pp"], yi),
-            xytext=(8 * sign_pad, 0),
-            textcoords="offset points",
-            va="center",
-            ha="left" if r["delta_pp"] >= 0 else "right",
-            fontsize=9,
-            color=PALETTE["text"],
+            f"·  n={int(r['n'])}"
         )
+        is_grey = not r["confident"]
+        if abs(r["delta_pp"]) > 5 and not is_grey:
+            if r["delta_pp"] >= 0:
+                ax.annotate(
+                    label,
+                    xy=(r["delta_pp"], yi),
+                    xytext=(-6, 0),
+                    textcoords="offset points",
+                    va="center",
+                    ha="right",
+                    fontsize=9,
+                    color="white",
+                )
+            else:
+                ax.annotate(
+                    label,
+                    xy=(r["delta_pp"], yi),
+                    xytext=(6, 0),
+                    textcoords="offset points",
+                    va="center",
+                    ha="left",
+                    fontsize=9,
+                    color="white",
+                )
+        else:
+            sign_pad = 1 if r["delta_pp"] >= 0 else -1
+            ax.annotate(
+                label,
+                xy=(r["delta_pp"], yi),
+                xytext=(8 * sign_pad, 0),
+                textcoords="offset points",
+                va="center",
+                ha="left" if r["delta_pp"] >= 0 else "right",
+                fontsize=9,
+                color=PALETTE["text"],
+            )
 
     max_abs = max(8.0, float(picks["delta_pp"].abs().max()) + 6.0)
-    ax.set_xlim(-max_abs * 1.4, max_abs * 1.4)
+    ax.set_xlim(-max_abs * 1.15, max_abs * 1.15)
     fig.tight_layout()
     return fig
 
@@ -1758,22 +1790,41 @@ def plot_lp_economics(df: pd.DataFrame, player: str | None = None) -> plt.Figure
             "Right green bar > left red bar = climbing even at 50% WR. "
             "Sort: net LP per 100 games (top = best climbers).",
         )
+        # Place annotations inside the green (win) bar when it's wide
+        # enough (≥12 LP); otherwise nudge them outside. White-on-green
+        # reads cleanly and reclaims the right-side whitespace.
         for yi, row in agg.iterrows():
-            tag_colour = PALETTE["win"] if row["net_per_100"] > 0 else PALETTE["loss"]
-            ax.annotate(
+            label = (
                 f"+{row['avg_win']:.1f} W  ·  {row['avg_loss']:.1f} L  ·  "
-                f"net {row['net_per_100']:+.0f}/100  ·  n={int(row['n'])}",
-                xy=(row["avg_win"], yi),
-                xytext=(8, 0),
-                textcoords="offset points",
-                va="center",
-                ha="left",
-                fontsize=9,
-                color=tag_colour,
+                f"net {row['net_per_100']:+.0f}/100  ·  n={int(row['n'])}"
             )
+            if row["avg_win"] >= 12:
+                ax.annotate(
+                    label,
+                    xy=(row["avg_win"], yi),
+                    xytext=(-6, 0),
+                    textcoords="offset points",
+                    va="center",
+                    ha="right",
+                    fontsize=9,
+                    color="white",
+                )
+            else:
+                tag_colour = PALETTE["win"] if row["net_per_100"] > 0 else PALETTE["loss"]
+                ax.annotate(
+                    label,
+                    xy=(row["avg_win"], yi),
+                    xytext=(8, 0),
+                    textcoords="offset points",
+                    va="center",
+                    ha="left",
+                    fontsize=9,
+                    color=tag_colour,
+                )
         max_abs = max(35.0, float(max(agg["avg_win"].max(), -agg["avg_loss"].min()) + 8))
-        # Extend right side extra to fit annotations.
-        ax.set_xlim(-max_abs, max_abs * 1.6)
+        # With annotations now mostly inside the bars, drop the extra
+        # right-side padding so the chart isn't 30% whitespace.
+        ax.set_xlim(-max_abs, max_abs * 1.15)
         ax.legend(loc="lower right")
         _polish_ax(ax)
         fig.tight_layout()
@@ -2699,20 +2750,51 @@ def plot_feature_impact(
     )
     _polish_ax(ax)
 
-    # Annotate each row with detail: "+8.4pp · 56% vs 47% · n=420/2100 · p=0.001"
+    # Annotate each row with detail: "+8.4pp · 56% vs 47% · n=420/2100 · p=0.001".
+    # Wide solid bars (|effect_pp| > 5) get the label tucked inside; narrow
+    # bars and faded-grey (non-significant) bars stay outside to remain
+    # readable against the chart background.
     for yi, (_, r) in enumerate(impacts.iterrows()):
-        sign_pad = 1 if r["effect_pp"] >= 0 else -1
-        ax.annotate(
+        label = (
             f"{r['effect_pp']:+.1f}pp  ·  {r['wr_yes']:.0%} vs {r['wr_no']:.0%}  "
-            f"·  n={int(r['n_yes'])} vs {int(r['n_no'])}  ·  {_p_marker(r['p'])}",
-            xy=(r["effect_pp"], yi),
-            xytext=(6 * sign_pad, 0),
-            textcoords="offset points",
-            va="center",
-            ha="left" if r["effect_pp"] >= 0 else "right",
-            fontsize=9,
-            color=PALETTE["text"],
+            f"·  n={int(r['n_yes'])} vs {int(r['n_no'])}  ·  {_p_marker(r['p'])}"
         )
+        is_grey = not (r["p"] < 0.05)
+        if abs(r["effect_pp"]) > 5 and not is_grey:
+            if r["effect_pp"] >= 0:
+                ax.annotate(
+                    label,
+                    xy=(r["effect_pp"], yi),
+                    xytext=(-6, 0),
+                    textcoords="offset points",
+                    va="center",
+                    ha="right",
+                    fontsize=9,
+                    color="white",
+                )
+            else:
+                ax.annotate(
+                    label,
+                    xy=(r["effect_pp"], yi),
+                    xytext=(6, 0),
+                    textcoords="offset points",
+                    va="center",
+                    ha="left",
+                    fontsize=9,
+                    color="white",
+                )
+        else:
+            sign_pad = 1 if r["effect_pp"] >= 0 else -1
+            ax.annotate(
+                label,
+                xy=(r["effect_pp"], yi),
+                xytext=(6 * sign_pad, 0),
+                textcoords="offset points",
+                va="center",
+                ha="left" if r["effect_pp"] >= 0 else "right",
+                fontsize=9,
+                color=PALETTE["text"],
+            )
 
     # Symmetric x-axis around zero so positive/negative bars are comparable.
     max_abs = max(8, float(impacts["effect_pp"].abs().max()) + 4)
@@ -2928,7 +3010,7 @@ def plot_logistic_coefficients(
     if X.size == 0 or len(np.unique(y)) < 2:
         return _empty_figure("Not enough data to fit logistic regression")
 
-    beta, se, _ = logistic_fit(X, y, l2=0.5)
+    beta, se, loglik_full = logistic_fit(X, y, l2=0.5)
     # Drop intercept + person-fixed-effect coefficients from the chart —
     # the user cares about the factor coefficients, not "is person X
     # better than baseline" (which is just their WR gap).
@@ -2942,6 +3024,19 @@ def plot_logistic_coefficients(
         rows.append({"name": name, "coef": coef, "se": se_i, "p": p, "or": float(np.exp(coef))})
     if not rows:
         return _empty_figure("No usable factors after filtering")
+
+    # McFadden pseudo-R² vs intercept-only null. Analytical form: under the
+    # null the MLE is p_bar = y.mean(), so loglik_null collapses to
+    # n_w*log(p_bar) + n_l*log(1 - p_bar). _build_logistic_design already
+    # filters degenerate y, but guard p_bar ∈ {0,1} anyway.
+    p_bar = float(y.mean())
+    if 0.0 < p_bar < 1.0:
+        n_w = float(y.sum())
+        n_l = float(len(y) - n_w)
+        loglik_null = n_w * math.log(p_bar) + n_l * math.log(1.0 - p_bar)
+        mcfadden_r2 = 1.0 - (loglik_full / loglik_null) if loglik_null != 0 else 0.0
+    else:
+        mcfadden_r2 = 0.0
 
     coefs_df = (
         pd.DataFrame(rows)
@@ -2974,35 +3069,79 @@ def plot_logistic_coefficients(
     ax.axvline(0, color=PALETTE["text"], linewidth=0.8)
     ax.set_yticks(y_pos)
     ax.set_yticklabels(coefs_df["name"])
-    ax.set_xlabel("Standardised log-odds coefficient (95% CI whiskers)")
+    ax.set_xlabel("Log-odds (95% CI whiskers)")
 
     n_people = df["person"].nunique() if player is None else 1
     title_macro = (
         f"controlling for person ({n_people} people)" if n_people > 1 else "single-person fit"
     )
     ax.set_title(_title(f"Logistic regression — {title_macro}", player))
-    _subtitle(
-        ax,
-        "Solid bars = p<0.05 (real signal). Faded grey = no evidence. "
-        "Continuous features are per +1σ; binary features are vs the off state.",
-    )
+    if mcfadden_r2 < 0.05:
+        _subtitle(
+            ax,
+            f"McFadden pseudo-R² = {mcfadden_r2:.2%} — model explains essentially none "
+            "of the variance; outcomes are dominated by factors not in the model "
+            "(teammate quality, draft, etc.). "
+            "Solid bars = p<0.05 (real signal). Faded grey = no evidence. "
+            "Continuous features are per +1σ; binary features are vs the off state.",
+        )
+    else:
+        _subtitle(
+            ax,
+            f"McFadden pseudo-R² = {mcfadden_r2:.2%}. "
+            "Solid bars = p<0.05 (real signal). Faded grey = no evidence. "
+            "Continuous features are per +1σ; binary features are vs the off state.",
+        )
     _polish_ax(ax)
 
+    # Annotation placement: solid (significant) coloured bars wider than
+    # 0.5 log-odds get the label tucked inside the bar in white. Narrower
+    # bars and faded-grey (non-significant) bars keep the label outside
+    # to stay readable.
     for yi, r in coefs_df.iterrows():
         odds_ratio_pct = (r["or"] - 1) * 100
-        sign_pad = 1 if r["coef"] >= 0 else -1
-        ax.annotate(
-            f"{r['coef']:+.2f}  ·  OR {r['or']:.2f} ({odds_ratio_pct:+.0f}%)  ·  {_p_marker(r['p'])}",
-            xy=(r["coef"], yi),
-            xytext=(8 * sign_pad, 0),
-            textcoords="offset points",
-            va="center",
-            ha="left" if r["coef"] >= 0 else "right",
-            fontsize=9,
-            color=PALETTE["text"],
+        label = (
+            f"{r['coef']:+.2f}  ·  OR {r['or']:.2f} "
+            f"({odds_ratio_pct:+.0f}%)  ·  {_p_marker(r['p'])}"
         )
+        is_grey = not (r["p"] < 0.05)
+        if abs(r["coef"]) > 0.5 and not is_grey:
+            if r["coef"] >= 0:
+                ax.annotate(
+                    label,
+                    xy=(r["coef"], yi),
+                    xytext=(-6, 0),
+                    textcoords="offset points",
+                    va="center",
+                    ha="right",
+                    fontsize=9,
+                    color="white",
+                )
+            else:
+                ax.annotate(
+                    label,
+                    xy=(r["coef"], yi),
+                    xytext=(6, 0),
+                    textcoords="offset points",
+                    va="center",
+                    ha="left",
+                    fontsize=9,
+                    color="white",
+                )
+        else:
+            sign_pad = 1 if r["coef"] >= 0 else -1
+            ax.annotate(
+                label,
+                xy=(r["coef"], yi),
+                xytext=(8 * sign_pad, 0),
+                textcoords="offset points",
+                va="center",
+                ha="left" if r["coef"] >= 0 else "right",
+                fontsize=9,
+                color=PALETTE["text"],
+            )
 
-    max_abs = max(0.4, float(coefs_df["coef"].abs().max() + 1.96 * coefs_df["se"].max()) * 1.1)
+    max_abs = max(0.4, float(coefs_df["coef"].abs().max() + 1.96 * coefs_df["se"].max()) * 1.05)
     ax.set_xlim(-max_abs, max_abs)
     fig.tight_layout()
     return fig

@@ -191,6 +191,25 @@ def wilson_ci(wins: int, games: int, z: float = 1.96) -> tuple[float, float]:
     return (max(0.0, (centre - margin) / denom), min(1.0, (centre + margin) / denom))
 
 
+def bayesian_shrunk_wr(
+    wins: int, games: int, baseline_wr: float, prior_strength: float = 10.0
+) -> float:
+    """Beta-prior shrinkage of a small-sample WR back toward a baseline.
+
+    Equivalent to a Beta(α, β) prior centred on ``baseline_wr`` with
+    ``α + β = prior_strength`` pseudo-observations. Posterior mean is
+    a weighted average of the observed WR and the baseline; when
+    ``games == prior_strength`` the two weights are equal. Heavy-sample
+    champions (games >> prior_strength) barely move.
+    """
+    if games <= 0:
+        return baseline_wr
+    obs_wr = wins / games
+    return (games / (games + prior_strength)) * obs_wr + (
+        prior_strength / (games + prior_strength)
+    ) * baseline_wr
+
+
 def chi2_pvalue(chi2: float, df: int) -> float:
     """Wilson-Hilferty cube-root chi² survival approximation, no scipy.
 
@@ -883,6 +902,114 @@ def plot_champion_winrate(
                 color=PALETTE["text"],
             )
 
+    fig.tight_layout()
+    return fig
+
+
+def plot_champion_picks(
+    df: pd.DataFrame,
+    player: str | None = None,
+    min_games: int = 5,
+    top: int = 14,
+    prior_strength: float = 10.0,
+) -> plt.Figure:
+    """Per-player "should I play X more, or drop it?" — Bayesian-shrunk WR
+    delta vs the player's personal baseline.
+
+    For every champion played at least ``min_games`` times, the raw WR
+    is pulled toward the player's overall WR via a Beta prior worth
+    ``prior_strength`` games. A new 5-game champion at 100% WR gets
+    shrunk roughly halfway back; a 200-game pocket pick barely moves.
+    The chart shows the resulting WR delta (shrunk_wr − baseline_wr)
+    in percentage points — positive means actually a better-than-you
+    pick, negative means drop candidate.
+
+    Solid bars = raw Wilson 95% CI excludes the baseline (statistically
+    confident lift/drag). Faded grey = the shrunk delta is real but the
+    raw evidence is still thin.
+    """
+    d = _filter_player(df, player)
+    if d.empty:
+        return _empty_figure("No games to analyse")
+
+    if player is None:
+        baseline_wr = float(d["win"].mean())
+        baseline_label = f"group baseline ({baseline_wr:.0%})"
+    else:
+        baseline_wr = float(d["win"].mean())
+        baseline_label = f"{player}'s baseline ({baseline_wr:.0%})"
+
+    champ_stats = d.groupby("champion")["win"].agg(["count", "sum", "mean"])
+    champ_stats = champ_stats[champ_stats["count"] >= min_games]
+    if champ_stats.empty:
+        return _empty_figure(f"No champions with ≥{min_games} games")
+
+    champ_stats = champ_stats.rename(columns={"count": "n", "sum": "wins", "mean": "raw_wr"})
+    champ_stats["shrunk_wr"] = [
+        bayesian_shrunk_wr(int(w), int(n), baseline_wr, prior_strength)
+        for w, n in zip(champ_stats["wins"], champ_stats["n"], strict=False)
+    ]
+    champ_stats["delta_pp"] = (champ_stats["shrunk_wr"] - baseline_wr) * 100
+    cis = [
+        wilson_ci(int(w), int(n))
+        for w, n in zip(champ_stats["wins"], champ_stats["n"], strict=False)
+    ]
+    champ_stats["ci_lo"] = [c[0] for c in cis]
+    champ_stats["ci_hi"] = [c[1] for c in cis]
+    champ_stats["confident"] = (champ_stats["ci_lo"] > baseline_wr) | (
+        champ_stats["ci_hi"] < baseline_wr
+    )
+
+    # Show the top "best-pick" champions AND the bottom "drop candidates"
+    # to make the contrast obvious; same chart, sorted ascending so
+    # worst is at the bottom and best at the top.
+    by_delta = champ_stats.sort_values("delta_pp", ascending=False)
+    picks = pd.concat([by_delta.head(top // 2), by_delta.tail(top - top // 2)])
+    picks = picks.drop_duplicates().sort_values("delta_pp", ascending=True)
+
+    fig_h = max(4.6, len(picks) * 0.42)
+    fig, ax = plt.subplots(figsize=(13, fig_h))
+    y = np.arange(len(picks))
+
+    colours = []
+    for _, r in picks.iterrows():
+        if not r["confident"]:
+            colours.append(PALETTE["neutral"])
+        elif r["delta_pp"] > 0:
+            colours.append(PALETTE["win"])
+        else:
+            colours.append(PALETTE["loss"])
+    ax.barh(y, picks["delta_pp"], color=colours, height=0.7)
+    ax.axvline(0, color=PALETTE["text"], linewidth=0.8)
+    ax.set_yticks(y)
+    ax.set_yticklabels(picks.index)
+    ax.set_xlabel(f"Shrunk WR delta vs {baseline_label} (pp)")
+    ax.set_title(
+        _title(f"Champion picks — Bayesian-shrunk (prior = {int(prior_strength)} games)", player)
+    )
+    _subtitle(
+        ax,
+        "Solid bars = Wilson 95% CI excludes baseline (real signal). "
+        "Faded grey = shrunk lift looks positive but raw sample still thin.",
+    )
+    _polish_ax(ax)
+
+    for yi, (_, r) in enumerate(picks.iterrows()):
+        sign_pad = 1 if r["delta_pp"] >= 0 else -1
+        ax.annotate(
+            f"{r['delta_pp']:+.1f}pp  ·  raw {r['raw_wr']:.0%} → shrunk {r['shrunk_wr']:.0%}  "
+            f"·  n={int(r['n'])}",
+            xy=(r["delta_pp"], yi),
+            xytext=(8 * sign_pad, 0),
+            textcoords="offset points",
+            va="center",
+            ha="left" if r["delta_pp"] >= 0 else "right",
+            fontsize=9,
+            color=PALETTE["text"],
+        )
+
+    max_abs = max(8.0, float(picks["delta_pp"].abs().max()) + 6.0)
+    ax.set_xlim(-max_abs * 1.4, max_abs * 1.4)
     fig.tight_layout()
     return fig
 
@@ -2839,12 +2966,13 @@ ALL_PLOTS = [
     ("09_kda_vs_outcome", plot_kda_vs_outcome),
     ("10_duration_vs_outcome", plot_duration_vs_outcome),
     ("11_champion_winrate", plot_champion_winrate),
-    ("12_champion_learning_curve", plot_champion_learning_curve),
-    ("13_hour_of_day", plot_hour_of_day),
-    ("14_day_of_week", plot_day_of_week),
-    ("15_hour_dow_heatmap", plot_hour_dow_heatmap),
-    ("16_streak_recovery", plot_streak_recovery),
-    ("17_time_since_prev", plot_time_since_prev),
-    ("18_session_analysis", plot_session_analysis),
-    ("19_duo_winrate", plot_duo_winrate),
+    ("12_champion_picks", plot_champion_picks),
+    ("13_champion_learning_curve", plot_champion_learning_curve),
+    ("14_hour_of_day", plot_hour_of_day),
+    ("15_day_of_week", plot_day_of_week),
+    ("16_hour_dow_heatmap", plot_hour_dow_heatmap),
+    ("17_streak_recovery", plot_streak_recovery),
+    ("18_time_since_prev", plot_time_since_prev),
+    ("19_session_analysis", plot_session_analysis),
+    ("20_duo_winrate", plot_duo_winrate),
 ]

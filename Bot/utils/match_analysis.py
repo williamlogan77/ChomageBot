@@ -154,16 +154,18 @@ def _baseline(ax, y: float = 0.5, label: str | None = None) -> None:
 
 
 def _subtitle(ax, text: str) -> None:
-    """One-line italic caption immediately under the (already-set) title.
+    """Italic caption immediately under the (already-set) title.
 
     Tells the reader what to look at — every plot should call this once
     so an audience that's never seen the chart can read it cold.
+
+    Long captions are auto-wrapped to the axes width (not the figure
+    width — matplotlib's wrap=True default would spill across adjacent
+    panels). The title's pad scales with the rendered line count so the
+    caption always clears the title without manual tuning.
     """
-    # Push the bold title up a touch so the caption has room.
     title = ax.get_title()
-    if title:
-        ax.set_title(title, pad=22)
-    ax.text(
+    txt = ax.text(
         0.0,
         1.01,
         text,
@@ -173,7 +175,44 @@ def _subtitle(ax, text: str) -> None:
         fontsize=10,
         color=PALETTE["muted"],
         style="italic",
+        wrap=True,
     )
+    # Clip wrap to the axes width — wrap=True alone wraps at the figure
+    # bbox, which leaks past the panel boundary on multi-panel charts.
+    txt._get_wrap_line_width = lambda: ax.bbox.width
+    # Pad the title by the rendered visual height of the wrapped caption,
+    # so a 1-line caption sits compact and a 3-line wrapped caption still
+    # clears the title. The text is va="bottom"-anchored at y=1.01 and
+    # grows UPWARD, so pad must exceed the total wrapped text height in
+    # points (~12pt per line including leading) or the title collides.
+    # Falls back to logical line count if the renderer isn't ready.
+    if title:
+        n_visual = _wrapped_line_count(txt, ax)
+        ax.set_title(title, pad=14 + 13 * n_visual)
+
+
+def _wrapped_line_count(txt, ax) -> int:
+    """Visual line count for an already-placed wrap=True Text artist.
+
+    Uses the figure renderer to compute the wrapped pixel height divided
+    by the unwrapped single-line pixel height. Sidesteps having to
+    re-implement matplotlib's word-break heuristic. Returns the logical
+    line count (\\n + 1) as a safe lower bound if the renderer call fails.
+    """
+    raw = txt.get_text()
+    logical_lines = raw.count("\n") + 1
+    try:
+        renderer = ax.figure.canvas.get_renderer()
+        # Total wrapped height ÷ unwrapped single-line height = visual rows.
+        wrapped_bbox = txt.get_window_extent(renderer=renderer)
+        single = ax.text(0.0, 0.0, "Ag", transform=ax.transAxes, fontsize=10, style="italic")
+        single_bbox = single.get_window_extent(renderer=renderer)
+        single.remove()
+        if single_bbox.height <= 0:
+            return logical_lines
+        return max(logical_lines, int(round(wrapped_bbox.height / single_bbox.height)))
+    except Exception:
+        return logical_lines
 
 
 def wilson_ci(wins: int, games: int, z: float = 1.96) -> tuple[float, float]:
@@ -297,6 +336,32 @@ def wald_pvalue(coef: float, se: float) -> float:
         return 1.0
     z = abs(coef) / se
     return float(math.erfc(z / math.sqrt(2.0)))
+
+
+def bh_adjust(pvalues: list[float]) -> list[float]:
+    """Benjamini-Hochberg FDR-adjusted p-values.
+
+    Each adjusted p = min(1, p * m / rank_when_sorted_ascending), then
+    enforced monotonic by sweeping from largest p downward. Controls the
+    expected proportion of false positives among declared-significant
+    findings at the threshold used (q < α). The right knob to turn for
+    the "tested 10 features, one came out 'significant' by chance" case.
+    """
+    p = np.asarray(pvalues, dtype=float)
+    n = len(p)
+    if n == 0:
+        return []
+    order = np.argsort(p)
+    ranked = p[order]
+    adj = ranked * n / np.arange(1, n + 1)
+    # Monotonicity sweep from highest-rank down so q-values never decrease
+    # as raw p increases — the standard BH step-up adjustment.
+    for i in range(n - 2, -1, -1):
+        adj[i] = min(adj[i], adj[i + 1])
+    adj = np.clip(adj, 0.0, 1.0)
+    out = np.empty(n, dtype=float)
+    out[order] = adj
+    return out.tolist()
 
 
 def chi2_homogeneity(counts: np.ndarray, totals: np.ndarray) -> tuple[float, int, float]:
@@ -2980,6 +3045,10 @@ def compute_feature_impacts(
     out = pd.DataFrame(rows)
     if out.empty:
         return out
+    # BH-adjust across the features actually tested so the "significant"
+    # threshold survives multiple-comparisons noise (10+ tests at α=0.05
+    # expects 0.5 false positives by chance otherwise).
+    out["p_adj"] = bh_adjust(out["p"].tolist())
     return out.iloc[out["effect_pp"].abs().sort_values(ascending=False).index].reset_index(
         drop=True
     )
@@ -2993,8 +3062,8 @@ def plot_feature_impact(
     For every candidate factor (high KDA, weekend, after loss streak,
     same-team partner, picked your main, …) we compute the percentage-
     point shift in win rate when the factor is true vs false. Bars are
-    sorted by absolute shift; statistically significant ones (p<0.05)
-    are drawn solid, non-significant ones faded to grey.
+    sorted by absolute shift; bars whose BH-adjusted q<0.05 are drawn
+    solid, the rest faded to grey (controls FDR across the feature set).
     """
     impacts = compute_feature_impacts(df, player=player, min_games=min_games)
     if impacts.empty:
@@ -3005,7 +3074,7 @@ def plot_feature_impact(
 
     colours = []
     for _, r in impacts.iterrows():
-        sig = r["p"] < 0.05
+        sig = r["p_adj"] < 0.05
         if not sig:
             colours.append(PALETTE["neutral"])
         elif r["effect_pp"] > 0:
@@ -3024,20 +3093,22 @@ def plot_feature_impact(
     n_people = int(impacts["n_people"].max()) if "n_people" in impacts.columns else 1
     _subtitle(
         ax,
-        f"Solid bars = p<0.05 (likely real). Faded grey = noise. {_macro_label(n_people)}.",
+        f"Solid bars = q<0.05 (likely real). Faded grey = noise. {_macro_label(n_people)}. "
+        "q = BH-adjusted p; solid bars require q<0.05 (FDR-controlled at 5%).",
     )
     _polish_ax(ax)
 
-    # Annotate each row with detail: "+8.4pp · 56% vs 47% · n=420/2100 · p=0.001".
+    # Annotate each row with detail: "+8.4pp · 56% vs 47% · n=420/2100 · p=… → q=…".
     # Wide solid bars (|effect_pp| > 5) get the label tucked inside; narrow
     # bars and faded-grey (non-significant) bars stay outside to remain
     # readable against the chart background.
     for yi, (_, r) in enumerate(impacts.iterrows()):
+        q_tag = "q<0.001" if r["p_adj"] < 0.001 else f"q={r['p_adj']:.3f}"
         label = (
             f"{r['effect_pp']:+.1f}pp  ·  {r['wr_yes']:.0%} vs {r['wr_no']:.0%}  "
-            f"·  n={int(r['n_yes'])} vs {int(r['n_no'])}  ·  {_p_marker(r['p'])}"
+            f"·  n={int(r['n_yes'])} vs {int(r['n_no'])}  ·  {_p_marker(r['p'])} → {q_tag}"
         )
-        is_grey = not (r["p"] < 0.05)
+        is_grey = not (r["p_adj"] < 0.05)
         if abs(r["effect_pp"]) > 5 and not is_grey:
             if r["effect_pp"] >= 0:
                 ax.annotate(
@@ -3342,12 +3413,15 @@ def plot_logistic_coefficients(
         .iloc[::-1]
         .reset_index(drop=True)
     )
+    # BH-adjust across the factor coefficients on the chart so the
+    # "significant" threshold survives multiple-comparisons noise.
+    coefs_df["p_adj"] = bh_adjust(coefs_df["p"].tolist())
 
     fig_h = max(4.6, len(coefs_df) * 0.45)
     fig, ax = plt.subplots(figsize=(13, fig_h))
     y_pos = np.arange(len(coefs_df))
 
-    sig_mask = coefs_df["p"] < 0.05
+    sig_mask = coefs_df["p_adj"] < 0.05
     colours = [
         (PALETTE["win"] if c > 0 else PALETTE["loss"]) if s else PALETTE["neutral"]
         for c, s in zip(coefs_df["coef"], sig_mask, strict=False)
@@ -3378,20 +3452,18 @@ def plot_logistic_coefficients(
         subtitle = (
             f"Person identity alone explains {r2_fe:.1%} of variance; the factors add "
             f"{r2_factors:+.1%} on top (full = {r2_full:.1%}). {verdict_line}\n"
-            "Solid bars = p<0.05 (real signal). Faded grey = no evidence.\n"
             "Pre-game factors only — KDA + duration excluded "
-            "(they're outcome-derived, not predictors)."
+            "(they're outcome-derived, not predictors).\n"
+            "q = BH-adjusted p; solid bars require q<0.05 (FDR-controlled at 5%)."
         )
     else:
         subtitle = (
             f"McFadden pseudo-R² = {r2_full:.1%}. {verdict_line}\n"
-            "Solid bars = p<0.05 (real signal). Faded grey = no evidence.\n"
             "Pre-game factors only — KDA + duration excluded "
-            "(they're outcome-derived, not predictors)."
+            "(they're outcome-derived, not predictors).\n"
+            "q = BH-adjusted p; solid bars require q<0.05 (FDR-controlled at 5%)."
         )
     _subtitle(ax, subtitle)
-    # _subtitle pads for a two-line caption; bump it for the three-line scope note.
-    ax.set_title(ax.get_title(), pad=48)
     _polish_ax(ax)
 
     # Annotation placement: solid (significant) coloured bars wider than
@@ -3400,11 +3472,12 @@ def plot_logistic_coefficients(
     # to stay readable.
     for yi, r in coefs_df.iterrows():
         odds_ratio_pct = (r["or"] - 1) * 100
+        q_tag = "q<0.001" if r["p_adj"] < 0.001 else f"q={r['p_adj']:.3f}"
         label = (
             f"{r['coef']:+.2f}  ·  OR {r['or']:.2f} "
-            f"({odds_ratio_pct:+.0f}%)  ·  {_p_marker(r['p'])}"
+            f"({odds_ratio_pct:+.0f}%)  ·  {_p_marker(r['p'])} → {q_tag}"
         )
-        is_grey = not (r["p"] < 0.05)
+        is_grey = not (r["p_adj"] < 0.05)
         if abs(r["coef"]) > 0.5 and not is_grey:
             if r["coef"] >= 0:
                 ax.annotate(

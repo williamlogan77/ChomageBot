@@ -71,7 +71,12 @@ CHART_DEFS = [
         analysis.plot_logistic_coefficients,
         "Logistic regression — controlled coefficients",
     ),
-    ("Impact", "🧪", analysis.plot_feature_impact, "Feature impact — what predicts a win?"),
+    (
+        "Compare",
+        "🆚",
+        analysis.plot_player_comparison,
+        "Player comparison — every metric side by side",
+    ),
     ("Activity", "📅", analysis.plot_activity_over_time, "Activity over time"),
     ("Rank", "🏅", analysis.plot_rank_trajectory, "Rank trajectory (with WR overlay)"),
     ("LP", "💰", analysis.plot_lp_economics, "LP economics — gain per win vs loss per loss"),
@@ -124,7 +129,8 @@ def _build_panel_embed() -> discord.Embed:
         name="What's in here",
         value=(
             "📑 **Summary** — headline numbers at a glance (start here)\n"
-            "🧪 **Impact** — which factors actually move your WR (with p-values)\n"
+            "🆚 **Compare** — every player on every metric, side by side\n"
+            "🧠 **Logit** — multivariate logistic regression of win drivers\n"
             "📅 **Activity** — games / month + WR by month\n"
             "📊 **Cumulative WR** · 📈 **Progression** (% of career)\n"
             "⚔️ **KDA** · ⏱️ **Duration** · 🏆 **Champs W/L** (Wilson CI) · 🎯 **Champ curves**\n"

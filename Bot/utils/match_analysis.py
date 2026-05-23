@@ -3801,6 +3801,384 @@ def plot_logistic_coefficients(
     return fig
 
 
+def _build_calibration_design(
+    df: pd.DataFrame,
+    player: str | None,
+    spec: dict | None = None,
+) -> tuple[np.ndarray, np.ndarray, list[str], int, dict]:
+    """Build a logistic design that can be REPLAYED on a holdout split.
+
+    Mirrors ``_build_logistic_design`` but exposes/consumes a ``spec`` so
+    train and test produce the same column set, order, and z-score
+    standardisation. Without this, the holdout's own means/stds and
+    top-3 champions would differ from train's and ``beta`` couldn't be
+    applied across the split. Used only by ``plot_model_calibration`` —
+    the original ``_build_logistic_design`` is left untouched so the
+    coefficient chart keeps its existing behaviour.
+    """
+    d = _filter_player(df, player).copy()
+    if d.empty:
+        return np.empty((0, 0)), np.empty(0), [], 0, spec or {}
+
+    same_team = d[["match_id", "win", "person"]].merge(
+        df[["match_id", "win", "person"]], on=["match_id", "win"]
+    )
+    same_team = same_team[same_team["person_x"] != same_team["person_y"]]
+    with_duo = set(same_team[["match_id", "person_x"]].itertuples(index=False, name=None))
+    d["had_tracked_duo"] = [
+        (mid, p) in with_duo for mid, p in zip(d["match_id"], d["person"], strict=False)
+    ]
+
+    gap_filled = d["gap_since_prev_min"].fillna(d["gap_since_prev_min"].median()).fillna(60.0)
+    d["log_gap_min"] = np.log1p(gap_filled.clip(lower=0.0))
+
+    cont_raw = {
+        "Loss streak entering (z)": pd.to_numeric(d["loss_streak_in"], errors="coerce"),
+        "Log gap since prev (z)": pd.to_numeric(d["log_gap_min"], errors="coerce"),
+    }
+    bin_raw = {
+        "Late night (00-04h)": d["hour"].between(0, 4).astype(int),
+        "Evening peak (18-23h)": d["hour"].between(18, 23).astype(int),
+        "Weekend": (d["dow"] >= 5).astype(int),
+        "Same-team tracked partner": d["had_tracked_duo"].astype(int),
+    }
+
+    is_replay = spec is not None
+    if is_replay:
+        champ_list: list[str] = list(spec.get("champs", []))
+        cont_stats: dict[str, tuple[float, float]] = dict(spec.get("cont_stats", {}))
+        bin_keep: list[str] = list(spec.get("bin_keep", []))
+        fe_people: list[str] = list(spec.get("fe_people", []))
+        fe_baseline: str | None = spec.get("fe_baseline")
+        col_order: list[str] = list(spec.get("cols", []))
+    else:
+        champ_list = d["champion"].value_counts().head(3).index.tolist()
+        cont_stats = {}
+        bin_keep = []
+        fe_people = []
+        fe_baseline = None
+        col_order = []
+
+    for champ in champ_list:
+        bin_raw[f"Played {champ}"] = (d["champion"] == champ).astype(int)
+
+    cols: list[str] = []
+    parts: list[np.ndarray] = []
+
+    if is_replay:
+        # Replay path: use train's means/stds and train's column order.
+        # Continuous first (z-scored with train stats), then binaries the
+        # train kept, then person FEs (also from train).
+        for name in col_order:
+            if name in cont_stats:
+                mean, std = cont_stats[name]
+                series = cont_raw.get(name)
+                if series is None:
+                    vals = np.zeros(len(d))
+                else:
+                    vals = series.fillna(series.median() if series.notna().any() else 0.0).to_numpy(
+                        dtype=float
+                    )
+                if std < 1e-9:
+                    parts.append(np.zeros((len(d), 1)))
+                else:
+                    parts.append(((vals - mean) / std)[:, None])
+                cols.append(name)
+            elif name in bin_raw:
+                vals = bin_raw[name].fillna(0).to_numpy(dtype=float)
+                parts.append(vals[:, None])
+                cols.append(name)
+            elif name.startswith("[person] ") and fe_baseline is not None:
+                # "[person] X vs baseline" — extract X.
+                person_name = name[len("[person] ") :].split(" vs ", 1)[0]
+                vals = (d["person"] == person_name).astype(float).to_numpy()
+                parts.append(vals[:, None])
+                cols.append(name)
+            else:
+                # Missing in test data — pad with zeros so the column survives.
+                parts.append(np.zeros((len(d), 1)))
+                cols.append(name)
+        n_person_fe_cols = sum(1 for c in cols if c.startswith("[person]"))
+    else:
+        # Training pass: compute stats, decide which binaries to keep,
+        # decide which FE people to include, and stash everything in spec.
+        for name, series in cont_raw.items():
+            vals = series.fillna(series.median() if series.notna().any() else 0.0).to_numpy(
+                dtype=float
+            )
+            mean = float(vals.mean())
+            std = float(vals.std())
+            if std < 1e-9:
+                continue
+            parts.append(((vals - mean) / std)[:, None])
+            cols.append(name)
+            cont_stats[name] = (mean, std)
+
+        for name, series in bin_raw.items():
+            vals = series.fillna(0).to_numpy(dtype=float)
+            if vals.sum() < 20 or vals.sum() > len(vals) - 20:
+                continue
+            parts.append(vals[:, None])
+            cols.append(name)
+            bin_keep.append(name)
+
+        n_person_fe_cols = 0
+        if _is_aggregate(player) and d["person"].nunique() > 1:
+            people = d["person"].value_counts().index.tolist()
+            fe_baseline = people[0]
+            for p in people[1:]:
+                vals = (d["person"] == p).astype(float).to_numpy()
+                if vals.sum() < 20:
+                    continue
+                parts.append(vals[:, None])
+                cols.append(f"[person] {p} vs {fe_baseline}")
+                fe_people.append(p)
+                n_person_fe_cols += 1
+
+    if not parts:
+        return np.empty((0, 0)), np.empty(0), [], 0, spec or {}
+    X = np.hstack(parts)
+    y = d["win"].to_numpy(dtype=float)
+
+    if not is_replay:
+        spec_out = {
+            "champs": champ_list,
+            "cont_stats": cont_stats,
+            "bin_keep": bin_keep,
+            "fe_people": fe_people,
+            "fe_baseline": fe_baseline,
+            "cols": list(cols),
+        }
+    else:
+        spec_out = spec  # type: ignore[assignment]
+    return X, y, cols, n_person_fe_cols, spec_out
+
+
+def plot_model_calibration(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Out-of-sample calibration + headline metrics for the logit.
+
+    Splits chronologically at the median ``game_start`` (50/50 train /
+    holdout), fits the same logistic model used elsewhere on the train
+    half, predicts on the holdout half, and reports AUC / accuracy /
+    log-loss / Brier alongside their trivial baselines. The question
+    isn't "do the features look significant in-sample?" (they barely do
+    once KDA leakage is removed) but "do they predict the future at
+    all?" — i.e. is the signal real or matchmaking noise.
+    """
+    d = _filter_player(df, player)
+    if d.empty:
+        return _empty_figure("No games to validate")
+
+    # Per-person split needs ≥30 games on each side. For aggregate, ≥60
+    # total isn't enough — we also want both halves usable, but the
+    # design build itself will refuse <~20 of any binary.
+    d = d.sort_values("game_start").reset_index(drop=True)
+    if not _is_aggregate(player):
+        if len(d) < 60:
+            return _empty_figure("Need ≥60 games to validate")
+    elif len(d) < 60:
+        return _empty_figure("Need ≥60 games to validate")
+
+    cut = d["game_start"].median()
+    train_df = d[d["game_start"] <= cut]
+    test_df = d[d["game_start"] > cut]
+    if not _is_aggregate(player) and (len(train_df) < 30 or len(test_df) < 30):
+        return _empty_figure("Need ≥60 games to validate")
+    if len(train_df) < 20 or len(test_df) < 20:
+        return _empty_figure("Not enough games per half")
+
+    X_tr, y_tr, cols, _n_fe, spec = _build_calibration_design(train_df, player)
+    if X_tr.size == 0 or len(np.unique(y_tr)) < 2:
+        return _empty_figure("Not enough variance in train half")
+
+    beta, _se, _ll = logistic_fit(X_tr, y_tr, l2=0.5)
+
+    X_te, y_te, _cols_te, _n_fe_te, _ = _build_calibration_design(test_df, player, spec=spec)
+    if X_te.size == 0 or len(np.unique(y_te)) < 2:
+        return _empty_figure("Holdout has no class variance")
+
+    z = np.clip(X_te @ beta[1:] + beta[0], -30.0, 30.0)
+    p = 1.0 / (1.0 + np.exp(-z))
+    p_safe = np.clip(p, 1e-12, 1 - 1e-12)
+
+    acc = float(((p > 0.5) == (y_te > 0.5)).mean())
+    log_loss = float(-(y_te * np.log(p_safe) + (1 - y_te) * np.log(1 - p_safe)).mean())
+    brier = float(((p - y_te) ** 2).mean())
+
+    pos = p[y_te > 0.5]
+    neg = p[y_te <= 0.5]
+    if len(pos) == 0 or len(neg) == 0:
+        auc_val = 0.5
+    else:
+        all_scores = np.concatenate([pos, neg])
+        ranks = np.argsort(np.argsort(all_scores, kind="stable"), kind="stable") + 1
+        sum_pos = ranks[: len(pos)].sum()
+        u = sum_pos - len(pos) * (len(pos) + 1) / 2
+        auc_val = float(u / (len(pos) * len(neg)))
+
+    # Trivial baselines — what you'd get predicting train-mean WR for everyone.
+    p_bar = float(y_tr.mean())
+    p_bar_safe = float(np.clip(p_bar, 1e-12, 1 - 1e-12))
+    triv_acc = float(max(y_tr.mean(), 1 - y_tr.mean()))
+    triv_auc = 0.5
+    y_te_mean = float(y_te.mean())
+    triv_logloss = float(
+        -(y_te_mean * math.log(p_bar_safe) + (1 - y_te_mean) * math.log(1 - p_bar_safe))
+    )
+    triv_brier = float(((p_bar - y_te) ** 2).mean())
+
+    fig, (ax_cal, ax_card) = plt.subplots(
+        1, 2, figsize=(13, 5.4), gridspec_kw={"width_ratios": [1.2, 1.0]}
+    )
+
+    # --- Left: calibration curve ---
+    bins = np.linspace(0.0, 1.0, 11)
+    bin_idx = np.clip(np.digitize(p, bins, right=False) - 1, 0, 9)
+    bucket_rows = []
+    for b in range(10):
+        mask = bin_idx == b
+        n = int(mask.sum())
+        if n == 0:
+            continue
+        bucket_rows.append(
+            {
+                "mean_pred": float(p[mask].mean()),
+                "observed_wr": float(y_te[mask].mean()),
+                "count": n,
+            }
+        )
+    ax_cal.plot([0, 1], [0, 1], linestyle=":", color=PALETTE["muted"], linewidth=1.2, zorder=1)
+    if bucket_rows:
+        xs = [r["mean_pred"] for r in bucket_rows]
+        ys = [r["observed_wr"] for r in bucket_rows]
+        sizes = [max(30, min(400, r["count"] * 6)) for r in bucket_rows]
+        ax_cal.scatter(
+            xs,
+            ys,
+            s=sizes,
+            color=PALETTE["primary"],
+            edgecolor="white",
+            linewidth=1.2,
+            alpha=0.85,
+            zorder=3,
+        )
+        ax_cal.plot(xs, ys, color=PALETTE["primary"], linewidth=1.1, alpha=0.45, zorder=2)
+    ax_cal.set_xlim(0, 1)
+    ax_cal.set_ylim(0, 1)
+    ax_cal.set_xlabel("Predicted win probability")
+    ax_cal.set_ylabel("Observed win rate (holdout)")
+    ax_cal.set_title(_title("Calibration curve (holdout)", player))
+    _subtitle(
+        ax_cal,
+        "Markers on the 45° line = well-calibrated. Below the line = overconfident "
+        "wins; above = underconfident. Marker size ∝ bucket count.",
+    )
+    _polish_ax(ax_cal)
+
+    # --- Right: metrics card ---
+    ax_card.set_axis_off()
+    ax_card.set_xlim(0, 1)
+    ax_card.set_ylim(0, 1)
+    if auc_val > 0.55:
+        accent = PALETTE["win"]
+        verdict = "Some real predictive signal."
+    elif auc_val < 0.51:
+        accent = PALETTE["loss"]
+        verdict = "Indistinguishable from noise."
+    else:
+        accent = PALETTE["primary"]
+        verdict = "Marginal — close to chance."
+
+    card_x, card_y, card_w, card_h = 0.04, 0.08, 0.92, 0.84
+    _draw_card(ax_card, card_x, card_y, card_w, card_h, accent)
+    ax_card.text(
+        card_x + card_w * 0.07,
+        card_y + card_h - card_h * 0.08,
+        "OUT-OF-SAMPLE METRICS",
+        ha="left",
+        va="center",
+        fontsize=11,
+        color=PALETTE["muted"],
+        fontweight="bold",
+        zorder=4,
+    )
+
+    metric_rows = [
+        ("Accuracy", f"{acc:.1%}", f"vs trivial {triv_acc:.1%}"),
+        ("AUC", f"{auc_val:.3f}", "vs random 0.500"),
+        ("Log-loss", f"{log_loss:.3f}", f"vs trivial {triv_logloss:.3f}"),
+        ("Brier", f"{brier:.3f}", f"vs trivial {triv_brier:.3f}"),
+    ]
+    # Stack 4 metric lines inside the card from top to bottom.
+    top_y = card_y + card_h - card_h * 0.22
+    line_h = card_h * 0.17
+    for i, (label, value, sub) in enumerate(metric_rows):
+        y_line = top_y - i * line_h
+        ax_card.text(
+            card_x + card_w * 0.10,
+            y_line,
+            label.upper(),
+            ha="left",
+            va="center",
+            fontsize=10,
+            color=PALETTE["muted"],
+            fontweight="bold",
+            zorder=4,
+        )
+        ax_card.text(
+            card_x + card_w * 0.40,
+            y_line,
+            value,
+            ha="left",
+            va="center",
+            fontsize=16,
+            color=PALETTE["text"],
+            fontweight="bold",
+            zorder=4,
+        )
+        ax_card.text(
+            card_x + card_w * 0.62,
+            y_line,
+            sub,
+            ha="left",
+            va="center",
+            fontsize=10,
+            color=PALETTE["muted"],
+            zorder=4,
+        )
+
+    ax_card.text(
+        card_x + card_w * 0.10,
+        card_y + card_h * 0.06,
+        verdict,
+        ha="left",
+        va="center",
+        fontsize=11,
+        color=accent,
+        fontweight="bold",
+        zorder=4,
+    )
+
+    fig.suptitle(
+        _title("Out-of-sample model calibration", player),
+        fontsize=14,
+        fontweight="bold",
+        y=0.99,
+    )
+    fig.text(
+        0.5,
+        0.02,
+        f"Trained on {len(train_df)} games, tested on {len(test_df)} games (chronological 50/50 split). "
+        "AUC > 0.55 = some real signal; ≈ 0.50 = pure matchmaking noise.",
+        ha="center",
+        va="bottom",
+        fontsize=9,
+        color=PALETTE["muted"],
+    )
+    fig.tight_layout(rect=[0, 0.04, 1, 0.96])
+    return fig
+
+
 def plot_stats_summary(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
     """Dashboard-style headline card view.
 
@@ -4124,4 +4502,5 @@ ALL_PLOTS = [
     ("19_time_since_prev", plot_time_since_prev),
     ("20_session_analysis", plot_session_analysis),
     ("21_duo_winrate", plot_duo_winrate),
+    ("22_model_calibration", plot_model_calibration),
 ]

@@ -8,3 +8,4 @@ pantheon
 matplotlib==3.7
 opencv-python
 numpy<2
+pandas>=2.0,<2.3

@@ -2966,8 +2966,6 @@ def _build_logistic_design(
     d["log_gap_min"] = np.log1p(gap_filled.clip(lower=0.0))
 
     cont_features = {
-        "KDA (z)": d["kda"],
-        "Duration min (z)": d["duration_min"],
         "Loss streak entering (z)": d["loss_streak_in"],
         "Log gap since prev (z)": d["log_gap_min"],
     }
@@ -2975,7 +2973,6 @@ def _build_logistic_design(
         "Late night (00-04h)": d["hour"].between(0, 4).astype(int),
         "Evening peak (18-23h)": d["hour"].between(18, 23).astype(int),
         "Weekend": (d["dow"] >= 5).astype(int),
-        "Short game (<25 min)": (d["duration_min"] < 25).astype(int),
         "Same-team tracked partner": d["had_tracked_duo"].astype(int),
     }
 
@@ -3119,20 +3116,26 @@ def plot_logistic_coefficients(
     title_macro = (
         f"controlling for person ({n_people} people)" if n_people > 1 else "single-person fit"
     )
-    ax.set_title(_title(f"Logistic regression — {title_macro}", player))
+    ax.set_title(_title(f"What predicts your wins — {title_macro}", player))
     verdict_line = _factors_verdict(r2_factors)
     if r2_fe is not None:
         subtitle = (
             f"Person identity alone explains {r2_fe:.1%} of variance; the factors add "
             f"{r2_factors:+.1%} on top (full = {r2_full:.1%}). {verdict_line}\n"
-            "Solid bars = p<0.05 (real signal). Faded grey = no evidence."
+            "Solid bars = p<0.05 (real signal). Faded grey = no evidence.\n"
+            "Pre-game factors only — KDA + duration excluded "
+            "(they're outcome-derived, not predictors)."
         )
     else:
         subtitle = (
             f"McFadden pseudo-R² = {r2_full:.1%}. {verdict_line}\n"
-            "Solid bars = p<0.05 (real signal). Faded grey = no evidence."
+            "Solid bars = p<0.05 (real signal). Faded grey = no evidence.\n"
+            "Pre-game factors only — KDA + duration excluded "
+            "(they're outcome-derived, not predictors)."
         )
     _subtitle(ax, subtitle)
+    # _subtitle pads for a two-line caption; bump it for the three-line scope note.
+    ax.set_title(ax.get_title(), pad=48)
     _polish_ax(ax)
 
     # Annotation placement: solid (significant) coloured bars wider than

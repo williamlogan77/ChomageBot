@@ -1014,6 +1014,201 @@ def plot_champion_picks(
     return fig
 
 
+def plot_player_comparison(
+    df: pd.DataFrame,
+    player: str | None = None,
+    min_games: int = 30,
+    min_subset: int = 10,
+    rolling_window: int = 30,
+) -> plt.Figure:
+    """Every tracked player on every key metric, side-by-side as a heatmap.
+
+    Cell colour is the column-wise z-score so "above the group" reads green
+    and "below the group" reads red regardless of the metric's units.
+    Annotations are raw values so the reader sees both the rank and the
+    magnitude. When ``player`` is supplied the global heatmap is unchanged
+    but that player's row gets a thick primary border so the eye snaps to
+    them inside the group context.
+    """
+    metrics = [
+        "Overall WR",
+        "Avg KDA",
+        "Prime-hr WR (19-23)",
+        "Weekend WR",
+        "Tilt WR (after 2L+)",
+        "Top champ WR",
+        "Career trend (pp)",
+        "LP / 100 games",
+    ]
+
+    people_games = df.groupby("person").size()
+    people = people_games[people_games >= min_games].index.tolist()
+    if not people:
+        return _empty_figure(f"No players with ≥{min_games} games")
+
+    # Overall WR per person — also used to sort the rows.
+    overall_wr = df.groupby("person")["win"].mean()
+    people = sorted(people, key=lambda p: overall_wr.get(p, 0.0), reverse=True)
+
+    # LP/100 games per person, derived from rank-history deltas.
+    try:
+        lp_events = compute_lp_events(DEFAULT_DB)
+    except Exception:
+        lp_events = pd.DataFrame(columns=["person", "delta_score"])
+    if not lp_events.empty:
+        lp_grouped = lp_events.groupby("person").agg(
+            lp_total=("delta_score", "sum"), lp_n=("delta_score", "size")
+        )
+    else:
+        lp_grouped = pd.DataFrame(columns=["lp_total", "lp_n"])
+
+    rows = []
+    for person in people:
+        sub = df[df["person"] == person]
+        n_games = len(sub)
+
+        # Overall WR — gate to NaN only if (somehow) below min_subset.
+        wr_overall = float(sub["win"].mean()) if n_games >= min_subset else np.nan
+
+        # Avg KDA — same gate.
+        avg_kda = float(sub["kda"].mean()) if n_games >= min_subset else np.nan
+
+        prime = sub[sub["hour"].isin([19, 20, 21, 22, 23])]
+        wr_prime = float(prime["win"].mean()) if len(prime) >= min_subset else np.nan
+
+        weekend = sub[sub["dow"].isin([5, 6])]
+        wr_weekend = float(weekend["win"].mean()) if len(weekend) >= min_subset else np.nan
+
+        tilt = sub[sub["loss_streak_in"] >= 2]
+        wr_tilt = float(tilt["win"].mean()) if len(tilt) >= min_subset else np.nan
+
+        # Top champ: that person's single most-played champion, if ≥10 games.
+        champ_counts = sub.groupby("champion")["win"].agg(["count", "mean"])
+        champ_counts = champ_counts[champ_counts["count"] >= min_subset]
+        if not champ_counts.empty:
+            top = champ_counts.sort_values("count", ascending=False).iloc[0]
+            wr_top_champ = float(top["mean"])
+        else:
+            wr_top_champ = np.nan
+
+        # Career trend — slope of rolling-30 WR vs % of career, in pp across
+        # the full career. Same convention as plot_player_progression.
+        sub_sorted = sub.sort_values("game_start").reset_index(drop=True)
+        n = len(sub_sorted)
+        if n > 1:
+            pct = pd.Series(np.linspace(0, 100, n), index=sub_sorted.index)
+            roll = (
+                sub_sorted["win"]
+                .rolling(window=rolling_window, min_periods=max(5, rolling_window // 3))
+                .mean()
+            )
+            mask = roll.notna()
+            if mask.sum() >= 5:
+                slope = float(np.polyfit(pct[mask], roll[mask], 1)[0])
+                career_trend_pp = slope * 100 * 100
+            else:
+                career_trend_pp = np.nan
+        else:
+            career_trend_pp = np.nan
+
+        # LP/100 games — sum of delta_score / event count * 100.
+        if person in lp_grouped.index:
+            n_events = int(lp_grouped.loc[person, "lp_n"])
+            if n_events >= min_subset:
+                lp_per_100 = float(lp_grouped.loc[person, "lp_total"]) / n_events * 100.0
+            else:
+                lp_per_100 = np.nan
+        else:
+            lp_per_100 = np.nan
+
+        rows.append(
+            [
+                wr_overall,
+                avg_kda,
+                wr_prime,
+                wr_weekend,
+                wr_tilt,
+                wr_top_champ,
+                career_trend_pp,
+                lp_per_100,
+            ]
+        )
+
+    values = np.array(rows, dtype=float)
+
+    # Column-wise z-score for colour. NaNs are ignored in the mean/std and
+    # left as NaN in the z-grid so the masked colormap renders them grey.
+    col_mean = np.nanmean(values, axis=0)
+    col_std = np.nanstd(values, axis=0)
+    safe_std = np.where(col_std > 0, col_std, 1.0)
+    z = (values - col_mean) / safe_std
+    z = np.where(col_std > 0, z, 0.0)
+    z[np.isnan(values)] = np.nan
+
+    fig, ax = plt.subplots(figsize=(13, max(4, len(metrics) * 0.5 + 2)))
+    cmap = plt.get_cmap("RdYlGn").copy()
+    cmap.set_bad("#f3f4f6")
+    masked_z = np.ma.masked_invalid(z)
+    im = ax.imshow(masked_z, aspect="auto", cmap=cmap, vmin=-1.5, vmax=1.5)
+
+    y_labels = [f"{p}  ({int(people_games[p])} games)" for p in people]
+    ax.set_yticks(np.arange(len(people)))
+    ax.set_yticklabels(y_labels)
+    ax.set_xticks(np.arange(len(metrics)))
+    ax.set_xticklabels(metrics, rotation=30, ha="right")
+
+    wr_cols = {0, 2, 3, 4, 5}
+    kda_col = 1
+    trend_col = 6
+    lp_col = 7
+    for i in range(len(people)):
+        for j in range(len(metrics)):
+            v = values[i, j]
+            if np.isnan(v):
+                text = "—"
+                color = PALETTE["muted"]
+            elif j in wr_cols:
+                text = f"{v:.0%}"
+                color = PALETTE["text"]
+            elif j == kda_col:
+                text = f"{v:.2f}"
+                color = PALETTE["text"]
+            elif j == trend_col:
+                text = f"{v:+.1f}"
+                color = PALETTE["text"]
+            elif j == lp_col:
+                text = f"{v:+.0f}"
+                color = PALETTE["text"]
+            else:
+                text = f"{v:.2f}"
+                color = PALETTE["text"]
+            ax.text(j, i, text, ha="center", va="center", fontsize=8.5, color=color)
+
+    if player is not None and player in people:
+        idx = people.index(player)
+        for y_edge in (idx - 0.5, idx + 0.5):
+            ax.axhline(
+                y_edge,
+                color=PALETTE["primary"],
+                linewidth=2.4,
+                xmin=0,
+                xmax=1,
+            )
+
+    ax.set_title(_title("Player comparison — every metric, side by side", player))
+    _subtitle(
+        ax,
+        "Cell colour = z-score within column (green = above group avg, red = below). "
+        "Annotation = raw value.",
+    )
+    cbar = fig.colorbar(im, ax=ax, label="Z-score", shrink=0.6, pad=0.02)
+    cbar.outline.set_visible(False)
+    _polish_ax(ax)
+    ax.grid(False)
+    fig.tight_layout()
+    return fig
+
+
 def plot_champion_learning_curve(
     df: pd.DataFrame, player: str | None = None, top: int = 5, window: int = 5
 ) -> plt.Figure:
@@ -3114,23 +3309,24 @@ def summary_table(df: pd.DataFrame) -> pd.DataFrame:
 #: should display them. Each takes (df, player=None) -> Figure.
 ALL_PLOTS = [
     ("01_stats_summary", plot_stats_summary),
-    ("02_logistic_coefficients", plot_logistic_coefficients),
-    ("03_feature_impact", plot_feature_impact),
-    ("04_activity_over_time", plot_activity_over_time),
-    ("05_rank_trajectory", plot_rank_trajectory),
-    ("06_lp_economics", plot_lp_economics),
-    ("07_cumulative_winrate", plot_cumulative_winrate),
-    ("08_player_progression", plot_player_progression),
-    ("09_kda_vs_outcome", plot_kda_vs_outcome),
-    ("10_duration_vs_outcome", plot_duration_vs_outcome),
-    ("11_champion_winrate", plot_champion_winrate),
-    ("12_champion_picks", plot_champion_picks),
-    ("13_champion_learning_curve", plot_champion_learning_curve),
-    ("14_hour_of_day", plot_hour_of_day),
-    ("15_day_of_week", plot_day_of_week),
-    ("16_hour_dow_heatmap", plot_hour_dow_heatmap),
-    ("17_streak_recovery", plot_streak_recovery),
-    ("18_time_since_prev", plot_time_since_prev),
-    ("19_session_analysis", plot_session_analysis),
-    ("20_duo_winrate", plot_duo_winrate),
+    ("02_player_comparison", plot_player_comparison),
+    ("03_logistic_coefficients", plot_logistic_coefficients),
+    ("04_feature_impact", plot_feature_impact),
+    ("05_activity_over_time", plot_activity_over_time),
+    ("06_rank_trajectory", plot_rank_trajectory),
+    ("07_lp_economics", plot_lp_economics),
+    ("08_cumulative_winrate", plot_cumulative_winrate),
+    ("09_player_progression", plot_player_progression),
+    ("10_kda_vs_outcome", plot_kda_vs_outcome),
+    ("11_duration_vs_outcome", plot_duration_vs_outcome),
+    ("12_champion_winrate", plot_champion_winrate),
+    ("13_champion_picks", plot_champion_picks),
+    ("14_champion_learning_curve", plot_champion_learning_curve),
+    ("15_hour_of_day", plot_hour_of_day),
+    ("16_day_of_week", plot_day_of_week),
+    ("17_hour_dow_heatmap", plot_hour_dow_heatmap),
+    ("18_streak_recovery", plot_streak_recovery),
+    ("19_time_since_prev", plot_time_since_prev),
+    ("20_session_analysis", plot_session_analysis),
+    ("21_duo_winrate", plot_duo_winrate),
 ]

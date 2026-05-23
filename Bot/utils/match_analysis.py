@@ -194,6 +194,80 @@ def chi2_pvalue(chi2: float, df: int) -> float:
     return 0.5 * math.erfc(z / math.sqrt(2.0))
 
 
+def logistic_fit(
+    X: np.ndarray, y: np.ndarray, max_iter: int = 50, tol: float = 1e-6, l2: float = 0.5
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """Logistic regression via IRLS (Iteratively Reweighted Least Squares).
+
+    Newton-Raphson updates on the negative log-likelihood. A small L2
+    ridge penalty (``l2``) regularises the design matrix when it's
+    near-singular (lots of one-hot person dummies — common here) which
+    keeps standard errors finite without distorting the headline
+    coefficients.
+
+    Args:
+        X: (n, p) design matrix WITHOUT intercept column.
+        y: (n,) outcomes in {0, 1}.
+        l2: ridge penalty on coefficients except the intercept.
+
+    Returns:
+        beta:    (p+1,) coefficient vector, intercept first
+        se:      (p+1,) Wald standard errors
+        loglik:  scalar final log-likelihood
+    """
+    n, p = X.shape
+    X1 = np.hstack([np.ones((n, 1)), X])
+    beta = np.zeros(p + 1)
+    # Ridge: don't penalise the intercept.
+    R = l2 * np.eye(p + 1)
+    R[0, 0] = 0.0
+
+    for _ in range(max_iter):
+        z = np.clip(X1 @ beta, -30.0, 30.0)
+        mu = 1.0 / (1.0 + np.exp(-z))
+        W = mu * (1.0 - mu) + 1e-9
+        # Hessian H = X' diag(W) X + R, gradient g = X'(mu - y) + R beta
+        H = X1.T @ (X1 * W[:, None]) + R
+        g = X1.T @ (mu - y) + R @ beta
+        try:
+            step = np.linalg.solve(H, g)
+        except np.linalg.LinAlgError:
+            break
+        new_beta = beta - step
+        if np.max(np.abs(new_beta - beta)) < tol:
+            beta = new_beta
+            break
+        beta = new_beta
+
+    # Final Hessian inverse for Wald SEs.
+    z_final = np.clip(X1 @ beta, -30.0, 30.0)
+    mu = 1.0 / (1.0 + np.exp(-z_final))
+    W = mu * (1.0 - mu) + 1e-9
+    H = X1.T @ (X1 * W[:, None]) + R
+    try:
+        cov = np.linalg.inv(H)
+        se = np.sqrt(np.clip(np.diag(cov), 0, None))
+    except np.linalg.LinAlgError:
+        se = np.full(p + 1, np.nan)
+
+    eps = 1e-9
+    loglik = float(np.sum(y * np.log(mu + eps) + (1 - y) * np.log(1 - mu + eps)))
+    return beta, se, loglik
+
+
+def wald_pvalue(coef: float, se: float) -> float:
+    """Two-tailed Wald test p-value from coefficient + standard error.
+
+    Uses the erfc/sqrt(2) normal-tail approximation — no scipy needed.
+    """
+    import math
+
+    if se is None or not np.isfinite(se) or se <= 0:
+        return 1.0
+    z = abs(coef) / se
+    return float(math.erfc(z / math.sqrt(2.0)))
+
+
 def chi2_homogeneity(counts: np.ndarray, totals: np.ndarray) -> tuple[float, int, float]:
     """Chi-square test of "does P(win) differ across buckets?".
 
@@ -1657,6 +1731,187 @@ def _card_text(
         )
 
 
+def _build_logistic_design(
+    df: pd.DataFrame, player: str | None
+) -> tuple[np.ndarray, np.ndarray, list[str]]:
+    """Build the design matrix for win-probability logistic regression.
+
+    Continuous features are standardised (z-score) so their coefficients
+    are comparable: each one is "log-odds shift per +1 standard deviation".
+    Binary features are 0/1. When ``player is None`` we add person fixed
+    effects (one-hot dummies, drop one as baseline) so the headline
+    coefficients are net of "who's playing" — the biggest source of
+    confounding given the 200:1 game-count spread.
+    """
+    d = _filter_player(df, player).copy()
+    if d.empty:
+        return np.empty((0, 0)), np.empty(0), []
+
+    same_team = d[["match_id", "win", "person"]].merge(
+        df[["match_id", "win", "person"]], on=["match_id", "win"]
+    )
+    same_team = same_team[same_team["person_x"] != same_team["person_y"]]
+    with_duo = set(same_team[["match_id", "person_x"]].itertuples(index=False, name=None))
+    d["had_tracked_duo"] = [
+        (mid, p) in with_duo for mid, p in zip(d["match_id"], d["person"], strict=False)
+    ]
+
+    # Continuous features (standardised). Log1p the gap because it's
+    # heavily right-skewed. Clip below at 0 so the first-game NaNs (no
+    # previous match) don't poison the log.
+    gap_filled = d["gap_since_prev_min"].fillna(d["gap_since_prev_min"].median()).fillna(60.0)
+    d["log_gap_min"] = np.log1p(gap_filled.clip(lower=0.0))
+
+    cont_features = {
+        "KDA (z)": d["kda"],
+        "Duration min (z)": d["duration_min"],
+        "Loss streak entering (z)": d["loss_streak_in"],
+        "Log gap since prev (z)": d["log_gap_min"],
+    }
+    bin_features = {
+        "Late night (00-04h)": d["hour"].between(0, 4).astype(int),
+        "Evening peak (18-23h)": d["hour"].between(18, 23).astype(int),
+        "Weekend": (d["dow"] >= 5).astype(int),
+        "Short game (<25 min)": (d["duration_min"] < 25).astype(int),
+        "Same-team tracked partner": d["had_tracked_duo"].astype(int),
+    }
+
+    most_played = d["champion"].value_counts().head(3).index.tolist()
+    for champ in most_played:
+        bin_features[f"Played {champ}"] = (d["champion"] == champ).astype(int)
+
+    cols: list[str] = []
+    parts: list[np.ndarray] = []
+    for name, series in cont_features.items():
+        vals = pd.to_numeric(series, errors="coerce").fillna(series.median()).to_numpy(dtype=float)
+        std = vals.std()
+        if std < 1e-9:
+            continue
+        parts.append(((vals - vals.mean()) / std)[:, None])
+        cols.append(name)
+    for name, series in bin_features.items():
+        vals = series.fillna(0).to_numpy(dtype=float)
+        if vals.sum() < 20 or vals.sum() > len(vals) - 20:
+            continue
+        parts.append(vals[:, None])
+        cols.append(name)
+
+    # Person fixed effects (only when aggregating; baseline = most-played).
+    if player is None and d["person"].nunique() > 1:
+        people = d["person"].value_counts().index.tolist()
+        baseline = people[0]
+        for p in people[1:]:
+            vals = (d["person"] == p).astype(float).to_numpy()
+            if vals.sum() < 20:
+                continue
+            parts.append(vals[:, None])
+            cols.append(f"[person] {p} vs {baseline}")
+
+    if not parts:
+        return np.empty((0, 0)), np.empty(0), []
+    X = np.hstack(parts)
+    y = d["win"].to_numpy(dtype=float)
+    return X, y, cols
+
+
+def plot_logistic_coefficients(
+    df: pd.DataFrame, player: str | None = None, top: int = 12
+) -> plt.Figure:
+    """Logistic regression of P(win) on the candidate factors.
+
+    Replaces the marginal "feature impact" chi-square with a proper
+    multivariate model — each coefficient is the log-odds shift after
+    controlling for the other features (and for "who's playing" via
+    person fixed effects when in aggregate mode). Significance is the
+    Wald z-test (|coef|/SE) against zero.
+
+    Bars: log-odds units. Solid green/red if p<0.05, faded grey if not.
+    Annotation: standardised coef, odds ratio, and p-value.
+    """
+    X, y, cols = _build_logistic_design(df, player)
+    if X.size == 0 or len(np.unique(y)) < 2:
+        return _empty_figure("Not enough data to fit logistic regression")
+
+    beta, se, _ = logistic_fit(X, y, l2=0.5)
+    # Drop intercept + person-fixed-effect coefficients from the chart —
+    # the user cares about the factor coefficients, not "is person X
+    # better than baseline" (which is just their WR gap).
+    rows = []
+    for idx, name in enumerate(cols):
+        if name.startswith("[person]"):
+            continue
+        coef = beta[idx + 1]  # +1 to skip intercept
+        se_i = se[idx + 1]
+        p = wald_pvalue(coef, se_i)
+        rows.append({"name": name, "coef": coef, "se": se_i, "p": p, "or": float(np.exp(coef))})
+    if not rows:
+        return _empty_figure("No usable factors after filtering")
+
+    coefs_df = (
+        pd.DataFrame(rows)
+        .iloc[lambda f: f["coef"].abs().sort_values(ascending=False).index]
+        .head(top)
+        .iloc[::-1]
+        .reset_index(drop=True)
+    )
+
+    fig_h = max(4.6, len(coefs_df) * 0.45)
+    fig, ax = plt.subplots(figsize=(13, fig_h))
+    y_pos = np.arange(len(coefs_df))
+
+    sig_mask = coefs_df["p"] < 0.05
+    colours = [
+        (PALETTE["win"] if c > 0 else PALETTE["loss"]) if s else PALETTE["neutral"]
+        for c, s in zip(coefs_df["coef"], sig_mask, strict=False)
+    ]
+    ax.barh(y_pos, coefs_df["coef"], color=colours, height=0.7)
+    ax.errorbar(
+        coefs_df["coef"],
+        y_pos,
+        xerr=1.96 * coefs_df["se"],
+        fmt="none",
+        ecolor=PALETTE["text"],
+        capsize=3,
+        linewidth=1.0,
+        alpha=0.6,
+    )
+    ax.axvline(0, color=PALETTE["text"], linewidth=0.8)
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(coefs_df["name"])
+    ax.set_xlabel("Standardised log-odds coefficient (95% CI whiskers)")
+
+    n_people = df["person"].nunique() if player is None else 1
+    title_macro = (
+        f"controlling for person ({n_people} people)" if n_people > 1 else "single-person fit"
+    )
+    ax.set_title(_title(f"Logistic regression — {title_macro}", player))
+    _subtitle(
+        ax,
+        "Solid bars = p<0.05 (real signal). Faded grey = no evidence. "
+        "Continuous features are per +1σ; binary features are vs the off state.",
+    )
+    _polish_ax(ax)
+
+    for yi, r in coefs_df.iterrows():
+        odds_ratio_pct = (r["or"] - 1) * 100
+        sign_pad = 1 if r["coef"] >= 0 else -1
+        ax.annotate(
+            f"{r['coef']:+.2f}  ·  OR {r['or']:.2f} ({odds_ratio_pct:+.0f}%)  ·  {_p_marker(r['p'])}",
+            xy=(r["coef"], yi),
+            xytext=(8 * sign_pad, 0),
+            textcoords="offset points",
+            va="center",
+            ha="left" if r["coef"] >= 0 else "right",
+            fontsize=9,
+            color=PALETTE["text"],
+        )
+
+    max_abs = max(0.4, float(coefs_df["coef"].abs().max() + 1.96 * coefs_df["se"].max()) * 1.1)
+    ax.set_xlim(-max_abs, max_abs)
+    fig.tight_layout()
+    return fig
+
+
 def plot_stats_summary(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
     """Dashboard-style headline card view.
 
@@ -1958,18 +2213,19 @@ def summary_table(df: pd.DataFrame) -> pd.DataFrame:
 #: should display them. Each takes (df, player=None) -> Figure.
 ALL_PLOTS = [
     ("01_stats_summary", plot_stats_summary),
-    ("02_feature_impact", plot_feature_impact),
-    ("03_activity_over_time", plot_activity_over_time),
-    ("04_cumulative_winrate", plot_cumulative_winrate),
-    ("05_player_progression", plot_player_progression),
-    ("06_kda_vs_outcome", plot_kda_vs_outcome),
-    ("07_duration_vs_outcome", plot_duration_vs_outcome),
-    ("08_champion_winrate", plot_champion_winrate),
-    ("09_champion_learning_curve", plot_champion_learning_curve),
-    ("10_hour_of_day", plot_hour_of_day),
-    ("11_day_of_week", plot_day_of_week),
-    ("12_hour_dow_heatmap", plot_hour_dow_heatmap),
-    ("13_streak_recovery", plot_streak_recovery),
-    ("14_time_since_prev", plot_time_since_prev),
-    ("15_duo_winrate", plot_duo_winrate),
+    ("02_logistic_coefficients", plot_logistic_coefficients),
+    ("03_feature_impact", plot_feature_impact),
+    ("04_activity_over_time", plot_activity_over_time),
+    ("05_cumulative_winrate", plot_cumulative_winrate),
+    ("06_player_progression", plot_player_progression),
+    ("07_kda_vs_outcome", plot_kda_vs_outcome),
+    ("08_duration_vs_outcome", plot_duration_vs_outcome),
+    ("09_champion_winrate", plot_champion_winrate),
+    ("10_champion_learning_curve", plot_champion_learning_curve),
+    ("11_hour_of_day", plot_hour_of_day),
+    ("12_day_of_week", plot_day_of_week),
+    ("13_hour_dow_heatmap", plot_hour_dow_heatmap),
+    ("14_streak_recovery", plot_streak_recovery),
+    ("15_time_since_prev", plot_time_since_prev),
+    ("16_duo_winrate", plot_duo_winrate),
 ]

@@ -35,6 +35,17 @@ GAP_LABELS = ["<10m", "10-30m", "30-60m", "1-2h", "2-6h", "6-24h", ">24h"]
 DURATION_BINS_MIN = [0, 15, 20, 25, 30, 35, 40, 999]
 DURATION_LABELS = ["<15", "15-20", "20-25", "25-30", "30-35", "35-40", "40+"]
 
+# A "session" is a contiguous run of games for one person where each
+# consecutive game starts within this many minutes of the previous one.
+# 60 minutes covers queue-up + champ select + breaks between back-to-back
+# games but excludes "popped on after dinner" type returns.
+SESSION_GAP_MIN = 60
+
+# Session-length buckets for the "do long grinds hurt?" view.
+# Left-closed: [1,2)=1 game, [2,4)=2-3, [4,6)=4-5, [6,10)=6-9, [10,16)=10-15, [16,inf)=16+.
+SESSION_LEN_BINS = [1, 2, 4, 6, 10, 16, 9999]
+SESSION_LEN_LABELS = ["1 game", "2-3", "4-5", "6-9", "10-15", "16+"]
+
 
 # --- Visual style -----------------------------------------------------------
 
@@ -394,6 +405,17 @@ def load_matches(db_path: Path = DEFAULT_DB) -> pd.DataFrame:
     # nth-on-champ is per-Riot-account — different accounts have different
     # mastery curves on the same champ.
     df["nth_on_champ"] = df.groupby(["riot_account", "champion"]).cumcount() + 1
+
+    # Session features: a "session" is a contiguous run of one person's
+    # games where each consecutive game starts within SESSION_GAP_MIN of
+    # the previous game ending. A long break starts a new session.
+    new_session = df["gap_since_prev_min"].isna() | (df["gap_since_prev_min"] > SESSION_GAP_MIN)
+    df["session_id"] = new_session.groupby(df["person"]).cumsum()
+    df["session_game_idx"] = df.groupby(["person", "session_id"]).cumcount() + 1
+    # Pre-compute session length so the same value lands on every row of
+    # the session — used by the "WR by session length" panel later.
+    session_len = df.groupby(["person", "session_id"])["session_game_idx"].transform("max")
+    df["session_length"] = session_len
     return df
 
 
@@ -1075,6 +1097,159 @@ def plot_time_since_prev(df: pd.DataFrame, player: str | None = None) -> plt.Fig
     _baseline(ax)
     _annotate_bars(ax, range(len(g)), g["winrate"], g["games"])
     _polish_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
+def plot_session_analysis(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Three-panel session view: how long are your sessions, do you tilt
+    within them, and do long grinds pay off?
+
+    A "session" is a contiguous run of games where each next game starts
+    within ``SESSION_GAP_MIN`` minutes of the previous one ending. Longer
+    breaks start a new session — the typical "I queued, played 5 games,
+    went to dinner" pattern groups into one session.
+
+    Left panel    Session length distribution. Most sessions are short;
+                  the tail tells you how grindy the heaviest sessions get.
+    Middle panel  Rolling WR by Nth game IN the session — does fatigue
+                  hit? A downward slope = in-session tilt is real.
+    Right panel   WR by session length bucket. Compares "1-and-done"
+                  sessions vs marathon sessions to see if grinding
+                  produces better outcomes overall.
+    """
+    d = _filter_player(df, player)
+    if d.empty or "session_id" not in d.columns:
+        return _empty_figure("No games to analyse")
+
+    # Per-session aggregates (one row per session).
+    sessions = (
+        d.groupby(["person", "session_id"])
+        .agg(length=("session_game_idx", "max"), wins=("win", "sum"))
+        .reset_index()
+    )
+    sessions["session_wr"] = sessions["wins"] / sessions["length"]
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4.8))
+
+    # --- Panel 1: session length distribution ---
+    ax = axes[0]
+    counts, bins, _ = ax.hist(
+        sessions["length"],
+        bins=np.arange(1, max(2, int(sessions["length"].max()) + 2)) - 0.5,
+        color=PALETTE["primary"],
+        edgecolor="white",
+        linewidth=0.6,
+    )
+    median_len = float(sessions["length"].median())
+    p90_len = float(sessions["length"].quantile(0.90))
+    ax.axvline(
+        median_len,
+        color=PALETTE["text"],
+        linewidth=1.0,
+        linestyle="--",
+        label=f"median {median_len:.0f}",
+    )
+    ax.axvline(
+        p90_len,
+        color=PALETTE["accent_orange"],
+        linewidth=1.0,
+        linestyle=":",
+        label=f"90th pct {p90_len:.0f}",
+    )
+    ax.set_xlabel("Session length (games)")
+    ax.set_ylabel("Number of sessions")
+    ax.set_title(_title("Session length distribution", player))
+    _subtitle(
+        ax,
+        f"{len(sessions)} sessions · gap threshold = {SESSION_GAP_MIN} min "
+        f"· {int(sessions['length'].sum())} games total.",
+    )
+    ax.legend(loc="upper right")
+    _polish_ax(ax)
+
+    # --- Panel 2: WR by Nth game in session ---
+    ax = axes[1]
+    # Cap at "10+" so the long tail doesn't pull noise into a long x-axis.
+    d2 = d.copy()
+    d2["nth_capped"] = d2["session_game_idx"].clip(upper=10)
+    g = _bucket_winrate(d2, "nth_capped")
+    macro_n = int(g["n_people"].max()) if not g.empty else 1
+    x = g["nth_capped"].astype(int).to_numpy()
+    ax.plot(x, g["winrate"], color=PALETTE["primary"], marker="o", linewidth=2.2, markersize=6)
+    if macro_n > 1:
+        ax.fill_between(
+            x,
+            g["ci_lo"],
+            g["ci_hi"],
+            color=PALETTE["primary"],
+            alpha=0.15,
+            label="±1σ across people",
+        )
+        ax.legend(loc="lower right")
+    _baseline(ax)
+    ax.set_xlabel("Nth game in current session  (10+ collapsed)")
+    ax.set_ylabel("Win rate")
+    ax.set_ylim(0, 1.05)
+    ax.set_xticks(range(1, 11))
+    ax.set_xticklabels([str(i) for i in range(1, 10)] + ["10+"])
+    ax.set_title(_title("Win rate by Nth game in session", player))
+
+    # Chi² on raw pooled counts for the "in-session tilt is real?" line.
+    pooled = _bin_winrate(d2, "nth_capped").set_index("nth_capped").reindex(x)
+    wins = (pooled["games"] * pooled["winrate"]).round().astype(int).to_numpy()
+    totals = pooled["games"].astype(int).to_numpy()
+    _chi2, _dof, pval = chi2_homogeneity(wins, totals)
+    _subtitle(
+        ax,
+        f"In-session tilt check: χ² across game positions {_p_marker(pval)} ({_p_verdict(pval)}).",
+    )
+    _polish_ax(ax)
+
+    # --- Panel 3: WR by session length bucket ---
+    ax = axes[2]
+    d3 = d.copy()
+    d3["session_length_bucket"] = pd.cut(
+        d3["session_length"], bins=SESSION_LEN_BINS, labels=SESSION_LEN_LABELS, right=False
+    )
+    g3 = _bucket_winrate(d3, "session_length_bucket")
+    macro_n3 = int(g3["n_people"].max()) if not g3.empty else 1
+    xs = range(len(g3))
+    ax.bar(xs, g3["winrate"], color=PALETTE["accent_teal"], width=0.7)
+    if macro_n3 > 1:
+        ax.errorbar(
+            list(xs),
+            g3["winrate"],
+            yerr=[g3["winrate"] - g3["ci_lo"], g3["ci_hi"] - g3["winrate"]],
+            fmt="none",
+            ecolor=PALETTE["text"],
+            capsize=3,
+            linewidth=1.0,
+            alpha=0.6,
+        )
+    ax.set_xticks(list(xs))
+    ax.set_xticklabels(g3["session_length_bucket"], rotation=0)
+    ax.set_xlabel("Session length bucket")
+    ax.set_ylabel("Win rate")
+    ax.set_ylim(0, 1.1)
+    ax.set_title(_title("Win rate by session length", player))
+    _baseline(ax)
+    _annotate_bars(ax, list(xs), g3["winrate"], g3["games"])
+    _polish_ax(ax)
+
+    pooled3 = (
+        _bin_winrate(d3, "session_length_bucket")
+        .set_index("session_length_bucket")
+        .reindex(g3["session_length_bucket"])
+    )
+    wins3 = (pooled3["games"] * pooled3["winrate"]).round().astype(int).to_numpy()
+    totals3 = pooled3["games"].astype(int).to_numpy()
+    _chi2, _dof, pval3 = chi2_homogeneity(wins3, totals3)
+    _subtitle(
+        ax,
+        f"Long-grind check: χ² across lengths {_p_marker(pval3)} ({_p_verdict(pval3)}).",
+    )
+
     fig.tight_layout()
     return fig
 
@@ -2227,5 +2402,6 @@ ALL_PLOTS = [
     ("13_hour_dow_heatmap", plot_hour_dow_heatmap),
     ("14_streak_recovery", plot_streak_recovery),
     ("15_time_since_prev", plot_time_since_prev),
-    ("16_duo_winrate", plot_duo_winrate),
+    ("16_session_analysis", plot_session_analysis),
+    ("17_duo_winrate", plot_duo_winrate),
 ]

@@ -1744,6 +1744,36 @@ def _survival_curve(lengths: np.ndarray, s: int, max_k: int) -> tuple[np.ndarray
     return (surv, denom)
 
 
+def _bootstrap_survival_ci(
+    lengths: np.ndarray,
+    s: int,
+    max_k: int,
+    *,
+    n_boot: int = 1000,
+    seed: int = 42,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Bootstrap a 95% CI band for the survival curve at seed ``s``.
+
+    Resampling unit is the streak (not the game) — that's what the survival
+    function is defined over. Returns ``(ci_lo[k], ci_hi[k])`` arrays of
+    length ``max_k+1``; if no qualifying streaks exist the bands are NaN.
+    """
+    qualifying = lengths[lengths >= s]
+    denom = int(qualifying.size)
+    nan_band = np.full(max_k + 1, np.nan)
+    if denom == 0:
+        return (nan_band, nan_band)
+    rng = np.random.default_rng(seed + s)
+    boot = np.empty((n_boot, max_k + 1), dtype=float)
+    for i in range(n_boot):
+        sample = rng.choice(qualifying, size=denom, replace=True)
+        for k in range(max_k + 1):
+            boot[i, k] = float((sample >= s + k).sum()) / denom
+    ci_lo = np.quantile(boot, 0.025, axis=0)
+    ci_hi = np.quantile(boot, 0.975, axis=0)
+    return (ci_lo, ci_hi)
+
+
 def plot_streak_recovery(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
     """Symmetric streak view — does winning have momentum the way losing
     has tilt?
@@ -1872,6 +1902,15 @@ def plot_streak_recovery(df: pd.DataFrame, player: str | None = None) -> plt.Fig
     for s in _SURVIVAL_SEEDS:
         loss_curve, loss_n = _survival_curve(loss_lens, s, max_k)
         if loss_n > 0:
+            loss_lo, loss_hi = _bootstrap_survival_ci(loss_lens, s, max_k)
+            ax2.fill_between(
+                ks,
+                loss_lo,
+                loss_hi,
+                color=seed_to_loss_color[s],
+                alpha=0.15,
+                linewidth=0,
+            )
             ax2.plot(
                 ks,
                 loss_curve,
@@ -1884,6 +1923,15 @@ def plot_streak_recovery(df: pd.DataFrame, player: str | None = None) -> plt.Fig
             )
         win_curve, win_n = _survival_curve(win_lens, s, max_k)
         if win_n > 0:
+            win_lo, win_hi = _bootstrap_survival_ci(win_lens, s, max_k)
+            ax2.fill_between(
+                ks,
+                win_lo,
+                win_hi,
+                color=seed_to_win_color[s],
+                alpha=0.15,
+                linewidth=0,
+            )
             ax2.plot(
                 ks,
                 win_curve,
@@ -1902,7 +1950,9 @@ def plot_streak_recovery(df: pd.DataFrame, player: str | None = None) -> plt.Fig
     ax2.set_title(_title("Streak survival — wins vs losses", player))
     _subtitle(
         ax2,
-        "Above the dashed line = the streak persists more than chance (loss → tilt, win → momentum).",
+        "Above the dashed line = the streak persists more than chance (loss → tilt, win → momentum). "
+        "Shaded bands = bootstrap 95% CI (1000 resamples over streaks); overlap with the baseline = "
+        "the effect is within sampling noise.",
     )
     ax2.legend(loc="upper right", fontsize=8, ncol=2)
     _polish_ax(ax2)

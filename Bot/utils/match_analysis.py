@@ -538,6 +538,7 @@ def load_matches(db_path: Path = DEFAULT_DB) -> pd.DataFrame:
     )
 
     df["loss_streak_in"] = df.groupby("person")["win"].transform(_loss_streak_entering)
+    df["win_streak_in"] = df.groupby("person")["win"].transform(_win_streak_entering)
     # nth-on-champ is per-Riot-account — different accounts have different
     # mastery curves on the same champ.
     df["nth_on_champ"] = df.groupby(["riot_account", "champion"]).cumcount() + 1
@@ -698,6 +699,19 @@ def _loss_streak_entering(wins: pd.Series) -> pd.Series:
     for i, w in enumerate(wins.values):
         out[i] = streak
         streak = 0 if w == 1 else streak + 1
+    return pd.Series(out, index=wins.index)
+
+
+def _win_streak_entering(wins: pd.Series) -> pd.Series:
+    """Mirror of ``_loss_streak_entering`` — count of consecutive wins
+    immediately PRECEDING each row. A loss resets the streak; the first
+    game's value is 0.
+    """
+    out = np.zeros(len(wins), dtype=int)
+    streak = 0
+    for i, w in enumerate(wins.values):
+        out[i] = streak
+        streak = streak + 1 if w == 1 else 0
     return pd.Series(out, index=wins.index)
 
 
@@ -1634,148 +1648,264 @@ def plot_hour_dow_heatmap(df: pd.DataFrame, player: str | None = None) -> plt.Fi
 # --- 5. Recent form & momentum ---------------------------------------------
 
 
-def plot_streak_recovery(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
-    """Win rate of the NEXT game, bucketed by loss streak going into it
-    (left), plus the survival curve of an already-running loss streak
-    (right). Together they answer "does tilt kick in for the next game?"
-    and "once you're tilting, how long does it last?".
-    """
-    from matplotlib.ticker import PercentFormatter
+#: Left-panel bar buckets — signed-streak ordering from "long win streak" on
+#: the far left, through neutral, to "long loss streak" on the far right.
+#: Sign encoding: negative = entering win streak, 0 = no prior streak
+#: (first game of the data), positive = entering loss streak. The chi²
+#: test runs across all 11 buckets as one partition.
+_SIGNED_STREAK_LABELS = [
+    "W6+",
+    "W5-4",
+    "W3",
+    "W2",
+    "W1",
+    "0 (start)",
+    "L1",
+    "L2",
+    "L3",
+    "L4-5",
+    "L6+",
+]
 
+#: Survival curves on the right panel — same seed lengths for both sides
+#: so the comparison is direct. s=10 is sparse but kept for symmetry; the
+#: legend shows the denominator so the reader can judge.
+_SURVIVAL_SEEDS = (1, 2, 3, 5, 10)
+
+
+def _signed_streak_bucket(loss_in: int, win_in: int) -> str:
+    """Map (loss_streak_in, win_streak_in) → one of the 11 labelled buckets.
+
+    By construction at most one of the two counters is positive per row
+    (a win resets loss, a loss resets win). Both zero only on the very
+    first game we have for that person.
+    """
+    if win_in >= 6:
+        return "W6+"
+    if win_in >= 4:
+        return "W5-4"
+    if win_in == 3:
+        return "W3"
+    if win_in == 2:
+        return "W2"
+    if win_in == 1:
+        return "W1"
+    if loss_in == 0:
+        return "0 (start)"
+    if loss_in == 1:
+        return "L1"
+    if loss_in == 2:
+        return "L2"
+    if loss_in == 3:
+        return "L3"
+    if loss_in <= 5:
+        return "L4-5"
+    return "L6+"
+
+
+def _maximal_streak_lengths(wins_by_person: pd.Series, kind: str) -> np.ndarray:
+    """Return the lengths of every maximal run of a given outcome across
+    all people in ``wins_by_person`` (multi-index: person, time-order).
+
+    ``kind='loss'`` collects runs of 0s, ``kind='win'`` collects runs of 1s.
+    Used to compute conditional survival ``S_s(k) = P(L ≥ s+k | L ≥ s)``.
+    Counting maximal runs avoids the double-counting you'd get from a
+    per-row treatment.
+    """
+    target = 0 if kind == "loss" else 1
+    lengths: list[int] = []
+    for _person, ws in wins_by_person.groupby(level=0, sort=False):
+        cur = 0
+        for w in ws.to_numpy():
+            if int(w) == target:
+                cur += 1
+            else:
+                if cur > 0:
+                    lengths.append(cur)
+                cur = 0
+        if cur > 0:
+            lengths.append(cur)
+    return np.asarray(lengths, dtype=int)
+
+
+def _survival_curve(lengths: np.ndarray, s: int, max_k: int) -> tuple[np.ndarray, int]:
+    """For seed ``s``, return ``(survival[k] for k=0..max_k], denom)`` where
+    survival[k] = P(streak length ≥ s+k | length ≥ s). denom is the count
+    of streaks meeting the seed condition — labelled in the legend so the
+    viewer can judge sample size."""
+    qualifying = lengths[lengths >= s]
+    denom = int(qualifying.size)
+    if denom == 0:
+        return (np.full(max_k + 1, np.nan), 0)
+    surv = np.array(
+        [float((qualifying >= s + k).sum()) / denom for k in range(max_k + 1)],
+        dtype=float,
+    )
+    return (surv, denom)
+
+
+def plot_streak_recovery(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Symmetric streak view — does winning have momentum the way losing
+    has tilt?
+
+    Left panel    Bars: WR of the NEXT game by entering streak length,
+                  with the streak SIGN preserved. Win streaks on the
+                  left (green), loss streaks on the right (orange).
+                  A pure "tilt only" picture is flat on the green side
+                  and sloping down on the orange side; symmetric streak
+                  effects make both sides slope toward the centre.
+    Right panel   Survival curves of maximal streaks. For seeds
+                  s ∈ {1, 2, 3, 5, 10} we plot
+                      S_s(k) = P(streak length ≥ s + k | length ≥ s),
+                  loss streaks as solid lines, win streaks dashed.
+                  Bernoulli (independent) reference 0.5^k is the
+                  dashed grey baseline. Curves above the baseline mean
+                  the streak persists more than chance — tilt on the
+                  loss side, momentum on the win side.
+    """
     d = _filter_player(df, player)
     if d.empty:
         return _empty_figure("No games to plot")
     d = d.copy()
-    d["streak_bucket"] = pd.cut(
-        d["loss_streak_in"],
-        bins=[-1, 0, 1, 2, 3, 5, 99],
-        labels=["0 (post-W)", "1", "2", "3", "4-5", "6+"],
+
+    # --- Left panel data: signed-streak bars ---
+    if "win_streak_in" not in d.columns:
+        d["win_streak_in"] = d.groupby("person")["win"].transform(_win_streak_entering)
+    d["streak_bucket"] = pd.Categorical(
+        [
+            _signed_streak_bucket(int(li), int(wi))
+            for li, wi in zip(d["loss_streak_in"], d["win_streak_in"], strict=False)
+        ],
+        categories=_SIGNED_STREAK_LABELS,
+        ordered=True,
     )
     g = _bucket_winrate(d, "streak_bucket")
-    macro_n = int(g["n_people"].max()) if not g.empty else 1
+    g = g.set_index("streak_bucket").reindex(_SIGNED_STREAK_LABELS).reset_index()
+    macro_n = int(g["n_people"].max(skipna=True)) if not g["n_people"].isna().all() else 1
 
-    # Chi² uses raw pooled counts (the actual outcomes) — the right
-    # statistical test even when we *display* macro-averaged WRs.
-    pooled = _bin_winrate(d, "streak_bucket").set_index("streak_bucket").reindex(g["streak_bucket"])
-    wins = (pooled["games"] * pooled["winrate"]).round().astype(int).to_numpy()
-    totals = pooled["games"].astype(int).to_numpy()
-    _chi2, _dof, pval = chi2_homogeneity(wins, totals)
+    pooled = (
+        _bin_winrate(d, "streak_bucket").set_index("streak_bucket").reindex(_SIGNED_STREAK_LABELS)
+    )
+    pooled_games = pooled["games"].fillna(0).astype(int).to_numpy()
+    pooled_wins = (
+        (pooled["games"].fillna(0) * pooled["winrate"].fillna(0)).round().astype(int).to_numpy()
+    )
+    _chi2, _dof, pval = chi2_homogeneity(pooled_wins, pooled_games)
 
-    fig, axes = plt.subplots(1, 2, figsize=(15, 4.6))
+    # --- Right panel data: maximal streak survival curves ---
+    wins_indexed = d.sort_values(["person", "game_start"]).set_index(["person", "game_start"])[
+        "win"
+    ]
+    loss_lens = _maximal_streak_lengths(wins_indexed, "loss")
+    win_lens = _maximal_streak_lengths(wins_indexed, "win")
+    max_k = 10
 
-    # --- Left panel: existing P(next win | entering streak) bars ----------
+    # --- Figure layout ---
+    fig, axes = plt.subplots(1, 2, figsize=(15, 5.0))
+
+    # Left bar panel.
     ax = axes[0]
-    ax.bar(range(len(g)), g["winrate"], color=PALETTE["accent_orange"], width=0.7)
+    bar_colours: list[str] = []
+    for label in _SIGNED_STREAK_LABELS:
+        if label.startswith("W"):
+            bar_colours.append(PALETTE["win"])
+        elif label.startswith("L"):
+            bar_colours.append(PALETTE["accent_orange"])
+        else:
+            bar_colours.append(PALETTE["neutral"])
+    xs = range(len(_SIGNED_STREAK_LABELS))
+    heights = g["winrate"].to_numpy()
+    ax.bar(list(xs), heights, color=bar_colours, width=0.78)
     if macro_n > 1:
+        yerr_lo = (g["winrate"] - g["ci_lo"]).clip(lower=0).fillna(0).to_numpy()
+        yerr_hi = (g["ci_hi"] - g["winrate"]).clip(lower=0).fillna(0).to_numpy()
         ax.errorbar(
-            range(len(g)),
-            g["winrate"],
-            yerr=[g["winrate"] - g["ci_lo"], g["ci_hi"] - g["winrate"]],
+            list(xs),
+            heights,
+            yerr=[yerr_lo, yerr_hi],
             **WHISKER_STYLE,
         )
-    ax.set_xticks(range(len(g)))
-    ax.set_xticklabels(g["streak_bucket"])
-    ax.set_xlabel("Loss streak entering this game")
+    ax.set_xticks(list(xs))
+    ax.set_xticklabels(_SIGNED_STREAK_LABELS, rotation=0, fontsize=9)
+    ax.set_xlabel("Entering streak  (green = win streak, orange = loss streak)")
     ax.set_ylabel("Win rate of this game")
-    ax.set_title(_title("Tilt check — win rate vs entering loss streak", player))
+    ax.set_title(_title("Win rate by entering streak  (W ← → L)", player))
     _subtitle(
         ax,
-        f"Downward step = tilt is real. χ² across buckets: {_p_marker(pval)} ({_p_verdict(pval)})  ·  {_macro_label(macro_n)}.",
+        f"Both sides sloping toward centre = symmetric streakiness; only L-side drops = tilt-only. χ² across 11 buckets: {_p_marker(pval)} ({_p_verdict(pval)})  ·  {_macro_label(macro_n)}.",
     )
     ax.set_ylim(0, 1.1)
     _baseline(ax)
-    _annotate_bars(ax, range(len(g)), g["winrate"], g["games"])
+    _annotate_bars(ax, list(xs), g["winrate"].fillna(0), pd.Series(pooled_games))
+
     _polish_ax(ax)
 
-    # --- Right panel: streak survival curves ------------------------------
-    # Sort within-person by game_start so shift(-k) actually looks at the
-    # next chronological game for that person.
-    surv_df = df.copy().sort_values(["person", "game_start"]).reset_index(drop=True)
-    surv_df = _filter_player(surv_df, player)
-    K_MAX = 6
-    K_RANGE = list(range(1, K_MAX + 1))
-    starts = [1, 2, 3, 5, 10]
-    is_macro = _is_aggregate(player)
-
-    # alive_after_k = next k games are all losses (within the same person);
-    # has_k_future masks rows that don't have k future games and must be
-    # dropped BEFORE averaging (NaN==0 → False would otherwise bias S down).
-    shifted = {k: surv_df.groupby("person")["win"].shift(-k) for k in K_RANGE}
-    has_future = {k: shifted[k].notna() for k in K_RANGE}
-    is_loss_next = {k: (shifted[k] == 0) for k in K_RANGE}
-    # streak still alive after k more = all of next-1..next-k were losses
-    alive = {}
-    running = is_loss_next[1].copy()
-    alive[1] = running
-    for k in range(2, K_MAX + 1):
-        running = running & is_loss_next[k]
-        alive[k] = running
-
-    ax_r = axes[1]
-    drawn_any = False
-    for idx, s in enumerate(starts):
-        at_risk_mask = surv_df["loss_streak_in"] == s
-        ys = []
-        for k in K_RANGE:
-            mask_k = at_risk_mask & has_future[k]
-            if is_macro:
-                per_person = (
-                    pd.DataFrame(
-                        {
-                            "person": surv_df.loc[mask_k, "person"],
-                            "alive": alive[k].loc[mask_k].astype(float),
-                        }
-                    )
-                    .groupby("person")["alive"]
-                    .agg(["size", "mean"])
-                )
-                per_person = per_person[per_person["size"] >= 10]
-                if len(per_person) >= 2:
-                    ys.append(float(per_person["mean"].mean()))
-                else:
-                    ys.append(np.nan)
-            else:
-                vals = alive[k].loc[mask_k]
-                if len(vals) >= 10:
-                    ys.append(float(vals.astype(float).mean()))
-                else:
-                    ys.append(np.nan)
-
-        ys = np.array(ys, dtype=float)
-        if not np.isfinite(ys).any():
-            continue
-        drawn_any = True
-        ax_r.plot(
-            K_RANGE,
-            ys,
-            marker="o",
-            color=SERIES_CYCLE[idx % len(SERIES_CYCLE)],
-            label=f"starting at {s}L",
-        )
-
-    # Independent (Bernoulli p=0.5) reference: P(k losses in a row) = 0.5^k.
-    ax_r.plot(
-        K_RANGE,
-        [0.5**k for k in K_RANGE],
-        linestyle=(0, (4, 4)),
+    # Right survival panel.
+    ax2 = axes[1]
+    ks = np.arange(0, max_k + 1)
+    ax2.plot(
+        ks,
+        0.5**ks,
         color=PALETTE["muted"],
-        linewidth=1.2,
-        alpha=0.8,
-        label="independent 50%",
+        linewidth=1.0,
+        linestyle=(0, (4, 4)),
+        label="0.5^k (independent)",
     )
-    ax_r.set_xticks(K_RANGE)
-    ax_r.set_xlabel("Additional losses (k)")
-    ax_r.set_ylabel("P(streak still alive)")
-    ax_r.set_ylim(0, 1.0)
-    ax_r.yaxis.set_major_formatter(PercentFormatter(1.0))
-    ax_r.set_title(_title("Loss-streak survival curves", player))
+
+    # Distinct hues for each seed so loss/win pairs of the same seed read
+    # at the same vertical position visually.
+    seed_to_loss_color = {
+        1: "#d65f5f",
+        2: "#ee854a",
+        3: "#c4533c",
+        5: "#a13e2b",
+        10: "#6b1d10",
+    }
+    seed_to_win_color = {
+        1: "#6acc64",
+        2: "#4daf94",
+        3: "#3a8f6a",
+        5: "#2b6b54",
+        10: "#16432f",
+    }
+
+    for s in _SURVIVAL_SEEDS:
+        loss_curve, loss_n = _survival_curve(loss_lens, s, max_k)
+        if loss_n > 0:
+            ax2.plot(
+                ks,
+                loss_curve,
+                color=seed_to_loss_color[s],
+                linewidth=1.8,
+                linestyle="-",
+                marker="o",
+                markersize=3.5,
+                label=f"Loss s={s}  (n={loss_n})",
+            )
+        win_curve, win_n = _survival_curve(win_lens, s, max_k)
+        if win_n > 0:
+            ax2.plot(
+                ks,
+                win_curve,
+                color=seed_to_win_color[s],
+                linewidth=1.8,
+                linestyle=(0, (2, 2)),
+                marker="s",
+                markersize=3.5,
+                label=f"Win  s={s}  (n={win_n})",
+            )
+
+    ax2.set_xlabel("Additional games of the same outcome (k)")
+    ax2.set_ylabel("P(streak still alive after k more)")
+    ax2.set_xticks(list(ks))
+    ax2.set_ylim(0, 1.05)
+    ax2.set_title(_title("Streak survival — wins vs losses", player))
     _subtitle(
-        ax_r,
-        "Probability the losing streak continues. Below the dashed line = better than independent; above = worse (tilt).",
+        ax2,
+        "Above the dashed line = the streak persists more than chance (loss → tilt, win → momentum).",
     )
-    if drawn_any:
-        ax_r.legend(loc="upper right")
-    _polish_ax(ax_r)
+    ax2.legend(loc="upper right", fontsize=8, ncol=2)
+    _polish_ax(ax2)
 
     fig.tight_layout()
     return fig

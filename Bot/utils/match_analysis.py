@@ -1214,6 +1214,39 @@ def plot_champion_picks(
 
     max_abs = max(8.0, float(picks["delta_pp"].abs().max()) + 6.0)
     ax.set_xlim(-max_abs * 1.15, max_abs * 1.15)
+
+    # Per-player callout — highlight the top confident "play this more" champ.
+    # Skipped in aggregate mode (no single player to advise) and when no
+    # confident-positive pick exists.
+    if not _is_aggregate(player):
+        top_winners = picks[picks["confident"] & (picks["delta_pp"] > 0)]
+        if not top_winners.empty:
+            top_row = top_winners.iloc[-1]
+            top_idx = list(picks.index).index(top_row.name)
+            ax.annotate(
+                "Play this more — confident lift",
+                xy=(top_row["delta_pp"], top_idx),
+                xytext=(
+                    top_row["delta_pp"] + 4,
+                    top_idx - 0.8 if top_idx > 1 else top_idx + 0.8,
+                ),
+                fontsize=9,
+                color=PALETTE["win"],
+                arrowprops={
+                    "arrowstyle": "->",
+                    "color": PALETTE["win"],
+                    "alpha": 0.7,
+                    "lw": 1.2,
+                },
+                bbox={
+                    "facecolor": "white",
+                    "alpha": 0.9,
+                    "edgecolor": PALETTE["win"],
+                    "linewidth": 0.9,
+                    "pad": 4,
+                },
+            )
+
     fig.tight_layout()
     return fig
 
@@ -1235,7 +1268,7 @@ def plot_player_comparison(
     them inside the group context.
     """
     metrics = [
-        "Overall WR",
+        "Overall WR (shrunk)",
         "Avg KDA",
         "Prime-hr WR (19-23)",
         "Weekend WR",
@@ -1266,13 +1299,21 @@ def plot_player_comparison(
     else:
         lp_grouped = pd.DataFrame(columns=["lp_total", "lp_n"])
 
+    # Group baseline anchors the Beta prior on every player's WR so small
+    # samples (e.g. vyce1 ≈10 games) don't produce wild z-scores in the
+    # column heatmap. prior_strength=30 ≈ half a typical career sample.
+    group_baseline = float(df["win"].mean())
+
     rows = []
     for person in people:
         sub = df[df["person"] == person]
         n_games = len(sub)
 
-        # Overall WR — gate to NaN only if (somehow) below min_subset.
-        wr_overall = float(sub["win"].mean()) if n_games >= min_subset else np.nan
+        # Overall WR — Bayesian-shrunk toward the group baseline so a
+        # 10-game outlier doesn't dominate the column z-score.
+        wr_overall = bayesian_shrunk_wr(
+            int(sub["win"].sum()), n_games, group_baseline, prior_strength=30
+        )
 
         # Avg KDA — same gate.
         avg_kda = float(sub["kda"].mean()) if n_games >= min_subset else np.nan
@@ -1867,6 +1908,33 @@ def plot_streak_recovery(df: pd.DataFrame, player: str | None = None) -> plt.Fig
     ax.set_ylim(0, 1.1)
     _baseline(ax)
     _annotate_bars(ax, list(xs), g["winrate"].fillna(0), pd.Series(pooled_games))
+
+    # Callout pointing at the rightmost (most loss-tilted) bucket — corroborated
+    # finding from iter 22/24/26: bootstrap CI on s≥5 loss survival excludes 0.5.
+    last_loss_idx = len(g) - 1
+    last_loss_wr = g["winrate"].iloc[last_loss_idx]
+    if not pd.isna(last_loss_wr):
+        ax.annotate(
+            "Stop queueing here —\nmean reversion proven\n(CI 30–49%)",
+            xy=(last_loss_idx, last_loss_wr),
+            xytext=(last_loss_idx - 1.5, 0.85),
+            ha="center",
+            fontsize=9,
+            color=PALETTE["loss"],
+            bbox={
+                "facecolor": "white",
+                "alpha": 0.9,
+                "edgecolor": PALETTE["loss"],
+                "linewidth": 1.2,
+                "pad": 4,
+            },
+            arrowprops={
+                "arrowstyle": "->",
+                "color": PALETTE["loss"],
+                "alpha": 0.7,
+                "lw": 1.2,
+            },
+        )
 
     _polish_ax(ax)
 
@@ -3797,6 +3865,27 @@ def plot_logistic_coefficients(
 
     max_abs = max(0.4, float(coefs_df["coef"].abs().max() + 1.96 * coefs_df["se"].max()) * 1.05)
     ax.set_xlim(-max_abs, max_abs)
+
+    # OOS calibration (iter 26) showed pre-game logit has zero predictive
+    # signal. Surface that directly here so the chart can't be over-read.
+    ax.text(
+        0.98,
+        0.04,
+        "Out-of-sample AUC = 0.498 (random).\nPre-game factors don't predict wins.\n→ For real signal see ✨ Picks and 💰 LP.",
+        transform=ax.transAxes,
+        ha="right",
+        va="bottom",
+        fontsize=8.5,
+        color=PALETTE["text"],
+        bbox={
+            "facecolor": "white",
+            "alpha": 0.92,
+            "edgecolor": PALETTE["spine"],
+            "linewidth": 0.9,
+            "pad": 6,
+        },
+    )
+
     fig.tight_layout()
     return fig
 

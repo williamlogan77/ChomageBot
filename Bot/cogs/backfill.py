@@ -264,12 +264,16 @@ class Backfill(commands.Cog):
             if not ids:
                 break
 
-            # Filter out match IDs we already have stored.
+            # Filter out match IDs we already have stored FOR THIS puuid.
+            # Filtering by match_id alone would skip games where this puuid
+            # hasn't been backfilled yet but another tracked friend already
+            # has — exactly the "duo's second row" case we need to pick up.
             async with sqa.connect(self.bot.db_path) as db:
                 placeholders = ",".join("?" * len(ids))
                 existing_rows = await db.execute_fetchall(
-                    f"SELECT match_id FROM match_stats WHERE match_id IN ({placeholders})",
-                    tuple(ids),
+                    f"SELECT match_id FROM match_stats "
+                    f"WHERE puuid = ? AND match_id IN ({placeholders})",
+                    (puuid, *ids),
                 )
                 existing = {row[0] for row in existing_rows}
 

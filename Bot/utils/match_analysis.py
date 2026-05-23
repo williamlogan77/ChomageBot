@@ -128,9 +128,56 @@ def _polish_ax(ax) -> None:
             ax.spines[spine].set_color(PALETTE["spine"])
 
 
-def _baseline(ax, y: float = 0.5) -> None:
-    """A subtle horizontal 'break-even' reference at y."""
-    ax.axhline(y, color=PALETTE["muted"], linewidth=0.8, linestyle=(0, (4, 4)), alpha=0.55)
+def _baseline(ax, y: float = 0.5, label: str | None = None) -> None:
+    """A subtle horizontal 'break-even' reference at y. With ``label``
+    the line is added to the axes legend so readers know what it means."""
+    ax.axhline(
+        y,
+        color=PALETTE["muted"],
+        linewidth=0.8,
+        linestyle=(0, (4, 4)),
+        alpha=0.55,
+        label=label,
+    )
+
+
+def _subtitle(ax, text: str) -> None:
+    """One-line italic caption immediately under the (already-set) title.
+
+    Tells the reader what to look at — every plot should call this once
+    so an audience that's never seen the chart can read it cold.
+    """
+    # Push the bold title up a touch so the caption has room.
+    title = ax.get_title()
+    if title:
+        ax.set_title(title, pad=22)
+    ax.text(
+        0.0,
+        1.01,
+        text,
+        transform=ax.transAxes,
+        ha="left",
+        va="bottom",
+        fontsize=10,
+        color=PALETTE["muted"],
+        style="italic",
+    )
+
+
+def wilson_ci(wins: int, games: int, z: float = 1.96) -> tuple[float, float]:
+    """Wilson score 95% confidence interval for a binomial proportion.
+
+    More accurate than the normal approximation for small n — and the
+    "70% on 3 games" trap on champion winrate charts is exactly that
+    small-n problem.
+    """
+    if games <= 0:
+        return (0.0, 0.0)
+    p = wins / games
+    denom = 1 + z * z / games
+    centre = p + z * z / (2 * games)
+    margin = z * np.sqrt(p * (1 - p) / games + z * z / (4 * games * games))
+    return (max(0.0, (centre - margin) / denom), min(1.0, (centre + margin) / denom))
 
 
 def load_matches(db_path: Path = DEFAULT_DB) -> pd.DataFrame:
@@ -316,6 +363,10 @@ def plot_kda_vs_outcome(df: pd.DataFrame, player: str | None = None) -> plt.Figu
         patch.set_edgecolor(colour)
     axes[0].set_ylabel("KDA  (K + A) / max(D, 1)")
     axes[0].set_title(_title("KDA distribution by outcome", player))
+    _subtitle(
+        axes[0],
+        f"Win median {wins.median():.1f} vs loss median {losses.median():.1f} — the gap is the carry effect.",
+    )
     _polish_ax(axes[0])
 
     d2 = d.copy()
@@ -332,6 +383,9 @@ def plot_kda_vs_outcome(df: pd.DataFrame, player: str | None = None) -> plt.Figu
     axes[1].set_ylabel("Win rate")
     axes[1].set_xlabel("KDA bucket")
     axes[1].set_title(_title("Win rate by KDA", player))
+    _subtitle(
+        axes[1], "Higher buckets should win more — slope = how much carrying actually matters."
+    )
     _baseline(axes[1])
     _annotate_bars(axes[1], range(len(g)), g["winrate"], g["games"])
     _polish_ax(axes[1])
@@ -361,6 +415,10 @@ def plot_duration_vs_outcome(df: pd.DataFrame, player: str | None = None) -> plt
     axes[0].set_xlabel("Game duration (min)")
     axes[0].set_ylabel("Win rate")
     axes[0].set_title(_title("Win rate by game duration", player))
+    _subtitle(
+        axes[0],
+        "Where do you actually win? Short = stomps in your favour, long = scaling wins.",
+    )
     _baseline(axes[0])
     _annotate_bars(axes[0], range(len(g)), g["winrate"], g["games"])
     _polish_ax(axes[0])
@@ -382,6 +440,7 @@ def plot_duration_vs_outcome(df: pd.DataFrame, player: str | None = None) -> plt
     axes[1].set_xlabel("Game duration (min)")
     axes[1].set_ylabel("Games")
     axes[1].set_title(_title("Game count by duration", player))
+    _subtitle(axes[1], "How many games at each length, split win (green) vs loss (red).")
     axes[1].legend(loc="upper right")
     _polish_ax(axes[1])
 
@@ -407,7 +466,7 @@ def plot_champion_winrate(
     winners = g.sort_values("mean", ascending=False).head(top).sort_values("mean", ascending=True)
     losers = g.sort_values("mean", ascending=True).head(top).sort_values("mean", ascending=False)
 
-    fig_h = max(4.2, max(len(winners), len(losers)) * 0.38)
+    fig_h = max(4.2, max(len(winners), len(losers)) * 0.42)
     fig, axes = plt.subplots(1, 2, figsize=(13, fig_h))
 
     for ax, frame, colour, title in (
@@ -415,18 +474,45 @@ def plot_champion_winrate(
         (axes[1], losers, PALETTE["loss"], "Losers — lowest win rate"),
     ):
         y = np.arange(len(frame))
-        ax.barh(y, frame["mean"], color=colour, height=0.7)
+        # Wilson 95% CI for each champion's winrate — the whiskers tell
+        # you when "70% on 3 games" is too thin to trust.
+        cis = [
+            wilson_ci(int(round(p * n)), int(n))
+            for p, n in zip(frame["mean"], frame["count"], strict=False)
+        ]
+        lo = np.array([c[0] for c in cis])
+        hi = np.array([c[1] for c in cis])
+        means = frame["mean"].to_numpy()
+        # Highlight bars whose CI doesn't overlap 50% — those are the
+        # statistically reliable "real" winners/losers.
+        reliable = (lo > 0.5) if colour == PALETTE["win"] else (hi < 0.5)
+        bar_colours = [colour if r else PALETTE["neutral"] for r in reliable]
+        ax.barh(y, means, color=bar_colours, height=0.7)
+        ax.errorbar(
+            means,
+            y,
+            xerr=[means - lo, hi - means],
+            fmt="none",
+            ecolor=PALETTE["text"],
+            capsize=3,
+            linewidth=1.0,
+            alpha=0.7,
+        )
         ax.axvline(0.5, color=PALETTE["muted"], linewidth=0.8, linestyle=(0, (4, 4)), alpha=0.55)
         ax.set_yticks(y)
         ax.set_yticklabels(frame.index, color=PALETTE["text"])
         ax.set_xlim(0, 1)
         ax.set_xlabel("Win rate")
         ax.set_title(_title(f"{title} (≥{min_games} games)", player))
+        _subtitle(
+            ax,
+            "Whiskers = Wilson 95% CI; faded bars are too thin to call statistically.",
+        )
         _polish_ax(ax)
-        for yi, (wr, n) in enumerate(zip(frame["mean"], frame["count"], strict=False)):
+        for yi, (wr, n) in enumerate(zip(means, frame["count"], strict=False)):
             ax.annotate(
                 f"{wr:.0%}  n={int(n)}",
-                xy=(wr, yi),
+                xy=(min(wr + 0.02, 0.98), yi),
                 xytext=(6, 0),
                 textcoords="offset points",
                 va="center",
@@ -470,6 +556,7 @@ def plot_champion_learning_curve(
     ax.set_xlabel("Nth game on champion")
     ax.set_ylabel(f"Rolling win rate (window={window})")
     ax.set_title(_title(f"Learning curves — top {top} champions", player))
+    _subtitle(ax, "Up = grinding the champ pays off. Flat = practice isn't improving you.")
     ax.set_ylim(0, 1.05)
     ax.legend(loc="lower right", fontsize=9, ncol=1)
     _polish_ax(ax)
@@ -489,6 +576,7 @@ def _temporal_dual_axis(
     x_labels,
     xlabel: str,
     title: str,
+    subtitle: str | None = None,
 ) -> plt.Figure:
     """Shared layout for hour-of-day and day-of-week charts. Two axes:
     grey volume bars in front, coloured win-rate line in back."""
@@ -520,7 +608,19 @@ def _temporal_dual_axis(
     ax_wr.spines["top"].set_visible(False)
 
     fig.suptitle(title)
-    fig.tight_layout()
+    if subtitle:
+        # Tuck the italic caption under the suptitle.
+        fig.text(
+            0.5,
+            0.92,
+            subtitle,
+            ha="center",
+            va="top",
+            fontsize=10,
+            color=PALETTE["muted"],
+            style="italic",
+        )
+    fig.tight_layout(rect=(0, 0, 1, 0.93 if subtitle else 1.0))
     return fig
 
 
@@ -539,6 +639,7 @@ def plot_hour_of_day(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
         x_labels=[f"{h:02d}" for h in range(24)],
         xlabel="Hour of day (local)",
         title=_title("Hour of day — volume + win rate", player),
+        subtitle="Grey bars = games played at that hour. Blue line = win rate at that hour.",
     )
 
 
@@ -557,6 +658,7 @@ def plot_day_of_week(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
         x_labels=DOW_LABELS,
         xlabel="Day of week",
         title=_title("Day of week — volume + win rate", player),
+        subtitle="Grey bars = games per day. Blue line = win rate that day.",
     )
 
 
@@ -586,6 +688,7 @@ def plot_hour_dow_heatmap(df: pd.DataFrame, player: str | None = None) -> plt.Fi
     ax.set_xlabel("Hour of day")
     ax.set_ylabel("Day of week")
     ax.set_title(_title("Win rate heatmap (cells with <3 games dimmed)", player))
+    _subtitle(ax, "Greener = better at that hour/day. Spot patterns 1-D charts can't show.")
     ax.grid(False)
     cbar = fig.colorbar(im, ax=ax, label="Win rate", shrink=0.8, pad=0.02)
     cbar.outline.set_visible(False)
@@ -617,6 +720,10 @@ def plot_streak_recovery(df: pd.DataFrame, player: str | None = None) -> plt.Fig
     ax.set_xlabel("Loss streak entering this game")
     ax.set_ylabel("Win rate of this game")
     ax.set_title(_title("Tilt check — win rate vs entering loss streak", player))
+    _subtitle(
+        ax,
+        "Downward step from left to right = tilt is real. Flat = each game is independent.",
+    )
     ax.set_ylim(0, 1.1)
     _baseline(ax)
     _annotate_bars(ax, range(len(g)), g["winrate"], g["games"])
@@ -640,6 +747,10 @@ def plot_time_since_prev(df: pd.DataFrame, player: str | None = None) -> plt.Fig
     ax.set_xlabel("Time since previous game")
     ax.set_ylabel("Win rate")
     ax.set_title(_title("Win rate vs gap since previous game", player))
+    _subtitle(
+        ax,
+        "Back-to-back queueing vs fresh session — does either help or hurt?",
+    )
     ax.set_ylim(0, 1.1)
     _baseline(ax)
     _annotate_bars(ax, range(len(g)), g["winrate"], g["games"])
@@ -700,6 +811,10 @@ def plot_cumulative_winrate(df: pd.DataFrame, player: str | None = None) -> plt.
     ax.set_xlabel("Date")
     ax.set_ylabel("Win rate")
     ax.set_title(_title("Win rate over time", player))
+    _subtitle(
+        ax,
+        "Green fill = above 50% form, red fill = below. Black line = lifetime average.",
+    )
     ax.legend(loc="lower right")
     _polish_ax(ax)
     fig.tight_layout()
@@ -813,6 +928,10 @@ def plot_player_progression(
     ax.set_xlabel("Percent of career (oldest → newest)")
     ax.set_ylabel(f"Rolling win rate (window={window})")
     ax.set_title(_title("Lifetime progression — getting better or worse?", player))
+    _subtitle(
+        ax,
+        "X is % of career so short and long histories share the axis. Slope in legend = direction.",
+    )
     _polish_ax(ax)
     fig.tight_layout()
     return fig
@@ -869,6 +988,7 @@ def plot_duo_winrate(
         ax.set_yticklabels(labels)
         ax.set_xlabel("Games played together (same team)")
         ax.set_title(_title(f"Top duos (≥{min_games} same-team games together)", player))
+        _subtitle(ax, "Bar length = games together. Green/red = winrate above/below 50%.")
         _polish_ax(ax)
         for yi, (g, wr) in enumerate(zip(d["games"], d["winrate"], strict=False)):
             ax.annotate(
@@ -913,6 +1033,10 @@ def plot_duo_winrate(
     ax.set_xlabel("Win rate when on the same team")
     ax.set_xlim(0, 1)
     ax.set_title(_title(f"Duo win rate by partner (≥{min_games} games each)", player))
+    _subtitle(
+        ax,
+        "Dashed line = solo baseline. Green = partner lifts you above it; red = drags below.",
+    )
     ax.legend(loc="lower right")
     _polish_ax(ax)
     for yi, (wr, n) in enumerate(zip(partner_rows["winrate"], partner_rows["games"], strict=False)):
@@ -979,8 +1103,242 @@ def plot_activity_over_time(df: pd.DataFrame, player: str | None = None) -> plt.
     ax_wr.spines["top"].set_visible(False)
 
     fig.suptitle(_title("Activity over time — games / month + win rate", player))
+    fig.text(
+        0.5,
+        0.92,
+        "Grey bars = games that month. Blue line = winrate that month (months with <5 games skipped).",
+        ha="center",
+        va="top",
+        fontsize=10,
+        color=PALETTE["muted"],
+        style="italic",
+    )
     fig.autofmt_xdate()
-    fig.tight_layout()
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    return fig
+
+
+def plot_stats_summary(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Text-only "card" view of the headline numbers for the selected person
+    (or aggregate). Designed as the at-a-glance landing page — every other
+    chart is a deeper view of one of these facts.
+
+    Layout: 3×3 grid of labelled values, colour-coded by direction
+    (green = above baseline, red = below) so the eye picks up signal
+    without reading every number.
+    """
+    d = _filter_player(df, player)
+    if d.empty:
+        return _empty_figure("No games to summarise")
+
+    sorted_d = d.sort_values("game_start")
+    games = len(d)
+    wins = int(d["win"].sum())
+    wr = wins / games
+    wr_lo, wr_hi = wilson_ci(wins, games)
+    avg_kda = d["kda"].mean()
+    avg_kd = d["kd"].mean()
+    avg_dur = d["duration_min"].mean()
+
+    # Most-played champion (volume matters more than WR for "headline").
+    champ_stats = d.groupby("champion")["win"].agg(["count", "mean"])
+    most_played = champ_stats.sort_values("count", ascending=False).iloc[0]
+    mp_name = most_played.name
+    mp_n = int(most_played["count"])
+    mp_wr = float(most_played["mean"])
+
+    # Best day-of-week and worst hour-of-day among well-sampled buckets.
+    dow_stats = d.groupby("dow")["win"].agg(["count", "mean"])
+    reliable_dow = dow_stats[dow_stats["count"] >= 10]
+    best_dow_idx = reliable_dow["mean"].idxmax() if not reliable_dow.empty else None
+    hour_stats = d.groupby("hour")["win"].agg(["count", "mean"])
+    reliable_hour = hour_stats[hour_stats["count"] >= 10]
+    worst_hour_idx = reliable_hour["mean"].idxmin() if not reliable_hour.empty else None
+
+    # Current streak (most recent same-outcome run).
+    outcomes = sorted_d["win"].tolist()
+    if outcomes:
+        last = outcomes[-1]
+        streak = 0
+        for o in reversed(outcomes):
+            if o == last:
+                streak += 1
+            else:
+                break
+        streak_kind = "W" if last == 1 else "L"
+    else:
+        streak = 0
+        streak_kind = "—"
+
+    # Career-trend pp via the same approach as plot_player_progression.
+    trend_pp_career: float | None = None
+    if games >= 30:
+        roll = sorted_d["win"].rolling(window=30, min_periods=10).mean().reset_index(drop=True)
+        pct = pd.Series(np.linspace(0, 100, games))
+        mask = roll.notna()
+        if mask.sum() >= 5:
+            slope_per_pct = float(np.polyfit(pct[mask], roll[mask], 1)[0])
+            trend_pp_career = slope_per_pct * 100  # WR pp across the entire career
+
+    # Top duo (aggregate = highest volume; per-person = best partner by WR).
+    duos = compute_duos(df, min_games=5)
+    duo_label = "Most-played duo" if player is None else "Best duo partner"
+    duo_value = "—"
+    duo_sublabel = "needs ≥5 same-team games"
+    duo_colour = PALETTE["text"]
+    if not duos.empty:
+        if player is None:
+            row = duos.sort_values("games", ascending=False).iloc[0]
+            duo_value = f"{row['a']} + {row['b']}"
+            duo_sublabel = f"{int(row['games'])} games · {row['winrate']:.0%} WR"
+        else:
+            partners = duos[(duos["a"] == player) | (duos["b"] == player)].copy()
+            if not partners.empty:
+                partners["partner"] = partners.apply(
+                    lambda r: r["b"] if r["a"] == player else r["a"], axis=1
+                )
+                row = partners.sort_values("winrate", ascending=False).iloc[0]
+                duo_value = str(row["partner"])
+                lift = row["winrate"] - wr
+                duo_sublabel = (
+                    f"{row['winrate']:.0%} WR over {int(row['games'])} games  ·  "
+                    f"{lift * 100:+.1f}pp vs solo"
+                )
+                duo_colour = PALETTE["win"] if lift > 0 else PALETTE["loss"]
+
+    # --- Render ---
+    fig = plt.figure(figsize=(13, 6.6))
+    ax = fig.add_subplot(111)
+    ax.set_axis_off()
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+
+    title_who = player or "all players"
+    fig.suptitle(f"Stats summary — {title_who}", fontsize=18, fontweight="bold", y=0.97)
+    fig.text(
+        0.5,
+        0.91,
+        f"Headline numbers across {games:,} tracked games. Greener = above 50% / above baseline.",
+        ha="center",
+        fontsize=10,
+        color=PALETTE["muted"],
+        style="italic",
+    )
+
+    def card(
+        x: float, y: float, label: str, value: str, value_color=PALETTE["text"], sublabel: str = ""
+    ) -> None:
+        ax.text(
+            x,
+            y,
+            label.upper(),
+            ha="left",
+            va="bottom",
+            fontsize=10,
+            color=PALETTE["muted"],
+            fontweight="bold",
+        )
+        ax.text(
+            x,
+            y - 0.07,
+            value,
+            ha="left",
+            va="top",
+            fontsize=16,
+            color=value_color,
+            fontweight="bold",
+        )
+        if sublabel:
+            ax.text(x, y - 0.16, sublabel, ha="left", va="top", fontsize=9, color=PALETTE["muted"])
+
+    col_x = (0.04, 0.37, 0.70)
+    row_y = (0.78, 0.50, 0.22)
+
+    # Row 1: volume + win rate + KDA
+    card(
+        col_x[0],
+        row_y[0],
+        "Games",
+        f"{games:,}",
+        sublabel=f"{wins} W · {games - wins} L  ·  avg {avg_dur:.1f} min",
+    )
+    wr_colour = PALETTE["win"] if wr > 0.5 else (PALETTE["loss"] if wr < 0.5 else PALETTE["text"])
+    card(
+        col_x[1],
+        row_y[0],
+        "Win rate",
+        f"{wr:.1%}",
+        value_color=wr_colour,
+        sublabel=f"95% CI {wr_lo:.0%}–{wr_hi:.0%}",
+    )
+    card(col_x[2], row_y[0], "Avg KDA", f"{avg_kda:.2f}", sublabel=f"K/D ratio {avg_kd:.2f}")
+
+    # Row 2: champion + best day + worst hour
+    champ_colour = PALETTE["win"] if mp_wr >= 0.5 else PALETTE["loss"]
+    card(
+        col_x[0],
+        row_y[1],
+        "Most-played champion",
+        mp_name,
+        value_color=champ_colour,
+        sublabel=f"{mp_n} games · {mp_wr:.0%} WR",
+    )
+    if best_dow_idx is not None:
+        wr_d = float(reliable_dow.loc[best_dow_idx, "mean"])
+        card(
+            col_x[1],
+            row_y[1],
+            "Best day",
+            DOW_LABELS[best_dow_idx],
+            value_color=PALETTE["win"],
+            sublabel=f"{wr_d:.0%} WR  ·  {(wr_d - wr) * 100:+.1f}pp vs baseline",
+        )
+    else:
+        card(col_x[1], row_y[1], "Best day", "—", sublabel="not enough data")
+    if worst_hour_idx is not None:
+        wr_h = float(reliable_hour.loc[worst_hour_idx, "mean"])
+        card(
+            col_x[2],
+            row_y[1],
+            "Worst hour",
+            f"{int(worst_hour_idx):02d}:00",
+            value_color=PALETTE["loss"],
+            sublabel=f"{wr_h:.0%} WR  ·  {(wr_h - wr) * 100:+.1f}pp vs baseline",
+        )
+    else:
+        card(col_x[2], row_y[1], "Worst hour", "—", sublabel="not enough data")
+
+    # Row 3: streak + trend + duo
+    streak_colour = (
+        PALETTE["win"]
+        if streak_kind == "W"
+        else PALETTE["loss"]
+        if streak_kind == "L"
+        else PALETTE["text"]
+    )
+    card(
+        col_x[0],
+        row_y[2],
+        "Current streak",
+        f"{streak}{streak_kind}",
+        value_color=streak_colour,
+        sublabel="most recent run of same-outcome games",
+    )
+    if trend_pp_career is not None:
+        direction = "improving" if trend_pp_career > 0 else "declining"
+        trend_colour = PALETTE["win"] if trend_pp_career > 0 else PALETTE["loss"]
+        card(
+            col_x[1],
+            row_y[2],
+            "Career trend",
+            f"{trend_pp_career * 100:+.1f}pp",
+            value_color=trend_colour,
+            sublabel=f"across career  ·  {direction}",
+        )
+    else:
+        card(col_x[1], row_y[2], "Career trend", "—", sublabel="needs ≥30 games")
+    card(col_x[2], row_y[2], duo_label, duo_value, value_color=duo_colour, sublabel=duo_sublabel)
+
     return fig
 
 
@@ -1009,17 +1367,18 @@ def summary_table(df: pd.DataFrame) -> pd.DataFrame:
 #: All aggregate plot functions, in the order the runner script + notebook
 #: should display them. Each takes (df, player=None) -> Figure.
 ALL_PLOTS = [
-    ("01_activity_over_time", plot_activity_over_time),
-    ("02_cumulative_winrate", plot_cumulative_winrate),
-    ("03_player_progression", plot_player_progression),
-    ("04_kda_vs_outcome", plot_kda_vs_outcome),
-    ("05_duration_vs_outcome", plot_duration_vs_outcome),
-    ("06_champion_winrate", plot_champion_winrate),
-    ("07_champion_learning_curve", plot_champion_learning_curve),
-    ("08_hour_of_day", plot_hour_of_day),
-    ("09_day_of_week", plot_day_of_week),
-    ("10_hour_dow_heatmap", plot_hour_dow_heatmap),
-    ("11_streak_recovery", plot_streak_recovery),
-    ("12_time_since_prev", plot_time_since_prev),
-    ("13_duo_winrate", plot_duo_winrate),
+    ("01_stats_summary", plot_stats_summary),
+    ("02_activity_over_time", plot_activity_over_time),
+    ("03_cumulative_winrate", plot_cumulative_winrate),
+    ("04_player_progression", plot_player_progression),
+    ("05_kda_vs_outcome", plot_kda_vs_outcome),
+    ("06_duration_vs_outcome", plot_duration_vs_outcome),
+    ("07_champion_winrate", plot_champion_winrate),
+    ("08_champion_learning_curve", plot_champion_learning_curve),
+    ("09_hour_of_day", plot_hour_of_day),
+    ("10_day_of_week", plot_day_of_week),
+    ("11_hour_dow_heatmap", plot_hour_dow_heatmap),
+    ("12_streak_recovery", plot_streak_recovery),
+    ("13_time_since_prev", plot_time_since_prev),
+    ("14_duo_winrate", plot_duo_winrate),
 ]

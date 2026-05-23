@@ -88,7 +88,12 @@ CHART_DEFS = [
     ("Tilt", "😤", analysis.plot_streak_recovery, "Win rate vs entering loss streak"),
     ("Gap", "⏰", analysis.plot_time_since_prev, "Win rate vs time since previous game"),
     ("Sessions", "🎮", analysis.plot_session_analysis, "Session-grouping analysis"),
-    ("Duos", "🤝", analysis.plot_duo_winrate, "Same-team duo analysis"),
+    (
+        "Duos / H2H",
+        "🤝",
+        analysis.plot_duo_winrate,
+        "Duos (same team) + head-to-head (opposite teams)",
+    ),
 ]
 
 

@@ -47,6 +47,23 @@ SESSION_GAP_MIN = 60
 SESSION_LEN_BINS = [1, 2, 4, 6, 10, 16, 9999]
 SESSION_LEN_LABELS = ["1 game", "2-3", "4-5", "6-9", "10-15", "16+"]
 
+# Maximum gap between consecutive league_history snapshots (per person)
+# for which we trust the diff as a single ranked game. The bot's
+# post_ranks loop normally polls every 120s, so back-to-back snapshots
+# are minutes apart; anything beyond 2 hours straddles a bot outage
+# (see the late-2024 -> early-2026 gap caused by the silent task-loop
+# freeze fixed in ecfff72) and the snapshot pair would otherwise
+# fabricate a single "match" worth hundreds of LP.
+MAX_INTER_SNAPSHOT_MIN = 120
+
+# Threshold (in hours) for breaking the rank-trajectory line and
+# shading the gap region. league_history only inserts a row on LP
+# change, so quiet weeks would otherwise read as "gaps". Set high
+# enough that normal player inactivity (vacations, exam weeks, taking
+# a break from ranked) does NOT flag — only true bot outages do.
+# 30 days isolates the 2024-11 -> 2026-01 task-loop freeze cleanly.
+RANK_GAP_HOURS = 24 * 30
+
 
 # --- Visual style -----------------------------------------------------------
 
@@ -636,12 +653,20 @@ def compute_lp_events(db_path: Path = DEFAULT_DB) -> pd.DataFrame:
     ranks["prev_score"] = grp["rank_score"].shift(1)
     ranks["prev_wins"] = grp["wins"].shift(1)
     ranks["prev_losses"] = grp["losses"].shift(1)
+    ranks["prev_timestamp"] = grp["timestamp"].shift(1)
     ranks["dw"] = ranks["wins"] - ranks["prev_wins"]
     ranks["dl"] = ranks["losses"] - ranks["prev_losses"]
     ranks["delta_score"] = ranks["rank_score"] - ranks["prev_score"]
+    ranks["inter_snapshot_min"] = (
+        ranks["timestamp"] - ranks["prev_timestamp"]
+    ).dt.total_seconds() / 60
     # Single-game events only. dw or dl can occasionally be NaN on the
     # first row per person; drop those.
-    one_game = ranks.dropna(subset=["dw", "dl", "delta_score"])
+    one_game = ranks.dropna(subset=["dw", "dl", "delta_score", "inter_snapshot_min"])
+    # Drop snapshot pairs that straddle a bot outage: a >2h gap means
+    # we missed N intervening games and the LP delta is a sum, not a
+    # per-game value.
+    one_game = one_game[one_game["inter_snapshot_min"] <= MAX_INTER_SNAPSHOT_MIN]
     one_game = one_game[(one_game["dw"] + one_game["dl"]) == 1]
     one_game = one_game.copy()
     one_game["outcome"] = np.where(one_game["dw"] == 1, "win", "loss")
@@ -2148,6 +2173,24 @@ def plot_lp_economics(df: pd.DataFrame, player: str | None = None) -> plt.Figure
     return fig
 
 
+def _find_global_gaps(
+    ranks: pd.DataFrame, gap_hours: float
+) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
+    """Find time windows where no person in ``ranks`` had a poll.
+
+    Sorts every snapshot by timestamp regardless of person, and returns
+    the (prev_ts, ts) pairs whose gap exceeds the threshold. Those
+    windows mark stretches where the polling loop was silent for
+    everybody — i.e. bot outages rather than per-player inactivity.
+    """
+    if ranks.empty:
+        return []
+    ts = ranks["timestamp"].sort_values().reset_index(drop=True)
+    gap_h = ts.diff().dt.total_seconds() / 3600
+    gap_idx = np.where(gap_h.to_numpy() > gap_hours)[0]
+    return [(ts.iloc[i - 1], ts.iloc[i]) for i in gap_idx]
+
+
 def plot_rank_trajectory(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
     """Rank score over time, drawn from league_history.
 
@@ -2177,25 +2220,45 @@ def plot_rank_trajectory(df: pd.DataFrame, player: str | None = None) -> plt.Fig
 
         fig, ax = plt.subplots(figsize=(13, 5.4))
         for idx, name in enumerate(top_people):
-            sub = ranks[ranks["person"] == name].sort_values("timestamp")
+            sub = ranks[ranks["person"] == name].sort_values("timestamp").reset_index(drop=True)
             if sub.empty:
                 continue
+            # Insert NaN at the start of any RANK_GAP_HOURS-wide gap
+            # so matplotlib breaks the line there instead of drawing a
+            # fake straight line across a no-data window.
+            inter_h = sub["timestamp"].diff().dt.total_seconds() / 3600
+            plot_rank = sub["rank_score"].where(~(inter_h > RANK_GAP_HOURS), np.nan)
             ax.plot(
                 sub["timestamp"],
-                sub["rank_score"],
+                plot_rank,
                 color=SERIES_CYCLE[idx % len(SERIES_CYCLE)],
                 linewidth=1.6,
                 alpha=0.85,
                 label=name,
             )
+
+        # Shade GLOBAL outage windows: intervals where every displayed
+        # person had no poll. Use the already-filtered top-6 ranks so we
+        # only shade where the visible series all went silent.
+        global_gaps = _find_global_gaps(ranks, RANK_GAP_HOURS)
+        for start, end in global_gaps:
+            ax.axvspan(start, end, color=PALETTE["neutral"], alpha=0.15, zorder=0)
+
         _rank_axis(ax)
         ax.set_xlabel("Date")
         ax.set_ylabel("Rank")
         ax.set_title(_title("Rank trajectory — top 6 most-active people", player))
+        gap_note = (
+            f"  Grey bands = bot-outage windows (no polls from anyone); "
+            f"{len(global_gaps)} gap(s) detected."
+            if global_gaps
+            else ""
+        )
         _subtitle(
             ax,
             "Higher = better rank. Each line is one Discord person; "
-            f"{len(ranks):,} LP snapshots across {ranks['person'].nunique()} people.",
+            f"{len(ranks):,} LP snapshots across {ranks['person'].nunique()} people."
+            f"{gap_note}",
         )
         ax.legend(loc="lower left", ncol=2, fontsize=9)
         _polish_ax(ax)
@@ -2216,13 +2279,28 @@ def plot_rank_trajectory(df: pd.DataFrame, player: str | None = None) -> plt.Fig
         return _empty_figure(f"No rank history for {label}")
 
     fig, ax_rank = plt.subplots(figsize=(13, 5.4))
+    # Break the line across no-poll windows so a 14-month outage no
+    # longer looks like a flat-rank stretch.
+    sub["inter_snapshot_h"] = sub["timestamp"].diff().dt.total_seconds() / 3600
+    plot_rank = sub["rank_score"].where(~(sub["inter_snapshot_h"] > RANK_GAP_HOURS), np.nan)
     ax_rank.plot(
         sub["timestamp"],
-        sub["rank_score"],
+        plot_rank,
         color=PALETTE["primary"],
         linewidth=2.0,
         label="Rank",
     )
+    # Shade each gap so the no-data region is visible behind the
+    # broken line.
+    gap_mask = sub["inter_snapshot_h"] > RANK_GAP_HOURS
+    for i in np.where(gap_mask.to_numpy())[0]:
+        ax_rank.axvspan(
+            sub["timestamp"].iloc[i - 1],
+            sub["timestamp"].iloc[i],
+            color=PALETTE["neutral"],
+            alpha=0.15,
+            zorder=0,
+        )
     _rank_axis(ax_rank)
     ax_rank.set_xlabel("Date")
     ax_rank.set_ylabel("Rank", color=PALETTE["primary"])
@@ -2288,9 +2366,16 @@ def plot_rank_trajectory(df: pd.DataFrame, player: str | None = None) -> plt.Fig
     )
 
     ax_rank.set_title(_title("Rank trajectory + rolling WR", player))
+    gap_count = int(gap_mask.sum())
+    gap_note = (
+        f" Grey bands = no-data periods (bot outage); {gap_count} gap(s) detected."
+        if gap_count
+        else ""
+    )
     _subtitle(
         ax_rank,
-        f"Solid blue = rank ({len(sub):,} LP snapshots). Dashed orange = match-stats rolling-20 WR.",
+        f"Solid blue = rank ({len(sub):,} LP snapshots). Dashed orange = match-stats rolling-20 WR."
+        f"{gap_note}",
     )
     _polish_ax(ax_rank)
     fig.autofmt_xdate()

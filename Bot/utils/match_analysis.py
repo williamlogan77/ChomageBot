@@ -495,6 +495,40 @@ _RANK_TICK_LABELS: list[tuple[float, str]] = [
 ]
 
 
+def compute_lp_events(db_path: Path = DEFAULT_DB) -> pd.DataFrame:
+    """Per-game LP events derived from league_history diffs.
+
+    For each (person, consecutive snapshot pair) where exactly one game
+    fired between them (wins delta + losses delta == 1), we record:
+
+      - outcome:    "win" or "loss"
+      - delta_score: change in Ranker._score (signed)
+      - timestamp:   when the new snapshot was recorded
+
+    Using ``rank_score`` instead of raw LP keeps the math correct across
+    tier crossings: a win at Gold I 95LP → Plat IV 5LP is a positive
+    delta on the continuous scale even though raw LP went from 95 to 5.
+    """
+    ranks = load_rank_history(db_path)
+    if ranks.empty:
+        return pd.DataFrame(columns=["person", "timestamp", "outcome", "delta_score"])
+    ranks = ranks.sort_values(["person", "timestamp"]).reset_index(drop=True)
+    grp = ranks.groupby("person")
+    ranks["prev_score"] = grp["rank_score"].shift(1)
+    ranks["prev_wins"] = grp["wins"].shift(1)
+    ranks["prev_losses"] = grp["losses"].shift(1)
+    ranks["dw"] = ranks["wins"] - ranks["prev_wins"]
+    ranks["dl"] = ranks["losses"] - ranks["prev_losses"]
+    ranks["delta_score"] = ranks["rank_score"] - ranks["prev_score"]
+    # Single-game events only. dw or dl can occasionally be NaN on the
+    # first row per person; drop those.
+    one_game = ranks.dropna(subset=["dw", "dl", "delta_score"])
+    one_game = one_game[(one_game["dw"] + one_game["dl"]) == 1]
+    one_game = one_game.copy()
+    one_game["outcome"] = np.where(one_game["dw"] == 1, "win", "loss")
+    return one_game[["person", "timestamp", "outcome", "delta_score"]].reset_index(drop=True)
+
+
 def people_summary(df: pd.DataFrame) -> pd.DataFrame:
     """One row per Discord person: total games, account count, account names.
 
@@ -1331,6 +1365,184 @@ def plot_session_analysis(df: pd.DataFrame, player: str | None = None) -> plt.Fi
 
 
 # --- 6. Overview -----------------------------------------------------------
+
+
+def plot_lp_economics(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Per-game LP gain-vs-loss imbalance — the climbing-vs-treading-water view.
+
+    A player with avg +22 per win and avg -20 per loss climbs even at
+    50% WR. A player with avg +18 per win and avg -25 per loss can win
+    62% and still lose LP. The MMR system bakes those rates from the
+    skill gap to current rank; this chart reveals it directly.
+
+    Aggregate view: diverging bar per person, left side = avg LP lost
+    per loss (red), right side = avg LP gained per win (green), sorted
+    by the net LP per 100 games. Annotation shows "+W / -L → net/100"
+    so you can read climber vs treading directly.
+
+    Single-person view: histograms of LP gains (green) + LP losses (red,
+    signed negative for natural visual layout). Vertical lines mark
+    each mean. A status box reports the net rate and a plain-English
+    verdict (climbing / treading / falling).
+    """
+    try:
+        events = compute_lp_events(DEFAULT_DB)
+    except Exception as exc:
+        return _empty_figure(f"Could not load LP events: {exc!r}")
+    if events.empty:
+        return _empty_figure("No LP events in league_history yet")
+
+    if player is None:
+        # Top-N most-tracked people. Match-stats game count, not LP-event
+        # count, so the people shown line up with the rest of the panel.
+        top_people = df.groupby("person").size().sort_values(ascending=False).head(8).index.tolist()
+        agg_rows = []
+        for person, sub in events.groupby("person"):
+            if person not in top_people:
+                continue
+            wins = sub[sub["outcome"] == "win"]["delta_score"]
+            losses = sub[sub["outcome"] == "loss"]["delta_score"]
+            if len(wins) < 5 or len(losses) < 5:
+                continue
+            n = len(sub)
+            net_per_100 = sub["delta_score"].sum() / n * 100
+            agg_rows.append(
+                {
+                    "person": person,
+                    "avg_win": float(wins.mean()),
+                    "avg_loss": float(losses.mean()),
+                    "n": n,
+                    "net_per_100": net_per_100,
+                }
+            )
+        if not agg_rows:
+            return _empty_figure("Not enough LP events for the top players")
+        agg = (
+            pd.DataFrame(agg_rows).sort_values("net_per_100", ascending=True).reset_index(drop=True)
+        )
+
+        fig_h = max(4.6, len(agg) * 0.55)
+        fig, ax = plt.subplots(figsize=(13, fig_h))
+        y = np.arange(len(agg))
+        ax.barh(y, agg["avg_loss"], color=PALETTE["loss"], height=0.7, label="Avg LP per loss")
+        ax.barh(y, agg["avg_win"], color=PALETTE["win"], height=0.7, label="Avg LP per win")
+        ax.axvline(0, color=PALETTE["text"], linewidth=0.8)
+        ax.set_yticks(y)
+        ax.set_yticklabels(agg["person"])
+        ax.set_xlabel("LP delta per game (Ranker score, signed)")
+        ax.set_title(_title("LP economics — gain per win vs loss per loss", player))
+        _subtitle(
+            ax,
+            "Right green bar > left red bar = climbing even at 50% WR. "
+            "Sort: net LP per 100 games (top = best climbers).",
+        )
+        for yi, row in agg.iterrows():
+            tag_colour = PALETTE["win"] if row["net_per_100"] > 0 else PALETTE["loss"]
+            ax.annotate(
+                f"+{row['avg_win']:.1f} W  ·  {row['avg_loss']:.1f} L  ·  "
+                f"net {row['net_per_100']:+.0f}/100  ·  n={int(row['n'])}",
+                xy=(row["avg_win"], yi),
+                xytext=(8, 0),
+                textcoords="offset points",
+                va="center",
+                ha="left",
+                fontsize=9,
+                color=tag_colour,
+            )
+        max_abs = max(35.0, float(max(agg["avg_win"].max(), -agg["avg_loss"].min()) + 8))
+        # Extend right side extra to fit annotations.
+        ax.set_xlim(-max_abs, max_abs * 1.6)
+        ax.legend(loc="lower right")
+        _polish_ax(ax)
+        fig.tight_layout()
+        return fig
+
+    # --- Single-person view ---
+    sub = events[events["person"] == player]
+    if sub.empty:
+        return _empty_figure(f"No LP events recorded for {player}")
+    wins = sub.loc[sub["outcome"] == "win", "delta_score"].astype(float)
+    losses = sub.loc[sub["outcome"] == "loss", "delta_score"].astype(float)
+    if wins.empty or losses.empty:
+        return _empty_figure(f"{player} has no recorded LP events for both win and loss")
+
+    avg_w, avg_l = float(wins.mean()), float(losses.mean())
+    n = len(sub)
+    net_per_100 = float(sub["delta_score"].sum() / n * 100)
+    if net_per_100 > 50:
+        verdict = "climbing fast — MMR > rank"
+        v_colour = PALETTE["win"]
+    elif net_per_100 > 5:
+        verdict = "climbing"
+        v_colour = PALETTE["win"]
+    elif net_per_100 < -50:
+        verdict = "falling fast — MMR < rank"
+        v_colour = PALETTE["loss"]
+    elif net_per_100 < -5:
+        verdict = "falling"
+        v_colour = PALETTE["loss"]
+    else:
+        verdict = "treading water — at fair MMR"
+        v_colour = PALETTE["neutral"]
+
+    fig, ax = plt.subplots(figsize=(13, 5.0))
+    # Symmetric bin range so the two distributions sit visually opposite.
+    edge = max(float(wins.max()), -float(losses.min()), 30.0) + 4
+    bins = np.arange(-edge, edge + 1, 2)
+    ax.hist(
+        losses,
+        bins=bins,
+        color=PALETTE["loss"],
+        alpha=0.75,
+        edgecolor="white",
+        linewidth=0.6,
+        label=f"Losses (avg {avg_l:+.1f})",
+    )
+    ax.hist(
+        wins,
+        bins=bins,
+        color=PALETTE["win"],
+        alpha=0.75,
+        edgecolor="white",
+        linewidth=0.6,
+        label=f"Wins (avg {avg_w:+.1f})",
+    )
+    ax.axvline(avg_w, color=PALETTE["win"], linestyle="--", linewidth=1.0)
+    ax.axvline(avg_l, color=PALETTE["loss"], linestyle="--", linewidth=1.0)
+    ax.axvline(0, color=PALETTE["text"], linewidth=0.8)
+    ax.set_xlabel("LP delta per game")
+    ax.set_ylabel("Number of games")
+    ax.set_title(_title("LP economics — per-game gain & loss distribution", player))
+    _subtitle(
+        ax,
+        f"Dashed lines = means. {n} tracked LP events. "
+        f"Net {net_per_100:+.0f} LP per 100 games → {verdict}.",
+    )
+    ax.legend(loc="upper right")
+    _polish_ax(ax)
+
+    ax.text(
+        0.02,
+        0.96,
+        f"Avg + per win:   {avg_w:+5.1f}\n"
+        f"Avg − per loss:  {avg_l:+5.1f}\n"
+        f"Net per 100:     {net_per_100:+5.0f}\n"
+        f"Verdict: {verdict}",
+        transform=ax.transAxes,
+        va="top",
+        ha="left",
+        fontsize=10,
+        family="DejaVu Sans Mono",
+        bbox={
+            "facecolor": "white",
+            "alpha": 0.95,
+            "edgecolor": v_colour,
+            "linewidth": 1.4,
+            "pad": 6,
+        },
+    )
+    fig.tight_layout()
+    return fig
 
 
 def plot_rank_trajectory(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
@@ -2621,17 +2833,18 @@ ALL_PLOTS = [
     ("03_feature_impact", plot_feature_impact),
     ("04_activity_over_time", plot_activity_over_time),
     ("05_rank_trajectory", plot_rank_trajectory),
-    ("06_cumulative_winrate", plot_cumulative_winrate),
-    ("07_player_progression", plot_player_progression),
-    ("08_kda_vs_outcome", plot_kda_vs_outcome),
-    ("09_duration_vs_outcome", plot_duration_vs_outcome),
-    ("10_champion_winrate", plot_champion_winrate),
-    ("11_champion_learning_curve", plot_champion_learning_curve),
-    ("12_hour_of_day", plot_hour_of_day),
-    ("13_day_of_week", plot_day_of_week),
-    ("14_hour_dow_heatmap", plot_hour_dow_heatmap),
-    ("15_streak_recovery", plot_streak_recovery),
-    ("16_time_since_prev", plot_time_since_prev),
-    ("17_session_analysis", plot_session_analysis),
-    ("18_duo_winrate", plot_duo_winrate),
+    ("06_lp_economics", plot_lp_economics),
+    ("07_cumulative_winrate", plot_cumulative_winrate),
+    ("08_player_progression", plot_player_progression),
+    ("09_kda_vs_outcome", plot_kda_vs_outcome),
+    ("10_duration_vs_outcome", plot_duration_vs_outcome),
+    ("11_champion_winrate", plot_champion_winrate),
+    ("12_champion_learning_curve", plot_champion_learning_curve),
+    ("13_hour_of_day", plot_hour_of_day),
+    ("14_day_of_week", plot_day_of_week),
+    ("15_hour_dow_heatmap", plot_hour_dow_heatmap),
+    ("16_streak_recovery", plot_streak_recovery),
+    ("17_time_since_prev", plot_time_since_prev),
+    ("18_session_analysis", plot_session_analysis),
+    ("19_duo_winrate", plot_duo_winrate),
 ]

@@ -1,9 +1,13 @@
 """Match-stats EDA helpers.
 
 Pure functions for loading and visualising the bot's match_stats table.
-Imported by both the exploration notebook (match_analysis.ipynb) and the
-batch runner (run_analysis.py). No matplotlib state is kept here — every
-plot function builds and returns a fresh Figure.
+Imported by:
+  - the Discord cog (cogs/match_analysis.py) to render charts on demand,
+  - the exploration notebook (notebooks/match_analysis.ipynb),
+  - the batch runner (notebooks/run_analysis.py).
+
+No matplotlib state is kept here — every plot function builds and returns
+a fresh Figure that the caller is responsible for closing.
 """
 
 from __future__ import annotations
@@ -15,7 +19,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-DEFAULT_DB = Path(__file__).resolve().parent.parent / "Bot" / "db" / "database.sqlite"
+DEFAULT_DB = Path(__file__).resolve().parent.parent / "db" / "database.sqlite"
 
 # Days of the week and their short labels, Monday=0 per pandas weekday().
 DOW_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
@@ -236,41 +240,50 @@ def plot_duration_vs_outcome(df: pd.DataFrame, player: str | None = None) -> plt
 
 
 def plot_champion_winrate(
-    df: pd.DataFrame, player: str | None = None, min_games: int = 10, top: int = 20
+    df: pd.DataFrame, player: str | None = None, min_games: int = 10, top: int = 12
 ) -> plt.Figure:
-    """Per-champion winrate, sorted, with sample-count bars alongside."""
+    """Champion winners (left) vs losers (right).
+
+    For every champion with at least ``min_games`` games, take the
+    top ``top`` by win rate and the bottom ``top`` and show them
+    side by side. Bars are coloured by direction and annotated with
+    sample count so a 70%-on-3-games doesn't masquerade as a winner.
+    """
     d = _filter_player(df, player)
     g = d.groupby("champion")["win"].agg(["count", "mean"])
-    g = g[g["count"] >= min_games].sort_values("mean", ascending=True).tail(top)
+    g = g[g["count"] >= min_games]
+    if g.empty:
+        fig, ax = plt.subplots(figsize=(10, 3))
+        ax.text(0.5, 0.5, f"No champions with ≥{min_games} games", ha="center", va="center")
+        ax.set_axis_off()
+        return fig
 
-    fig, axes = plt.subplots(1, 2, figsize=(13, max(4, len(g) * 0.3)))
-    y = np.arange(len(g))
+    winners = g.sort_values("mean", ascending=False).head(top).sort_values("mean", ascending=True)
+    losers = g.sort_values("mean", ascending=True).head(top).sort_values("mean", ascending=False)
 
-    bars = axes[0].barh(
-        y, g["mean"], color=["#5cb85c" if v >= 0.5 else "#d9534f" for v in g["mean"]]
-    )
-    axes[0].axvline(0.5, color="black", linewidth=0.7, linestyle=":")
-    axes[0].set_yticks(y)
-    axes[0].set_yticklabels(g.index)
-    axes[0].set_xlim(0, 1)
-    axes[0].set_xlabel("Win rate")
-    axes[0].set_title(_title(f"Champion win rate (≥{min_games} games)", player))
-    axes[0].grid(axis="x", alpha=0.3)
-    for bar, n in zip(bars, g["count"], strict=False):
-        axes[0].text(
-            bar.get_width() + 0.01,
-            bar.get_y() + bar.get_height() / 2,
-            f"{bar.get_width():.0%} (n={int(n)})",
-            va="center",
-            fontsize=8,
-        )
+    fig, axes = plt.subplots(1, 2, figsize=(13, max(4, max(len(winners), len(losers)) * 0.35)))
 
-    axes[1].barh(y, g["count"], color="#4c8bf5")
-    axes[1].set_yticks(y)
-    axes[1].set_yticklabels(g.index)
-    axes[1].set_xlabel("Games played")
-    axes[1].set_title(_title("Champion volume", player))
-    axes[1].grid(axis="x", alpha=0.3)
+    for ax, frame, colour, title in (
+        (axes[0], winners, "#5cb85c", "Winners (highest win rate)"),
+        (axes[1], losers, "#d9534f", "Losers (lowest win rate)"),
+    ):
+        y = np.arange(len(frame))
+        bars = ax.barh(y, frame["mean"], color=colour)
+        ax.axvline(0.5, color="black", linewidth=0.7, linestyle=":")
+        ax.set_yticks(y)
+        ax.set_yticklabels(frame.index)
+        ax.set_xlim(0, 1)
+        ax.set_xlabel("Win rate")
+        ax.set_title(_title(f"{title} (≥{min_games} games)", player))
+        ax.grid(axis="x", alpha=0.3)
+        for bar, n in zip(bars, frame["count"], strict=False):
+            ax.text(
+                bar.get_width() + 0.01,
+                bar.get_y() + bar.get_height() / 2,
+                f"{bar.get_width():.0%} (n={int(n)})",
+                va="center",
+                fontsize=8,
+            )
 
     fig.tight_layout()
     return fig
@@ -476,6 +489,76 @@ def plot_cumulative_winrate(df: pd.DataFrame, player: str | None = None) -> plt.
     return fig
 
 
+def plot_player_progression(
+    df: pd.DataFrame, player: str | None = None, window: int = 30, min_games: int = 50
+) -> plt.Figure:
+    """Lifetime trend — rolling win rate vs the player's Nth recorded game.
+
+    Does playing more correlate with improvement, plateau, or decline?
+    For each player (or one player), plot a rolling-``window`` win rate
+    against cumulative game count. A linear-fit slope is annotated so
+    you can read off whether the trend is up or down at a glance.
+
+    With ``player=None`` we show every player who has ``>= min_games``
+    games on one panel; with a specific player we show that player only
+    plus the linear-fit line.
+    """
+    fig, ax = plt.subplots(figsize=(12, 5))
+
+    def _series(sub: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
+        sub = sub.sort_values("game_start").reset_index(drop=True)
+        n = pd.Series(range(1, len(sub) + 1), index=sub.index)
+        roll = sub["win"].rolling(window=window, min_periods=max(5, window // 3)).mean()
+        return n, roll
+
+    def _slope(n: pd.Series, roll: pd.Series) -> float | None:
+        mask = roll.notna()
+        if mask.sum() < 5:
+            return None
+        # Fit on the smoothed series so single bad/good runs don't
+        # dominate the trend reading.
+        return float(np.polyfit(n[mask], roll[mask], 1)[0])
+
+    if player is None:
+        players = df.groupby("player").size()
+        players = players[players >= min_games].sort_values(ascending=False).index.tolist()
+        for name in players:
+            n, roll = _series(df[df["player"] == name])
+            slope = _slope(n, roll)
+            label = name if slope is None else f"{name}  ({slope * 100:+.2f}pp/game)"
+            ax.plot(n, roll, label=label, alpha=0.8)
+        ax.legend(loc="lower right", fontsize=8, ncol=2)
+    else:
+        n, roll = _series(df[df["player"] == player])
+        ax.plot(n, roll, label=f"Rolling-{window} WR", color="#4c8bf5", linewidth=2)
+        slope = _slope(n, roll)
+        if slope is not None:
+            mask = roll.notna()
+            fit = np.poly1d(np.polyfit(n[mask], roll[mask], 1))
+            ax.plot(n, fit(n), color="black", linestyle="--", linewidth=1, label="Linear fit")
+            direction = "improving" if slope > 0 else "declining"
+            ax.text(
+                0.02,
+                0.95,
+                f"trend: {direction} by {abs(slope) * 100:.2f} pp per game"
+                f" → {abs(slope) * 100 * 100:.1f} pp per 100 games",
+                transform=ax.transAxes,
+                fontsize=10,
+                va="top",
+                bbox={"facecolor": "white", "alpha": 0.85, "edgecolor": "lightgray"},
+            )
+        ax.legend(loc="lower right")
+
+    ax.axhline(0.5, color="black", linewidth=0.7, linestyle=":")
+    ax.set_ylim(0, 1.05)
+    ax.set_xlabel("Cumulative game number")
+    ax.set_ylabel(f"Rolling win rate (window={window})")
+    ax.set_title(_title("Lifetime progression — getting better or worse?", player))
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    return fig
+
+
 def summary_table(df: pd.DataFrame) -> pd.DataFrame:
     """Compact per-player summary: games, win rate, mean KDA, mean duration,
     favourite champion."""
@@ -502,13 +585,14 @@ def summary_table(df: pd.DataFrame) -> pd.DataFrame:
 #: should display them. Each takes (df, player=None) -> Figure.
 ALL_PLOTS = [
     ("01_cumulative_winrate", plot_cumulative_winrate),
-    ("02_kda_vs_outcome", plot_kda_vs_outcome),
-    ("03_duration_vs_outcome", plot_duration_vs_outcome),
-    ("04_champion_winrate", plot_champion_winrate),
-    ("05_champion_learning_curve", plot_champion_learning_curve),
-    ("06_hour_of_day", plot_hour_of_day),
-    ("07_day_of_week", plot_day_of_week),
-    ("08_hour_dow_heatmap", plot_hour_dow_heatmap),
-    ("09_streak_recovery", plot_streak_recovery),
-    ("10_time_since_prev", plot_time_since_prev),
+    ("02_player_progression", plot_player_progression),
+    ("03_kda_vs_outcome", plot_kda_vs_outcome),
+    ("04_duration_vs_outcome", plot_duration_vs_outcome),
+    ("05_champion_winrate", plot_champion_winrate),
+    ("06_champion_learning_curve", plot_champion_learning_curve),
+    ("07_hour_of_day", plot_hour_of_day),
+    ("08_day_of_week", plot_day_of_week),
+    ("09_hour_dow_heatmap", plot_hour_dow_heatmap),
+    ("10_streak_recovery", plot_streak_recovery),
+    ("11_time_since_prev", plot_time_since_prev),
 ]

@@ -15,13 +15,18 @@ from __future__ import annotations
 
 import argparse
 import re
+import sys
 from pathlib import Path
 
 import matplotlib
 
 matplotlib.use("Agg")  # no display needed for batch
-import analysis
 import matplotlib.pyplot as plt
+
+# The analysis lib lives inside Bot/utils so the Discord cog can import
+# it too. Add Bot/ to sys.path so we can use the same module here.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "Bot"))
+from utils import match_analysis as analysis  # noqa: E402
 
 CHARTS_ROOT = Path(__file__).resolve().parent / "charts"
 

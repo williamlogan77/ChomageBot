@@ -419,6 +419,82 @@ def load_matches(db_path: Path = DEFAULT_DB) -> pd.DataFrame:
     return df
 
 
+def load_rank_history(db_path: Path = DEFAULT_DB) -> pd.DataFrame:
+    """Load league_history mapped to ``person`` keys + rank scores.
+
+    league_history is keyed by either modern puuid OR the older encrypted
+    summoner ID (league_players.leagueId). Both join paths matter — the
+    UNION below picks the right Discord person regardless of which key
+    the row was inserted under.
+
+    Returns one row per (person, timestamp) with: tier, division, lp,
+    a numeric ``rank_score`` (Iron IV = 0, Master = 7000+) for plotting,
+    and the cumulative ``wins`` / ``losses`` for that timestamp.
+    """
+    from utils.rank_sorting_class import Ranker
+
+    with sqlite3.connect(db_path) as con:
+        df = pd.read_sql_query(
+            """
+            SELECT
+                lh.timestamp,
+                lh.lp,
+                lh.division,
+                lh.tier,
+                lh.wins,
+                lh.losses,
+                COALESCE(
+                    NULLIF(TRIM(u.nickname), ''),
+                    NULLIF(u.discord_tag, ''),
+                    lp.league_username
+                ) AS person
+            FROM league_history lh
+            JOIN league_players lp
+              ON lp.puuid = lh.puuid OR lp.leagueId = lh.puuid
+            LEFT JOIN users u ON u.user_id = lp.discord_user_id
+            WHERE lh.tier IS NOT NULL AND lh.division IS NOT NULL AND lh.lp IS NOT NULL
+            ORDER BY lh.timestamp ASC
+            """,
+            con,
+        )
+    if df.empty:
+        return df
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+
+    def _score(tier: str, div: str, lp: int) -> float | None:
+        try:
+            return float(Ranker(tier, div, lp)._score)
+        except (KeyError, ValueError, AttributeError):
+            return None
+
+    df["rank_score"] = [
+        _score(t, d, p) for t, d, p in zip(df["tier"], df["division"], df["lp"], strict=False)
+    ]
+    df = df.dropna(subset=["rank_score"]).reset_index(drop=True)
+    return df
+
+
+# Pretty labels for the rank-score y-axis. One label per tier+division
+# combo, positioned at the centre of that band on the Ranker._score scale.
+_RANK_TICK_LABELS: list[tuple[float, str]] = [
+    (0, "Iron IV"),
+    (200, "Iron II"),
+    (401, "Bronze IV"),
+    (601, "Bronze II"),
+    (802, "Silver IV"),
+    (1002, "Silver II"),
+    (1203, "Gold IV"),
+    (1403, "Gold II"),
+    (1604, "Plat IV"),
+    (1804, "Plat II"),
+    (2005, "Emerald IV"),
+    (2205, "Emerald II"),
+    (2406, "Diamond IV"),
+    (2606, "Diamond II"),
+    (2807, "Master"),
+]
+
+
 def people_summary(df: pd.DataFrame) -> pd.DataFrame:
     """One row per Discord person: total games, account count, account names.
 
@@ -1255,6 +1331,159 @@ def plot_session_analysis(df: pd.DataFrame, player: str | None = None) -> plt.Fi
 
 
 # --- 6. Overview -----------------------------------------------------------
+
+
+def plot_rank_trajectory(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Rank score over time, drawn from league_history.
+
+    Single-person view: their rank line plus a rolling-20 match-stats
+    WR overlay on a twin axis, so you can read "WR climbed, did the
+    rank actually follow?" off one chart. Annotates start LP, current
+    LP, and net delta across the tracked window.
+
+    Aggregate view: top 6 most-active people as separate lines, no WR
+    overlay (would be unreadable with that many series). Picks the
+    busiest people by match_stats game count so the lines actually move.
+    """
+    try:
+        ranks = load_rank_history(DEFAULT_DB)
+    except Exception as exc:
+        return _empty_figure(f"Could not load rank history: {exc!r}")
+    if ranks.empty:
+        return _empty_figure("No rank history available")
+
+    if player is None:
+        # Pick top-N most-active people in match_stats so the rank chart
+        # lines up with the same people the rest of the panel describes.
+        top_people = df.groupby("person").size().sort_values(ascending=False).head(6).index.tolist()
+        ranks = ranks[ranks["person"].isin(top_people)]
+        if ranks.empty:
+            return _empty_figure("No rank history for the tracked top players")
+
+        fig, ax = plt.subplots(figsize=(13, 5.4))
+        for idx, name in enumerate(top_people):
+            sub = ranks[ranks["person"] == name].sort_values("timestamp")
+            if sub.empty:
+                continue
+            ax.plot(
+                sub["timestamp"],
+                sub["rank_score"],
+                color=SERIES_CYCLE[idx % len(SERIES_CYCLE)],
+                linewidth=1.6,
+                alpha=0.85,
+                label=name,
+            )
+        _rank_axis(ax)
+        ax.set_xlabel("Date")
+        ax.set_ylabel("Rank")
+        ax.set_title(_title("Rank trajectory — top 6 most-active people", player))
+        _subtitle(
+            ax,
+            "Higher = better rank. Each line is one Discord person; "
+            f"{len(ranks):,} LP snapshots across {ranks['person'].nunique()} people.",
+        )
+        ax.legend(loc="lower left", ncol=2, fontsize=9)
+        _polish_ax(ax)
+        fig.autofmt_xdate()
+        fig.tight_layout()
+        return fig
+
+    # --- Single-person view: rank line + WR overlay ---
+    sub = ranks[ranks["person"] == player].sort_values("timestamp").reset_index(drop=True)
+    if sub.empty:
+        return _empty_figure(f"No rank history for {player}")
+
+    fig, ax_rank = plt.subplots(figsize=(13, 5.4))
+    ax_rank.plot(
+        sub["timestamp"],
+        sub["rank_score"],
+        color=PALETTE["primary"],
+        linewidth=2.0,
+        label="Rank",
+    )
+    _rank_axis(ax_rank)
+    ax_rank.set_xlabel("Date")
+    ax_rank.set_ylabel("Rank", color=PALETTE["primary"])
+    ax_rank.tick_params(axis="y", colors=PALETTE["primary"])
+
+    # WR overlay on twin axis — sourced from match_stats, not history.
+    matches = df[df["person"] == player].sort_values("game_start").reset_index(drop=True)
+    if not matches.empty:
+        matches = matches.copy()
+        matches["rolling_20_wr"] = matches["win"].rolling(window=20, min_periods=5).mean()
+        ax_wr = ax_rank.twinx()
+        ax_wr.plot(
+            matches["game_start"],
+            matches["rolling_20_wr"],
+            color=PALETTE["accent_orange"],
+            linewidth=1.6,
+            alpha=0.7,
+            linestyle="--",
+            label="Rolling-20 WR (matches)",
+        )
+        ax_wr.axhline(0.5, color=PALETTE["muted"], linewidth=0.7, linestyle=":", alpha=0.6)
+        ax_wr.set_ylim(0, 1.05)
+        ax_wr.set_ylabel("Match-stats WR", color=PALETTE["accent_orange"])
+        ax_wr.tick_params(axis="y", colors=PALETTE["accent_orange"])
+        ax_wr.grid(False)
+        ax_wr.spines["right"].set_visible(False)
+        ax_wr.spines["top"].set_visible(False)
+        # Combined legend.
+        lines1, labels1 = ax_rank.get_legend_handles_labels()
+        lines2, labels2 = ax_wr.get_legend_handles_labels()
+        ax_rank.legend(lines1 + lines2, labels1 + labels2, loc="lower left")
+    else:
+        ax_rank.legend(loc="lower left")
+
+    # Headline annotation: net change across the tracked window.
+    first = sub.iloc[0]
+    last = sub.iloc[-1]
+    delta = last["rank_score"] - first["rank_score"]
+    direction = "climbed" if delta > 0 else ("dropped" if delta < 0 else "flat")
+    box_colour = (
+        PALETTE["win"] if delta > 0 else (PALETTE["loss"] if delta < 0 else PALETTE["neutral"])
+    )
+    ax_rank.text(
+        0.02,
+        0.96,
+        f"Start: {first['tier'].title()} {first['division']} {int(first['lp'])}LP\n"
+        f"Now:   {last['tier'].title()} {last['division']} {int(last['lp'])}LP\n"
+        f"Net:   {direction} {abs(int(delta))} pts",
+        transform=ax_rank.transAxes,
+        va="top",
+        ha="left",
+        fontsize=10,
+        family="DejaVu Sans Mono",
+        bbox={
+            "facecolor": "white",
+            "alpha": 0.95,
+            "edgecolor": box_colour,
+            "linewidth": 1.4,
+            "pad": 6,
+        },
+    )
+
+    ax_rank.set_title(_title("Rank trajectory + rolling WR", player))
+    _subtitle(
+        ax_rank,
+        f"Solid blue = rank ({len(sub):,} LP snapshots). Dashed orange = match-stats rolling-20 WR.",
+    )
+    _polish_ax(ax_rank)
+    fig.autofmt_xdate()
+    fig.tight_layout()
+    return fig
+
+
+def _rank_axis(ax) -> None:
+    """Apply rank-score y-axis labels (Iron IV → Master) and grid lines."""
+    pad_top = 200
+    bottom = max(0, ax.get_ylim()[0] - 50)
+    top = ax.get_ylim()[1] + pad_top
+    ax.set_ylim(bottom, top)
+    ticks = [score for score, _ in _RANK_TICK_LABELS if bottom <= score <= top]
+    labels = [label for score, label in _RANK_TICK_LABELS if bottom <= score <= top]
+    ax.set_yticks(ticks)
+    ax.set_yticklabels(labels)
 
 
 def plot_cumulative_winrate(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
@@ -2391,17 +2620,18 @@ ALL_PLOTS = [
     ("02_logistic_coefficients", plot_logistic_coefficients),
     ("03_feature_impact", plot_feature_impact),
     ("04_activity_over_time", plot_activity_over_time),
-    ("05_cumulative_winrate", plot_cumulative_winrate),
-    ("06_player_progression", plot_player_progression),
-    ("07_kda_vs_outcome", plot_kda_vs_outcome),
-    ("08_duration_vs_outcome", plot_duration_vs_outcome),
-    ("09_champion_winrate", plot_champion_winrate),
-    ("10_champion_learning_curve", plot_champion_learning_curve),
-    ("11_hour_of_day", plot_hour_of_day),
-    ("12_day_of_week", plot_day_of_week),
-    ("13_hour_dow_heatmap", plot_hour_dow_heatmap),
-    ("14_streak_recovery", plot_streak_recovery),
-    ("15_time_since_prev", plot_time_since_prev),
-    ("16_session_analysis", plot_session_analysis),
-    ("17_duo_winrate", plot_duo_winrate),
+    ("05_rank_trajectory", plot_rank_trajectory),
+    ("06_cumulative_winrate", plot_cumulative_winrate),
+    ("07_player_progression", plot_player_progression),
+    ("08_kda_vs_outcome", plot_kda_vs_outcome),
+    ("09_duration_vs_outcome", plot_duration_vs_outcome),
+    ("10_champion_winrate", plot_champion_winrate),
+    ("11_champion_learning_curve", plot_champion_learning_curve),
+    ("12_hour_of_day", plot_hour_of_day),
+    ("13_day_of_week", plot_day_of_week),
+    ("14_hour_dow_heatmap", plot_hour_dow_heatmap),
+    ("15_streak_recovery", plot_streak_recovery),
+    ("16_time_since_prev", plot_time_since_prev),
+    ("17_session_analysis", plot_session_analysis),
+    ("18_duo_winrate", plot_duo_winrate),
 ]

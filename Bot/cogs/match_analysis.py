@@ -1243,6 +1243,78 @@ class MatchAnalysis(commands.Cog):
             ephemeral=True,
         )
 
+    @app_commands.command(name="whois", description="Bot operational status (admin)")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(manage_guild=True)
+    async def whois(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+
+        import os
+
+        db_path = self.bot.db_path
+        try:
+            db_size_mb = os.path.getsize(db_path) / (1024 * 1024)
+            db_modified = dt.datetime.fromtimestamp(os.path.getmtime(db_path))
+        except FileNotFoundError:
+            db_size_mb = None
+            db_modified = None
+
+        cache_entries = len(_df_cache)
+        cache_age_s = None
+        if cache_entries > 0:
+            newest_at = max(t for t, _ in _df_cache.values())
+            cache_age_s = time.monotonic() - newest_at
+
+        # FetchFromRiot is the actual cog class name in league_table_updater
+        # (not "PostRanks"); confirmed against heartbeat.py watchdog.
+        backfill_cog = self.bot.get_cog("Backfill")
+        stream_last = getattr(backfill_cog, "_stream_last_ran", None) if backfill_cog else None
+
+        post_ranks_cog = self.bot.get_cog("FetchFromRiot")
+        post_last = (
+            getattr(post_ranks_cog, "post_ranks_last_fired", None) if post_ranks_cog else None
+        )
+
+        sticky_last = self._sticky_panel_last_fired
+
+        def fmt_ts(t):
+            if t is None:
+                return "never"
+            if isinstance(t, int | float):
+                t = dt.datetime.fromtimestamp(t)
+            try:
+                return t.strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                return repr(t)
+
+        lines = []
+        if db_size_mb is not None:
+            lines.append(f"`db file       ` {db_size_mb:.1f} MB · modified {fmt_ts(db_modified)}")
+        else:
+            lines.append(f"`db file       ` MISSING ({db_path})")
+
+        try:
+            df = await _load_matches_cached(self.bot.db_path)
+            lines.append(f"`match_stats   ` {len(df):,} rows · {df['person'].nunique()} people")
+        except Exception as exc:
+            lines.append(f"`match_stats   ` load failed: {exc!r}")
+
+        lines.append(f"`stream_matches` last {fmt_ts(stream_last)}")
+        lines.append(f"`post_ranks    ` last {fmt_ts(post_last)}")
+        lines.append(f"`sticky_panel  ` last {fmt_ts(sticky_last)}")
+
+        if cache_age_s is not None:
+            lines.append(f"`df cache      ` {cache_entries} entries · age {cache_age_s:.0f}s")
+        else:
+            lines.append("`df cache      ` empty")
+
+        embed = discord.Embed(
+            title="📋 Bot operational status",
+            description="```\n" + "\n".join(lines) + "\n```",
+            color=discord.Color(int(analysis.PALETTE["primary"].lstrip("#"), 16)),
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
     async def _post_panel(self, channel: discord.abc.Messageable) -> tuple[discord.Message, object]:
         """Load matches, build the view, post the panel. Shared by the
         admin slash command and the sticky-pin loop. Updates
@@ -1413,6 +1485,7 @@ class MatchAnalysis(commands.Cog):
                     "`/leaderboard_week [days]` — Past-N-days WR ranking",
                     "`/chart_index` — This catalog",
                     "`/refresh_db_cache` — Force cache invalidation (admin)",
+                    "`/whois` — Bot operational status (admin)",
                 ]
             ),
             color=discord.Color(int(analysis.PALETTE["primary"].lstrip("#"), 16)),

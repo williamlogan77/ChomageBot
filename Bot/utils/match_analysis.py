@@ -8476,6 +8476,307 @@ def plot_dow_hour_heatmap(df: pd.DataFrame, player: str | None = None) -> plt.Fi
     return fig
 
 
+# --- 42. Same-champion behaviour after win vs after loss -------------------
+
+_SAME_CHAMP_MIN_GAMES = 100
+_SAME_CHAMP_BOOT = 2000
+
+
+def _same_champ_per_player(df: pd.DataFrame) -> pd.DataFrame:
+    """For each game, label whether the previous game (same person) used the
+    same champion, and what the outcome of that previous game was. Returns
+    per-person conditional proportions and sample sizes.
+    """
+    d = df.sort_values(["person", "game_start"]).reset_index(drop=True)
+    d = d.assign(
+        prev_champion=d.groupby("person")["champion"].shift(1),
+        prev_win=d.groupby("person")["win"].shift(1),
+    )
+    d = d.dropna(subset=["prev_win"]).copy()
+    d["prev_win"] = d["prev_win"].astype(int)
+    d["same_champion"] = (d["champion"] == d["prev_champion"]).astype(int)
+
+    rows = []
+    for person, g in d.groupby("person", sort=False):
+        total = len(g)
+        wins = g[g["prev_win"] == 1]
+        losses = g[g["prev_win"] == 0]
+        n_w, n_l = len(wins), len(losses)
+        rows.append(
+            {
+                "person": person,
+                "total_games": total,
+                "n_after_win": n_w,
+                "n_after_loss": n_l,
+                "same_after_win": int(wins["same_champion"].sum()),
+                "same_after_loss": int(losses["same_champion"].sum()),
+                "p_same_win": float(wins["same_champion"].mean()) if n_w > 0 else float("nan"),
+                "p_same_loss": float(losses["same_champion"].mean()) if n_l > 0 else float("nan"),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _chi_square_2x2_p(a: int, b: int, c: int, d_: int) -> float:
+    """Pearson chi-square p-value for a 2x2 contingency table, df=1.
+
+    Returns NaN when any expected cell is 0 (test undefined).
+    The df=1 survival function reduces to erfc(sqrt(chi2/2)).
+    """
+    n = a + b + c + d_
+    if n == 0:
+        return float("nan")
+    row1, row2 = a + b, c + d_
+    col1, col2 = a + c, b + d_
+    if row1 == 0 or row2 == 0 or col1 == 0 or col2 == 0:
+        return float("nan")
+    chi2 = 0.0
+    for obs, (r, col) in zip(
+        (a, b, c, d_),
+        ((row1, col1), (row1, col2), (row2, col1), (row2, col2)),
+        strict=True,
+    ):
+        exp = r * col / n
+        chi2 += (obs - exp) ** 2 / exp
+    return math.erfc(math.sqrt(chi2 / 2.0))
+
+
+def _paired_bootstrap_diff_ci(
+    p_win: np.ndarray, p_loss: np.ndarray, n_boot: int = _SAME_CHAMP_BOOT
+) -> tuple[float, float, float]:
+    """Paired bootstrap (resample players with replacement) for the macro
+    mean difference P(same|win) - P(same|loss). Returns (mean_diff, lo, hi).
+    """
+    n = len(p_win)
+    if n == 0:
+        return (float("nan"), float("nan"), float("nan"))
+    rng = np.random.default_rng(20260524)
+    diffs = np.empty(n_boot)
+    for i in range(n_boot):
+        idx = rng.integers(0, n, size=n)
+        diffs[i] = p_win[idx].mean() - p_loss[idx].mean()
+    return (
+        float(p_win.mean() - p_loss.mean()),
+        float(np.percentile(diffs, 2.5)),
+        float(np.percentile(diffs, 97.5)),
+    )
+
+
+def plot_same_champ_behavior(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Same-champion behaviour conditional on previous-game outcome.
+
+    Aggregate view: per-player P(same|win) vs P(same|loss), horizontal grouped
+    bars sorted by total games descending. A summary row at the top shows
+    the macro mean of each conditional with a paired-bootstrap 95% CI on the
+    win-minus-loss difference.
+
+    Per-person view: two-bar chart with Wilson 95% CIs and a chi-square
+    p-value on the 2x2 same/different x prev-win/prev-loss table.
+    """
+    per_player = _same_champ_per_player(df)
+
+    if _is_aggregate(player):
+        qualifying = per_player[
+            (per_player["total_games"] >= _SAME_CHAMP_MIN_GAMES)
+            & (per_player["n_after_win"] > 0)
+            & (per_player["n_after_loss"] > 0)
+        ].copy()
+        if len(qualifying) < 3:
+            return _empty_figure("Need >=3 players with >=100 games")
+        return _plot_same_champ_aggregate(qualifying)
+
+    label = _display_label(player) or "this player"
+    person = _resolve_person(df, player)
+    if person is None:
+        return _empty_figure(f"No games for {label}")
+    row = per_player[per_player["person"] == person]
+    if row.empty:
+        return _empty_figure(f"No games for {label}")
+    total = int(row["total_games"].iloc[0])
+    if total < _SAME_CHAMP_MIN_GAMES:
+        return _empty_figure(f"Need >=100 games ({total} games)")
+    return _plot_same_champ_per_person(row.iloc[0], label)
+
+
+def _plot_same_champ_aggregate(qualifying: pd.DataFrame) -> plt.Figure:
+    qualifying = qualifying.sort_values("total_games", ascending=False).reset_index(drop=True)
+    p_win = qualifying["p_same_win"].to_numpy()
+    p_loss = qualifying["p_same_loss"].to_numpy()
+    mean_diff, lo, hi = _paired_bootstrap_diff_ci(p_win, p_loss)
+    macro_win = float(p_win.mean())
+    macro_loss = float(p_loss.mean())
+
+    if mean_diff > 0 and lo > 0:
+        verdict = "ride hot champs"
+    elif mean_diff < 0 and hi < 0:
+        verdict = "comfort-pick after losses"
+    else:
+        verdict = "no detectable difference"
+
+    # One y slot per player + one for the macro summary row at the top.
+    n = len(qualifying)
+    y_players = np.arange(n) + 1  # 1..n
+    y_macro = 0
+    bar_h = 0.36
+
+    fig, ax = plt.subplots(figsize=(10, 7))
+    ax.barh(
+        y_players - bar_h / 2,
+        p_win,
+        height=bar_h,
+        color=PALETTE["primary"],
+        label="P(same | prev win)",
+        zorder=2,
+    )
+    ax.barh(
+        y_players + bar_h / 2,
+        p_loss,
+        height=bar_h,
+        color=PALETTE["loss"],
+        label="P(same | prev loss)",
+        zorder=2,
+    )
+    # Macro summary row at top.
+    ax.barh(y_macro - bar_h / 2, macro_win, height=bar_h, color=PALETTE["primary"], alpha=0.55)
+    ax.barh(y_macro + bar_h / 2, macro_loss, height=bar_h, color=PALETTE["loss"], alpha=0.55)
+    ax.axhline(0.5, color=PALETTE["spine"], linewidth=0.8, alpha=0.6)
+
+    for i, (_, row) in enumerate(qualifying.iterrows()):
+        ax.text(
+            row["p_same_win"] + 0.005,
+            y_players[i] - bar_h / 2,
+            f"{row['p_same_win']:.0%} (n={int(row['n_after_win'])})",
+            va="center",
+            ha="left",
+            fontsize=8,
+            color=PALETTE["text"],
+        )
+        ax.text(
+            row["p_same_loss"] + 0.005,
+            y_players[i] + bar_h / 2,
+            f"{row['p_same_loss']:.0%} (n={int(row['n_after_loss'])})",
+            va="center",
+            ha="left",
+            fontsize=8,
+            color=PALETTE["text"],
+        )
+    ax.text(
+        macro_win + 0.005,
+        y_macro - bar_h / 2,
+        f"{macro_win:.0%} macro",
+        va="center",
+        ha="left",
+        fontsize=8,
+        color=PALETTE["text"],
+        fontweight="bold",
+    )
+    ax.text(
+        macro_loss + 0.005,
+        y_macro + bar_h / 2,
+        f"{macro_loss:.0%} macro",
+        va="center",
+        ha="left",
+        fontsize=8,
+        color=PALETTE["text"],
+        fontweight="bold",
+    )
+
+    yticks = [y_macro, *list(y_players)]
+    yticklabels = ["MACRO MEAN", *[str(p) for p in qualifying["person"].tolist()]]
+    ax.set_yticks(yticks)
+    ax.set_yticklabels(yticklabels)
+    ax.invert_yaxis()
+    ax.set_xlim(0, max(0.8, float(max(p_win.max(), p_loss.max(), macro_win, macro_loss)) + 0.15))
+    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
+    ax.set_xlabel("P(next-game champion same as previous game)")
+    ax.legend(loc="lower right", frameon=False)
+
+    ax.set_title("Same champion after win vs after loss")
+    _subtitle(
+        ax,
+        "P(same champion next game | prev win) vs P(same | prev loss). "
+        f"Macro diff (win-loss) = {mean_diff:+.1%} [95% CI {lo:+.1%}, {hi:+.1%}]; "
+        f"verdict: {verdict}.",
+    )
+    _polish_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
+def _plot_same_champ_per_person(row: pd.Series, label: str) -> plt.Figure:
+    n_w = int(row["n_after_win"])
+    n_l = int(row["n_after_loss"])
+    same_w = int(row["same_after_win"])
+    same_l = int(row["same_after_loss"])
+    p_w = float(row["p_same_win"]) if n_w > 0 else float("nan")
+    p_l = float(row["p_same_loss"]) if n_l > 0 else float("nan")
+
+    ci_w = wilson_ci(same_w, n_w) if n_w > 0 else (float("nan"), float("nan"))
+    ci_l = wilson_ci(same_l, n_l) if n_l > 0 else (float("nan"), float("nan"))
+
+    # 2x2: rows = prev outcome, cols = (same, different)
+    p_val = _chi_square_2x2_p(same_w, n_w - same_w, same_l, n_l - same_l)
+    if math.isnan(p_val):
+        p_text = "p=n/a"
+        interp = "insufficient data for chi-square test"
+    else:
+        p_text = f"p={p_val:.3f}"
+        if p_val < 0.05:
+            if (p_w - p_l) > 0:
+                interp = "rides hot champs (significant)"
+            else:
+                interp = "comfort-picks after losses (significant)"
+        else:
+            interp = "no significant difference"
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    x = np.arange(2)
+    means = np.array([p_w if not math.isnan(p_w) else 0.0, p_l if not math.isnan(p_l) else 0.0])
+    colours = [PALETTE["primary"], PALETTE["loss"]]
+    ax.bar(x, means, color=colours, width=0.55, zorder=2)
+
+    err_lo = np.array(
+        [
+            (p_w - ci_w[0]) if not math.isnan(p_w) else 0.0,
+            (p_l - ci_l[0]) if not math.isnan(p_l) else 0.0,
+        ]
+    )
+    err_hi = np.array(
+        [
+            (ci_w[1] - p_w) if not math.isnan(p_w) else 0.0,
+            (ci_l[1] - p_l) if not math.isnan(p_l) else 0.0,
+        ]
+    )
+    ax.errorbar(x, means, yerr=[err_lo, err_hi], **WHISKER_STYLE, zorder=3)
+
+    for i, (mean, n) in enumerate(zip(means, (n_w, n_l), strict=True)):
+        ax.text(
+            i,
+            mean + 0.02,
+            f"{mean:.0%}\nn={n}",
+            ha="center",
+            va="bottom",
+            fontsize=10,
+            color=PALETTE["text"],
+        )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(["After win", "After loss"])
+    ax.set_ylabel("P(same champion next game)")
+    ax.set_ylim(0, max(0.6, float(means.max()) + 0.20))
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
+
+    ax.set_title(f"Same-champion behavior - {label}")
+    _subtitle(
+        ax,
+        f"P(same|win)={p_w:.0%} (n={n_w}), P(same|loss)={p_l:.0%} (n={n_l}). "
+        f"Chi-square {p_text} - {interp}.",
+    )
+    _polish_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
 # --- registry --------------------------------------------------------------
 
 #: All aggregate plot functions, in the order the runner script + notebook
@@ -8522,4 +8823,5 @@ ALL_PLOTS = [
     ("39_champion_mastery", plot_champion_mastery),
     ("40_champion_rust", plot_champion_rust),
     ("41_dow_hour_heatmap", plot_dow_hour_heatmap),
+    ("42_same_champ_behavior", plot_same_champ_behavior),
 ]

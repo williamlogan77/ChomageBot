@@ -170,6 +170,12 @@ MORE_CHART_DEFS = [
         "🌱",
         "Days since last played per champion (per-person)",
     ),
+    (
+        "42_same_champ_behavior",
+        "Same-champ behavior",
+        "🔁",
+        "Do players ride hot champs (after win) or comfort-pick (after loss)?",
+    ),
 ]
 
 

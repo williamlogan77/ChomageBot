@@ -12407,6 +12407,341 @@ def _plot_last_game_per_person(row: pd.Series, label: str) -> plt.Figure:
     return fig
 
 
+# --- 55. Longest historical streaks ----------------------------------------
+
+#: Minimum games for either a per-person streak chart or a player to qualify
+#: for the aggregate. Below this the Schilling baseline is too noisy to be
+#: meaningful — the expected-max grows like log(n), but the variance is
+#: substantial at small n.
+_LONGEST_STREAK_MIN_GAMES = 50
+
+
+def _longest_run(wins: np.ndarray, dates: np.ndarray, *, target: int) -> tuple[int, object, object]:
+    """Longest run of consecutive ``target`` values in ``wins``.
+
+    Returns ``(length, start_date, end_date)``. Both dates are entries from
+    the parallel ``dates`` array marking the first and last games in the
+    streak; length 0 returns ``(0, None, None)``.
+    """
+    best_len = 0
+    best_start_idx = -1
+    best_end_idx = -1
+    cur_len = 0
+    cur_start_idx = -1
+    for i, w in enumerate(wins):
+        if int(w) == target:
+            if cur_len == 0:
+                cur_start_idx = i
+            cur_len += 1
+            if cur_len > best_len:
+                best_len = cur_len
+                best_start_idx = cur_start_idx
+                best_end_idx = i
+        else:
+            cur_len = 0
+    if best_len == 0:
+        return 0, None, None
+    return best_len, dates[best_start_idx], dates[best_end_idx]
+
+
+def _expected_max_streak(n: int, p: float) -> float:
+    """Schilling's first-order expected max run length for n i.i.d.
+    Bernoulli(p) trials, for runs of the ``p``-valued outcome.
+
+    Returns NaN when the formula is ill-defined (degenerate p, or
+    n*(1-p) <= 1 so the log is non-positive).
+    """
+    if n <= 0 or not (0.0 < p < 1.0):
+        return float("nan")
+    # Clamp away from 0 / 1 to keep log(1/p) well-conditioned and bounded.
+    p_clamped = min(max(p, 0.05), 0.95)
+    arg = n * (1.0 - p_clamped)
+    if arg <= 1.0:
+        return float("nan")
+    base = 1.0 / p_clamped
+    try:
+        return math.log(arg) / math.log(base)
+    except (ValueError, ZeroDivisionError):
+        return float("nan")
+
+
+def _longest_streak_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """Per-person max win + max loss streak with dates and Schilling baselines.
+
+    Walks each person's chronological win sequence once and records the max
+    consecutive 1-run (wins) and 0-run (losses), with the (start, end) game
+    dates. Adds expected-max under an i.i.d. coin-flip with that player's
+    realised WR.
+    """
+    if df.empty:
+        return pd.DataFrame(
+            columns=[
+                "person",
+                "n_games",
+                "wr",
+                "max_win_streak",
+                "win_start",
+                "win_end",
+                "expected_win_streak",
+                "max_loss_streak",
+                "loss_start",
+                "loss_end",
+                "expected_loss_streak",
+            ]
+        )
+    rows: list[dict[str, object]] = []
+    for person, g in df.sort_values(["person", "game_start"]).groupby("person", sort=False):
+        wins = g["win"].astype(int).to_numpy()
+        dates = g["game_start"].to_numpy()
+        n = len(wins)
+        p = float(wins.mean()) if n > 0 else float("nan")
+        max_w, w_start, w_end = _longest_run(wins, dates, target=1)
+        max_l, l_start, l_end = _longest_run(wins, dates, target=0)
+        rows.append(
+            {
+                "person": person,
+                "n_games": n,
+                "wr": p,
+                "max_win_streak": max_w,
+                "win_start": w_start,
+                "win_end": w_end,
+                "expected_win_streak": _expected_max_streak(n, p),
+                "max_loss_streak": max_l,
+                "loss_start": l_start,
+                "loss_end": l_end,
+                # Loss "p" is 1-WR; expected max loss-streak baseline.
+                "expected_loss_streak": _expected_max_streak(n, 1.0 - p)
+                if not math.isnan(p)
+                else float("nan"),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _format_streak_dates(start: object, end: object) -> str:
+    if start is None or end is None:
+        return ""
+    try:
+        s = pd.Timestamp(start).strftime("%Y-%m-%d")
+        e = pd.Timestamp(end).strftime("%Y-%m-%d")
+    except (TypeError, ValueError):
+        return ""
+    return s if s == e else f"{s} -> {e}"
+
+
+def plot_longest_streaks(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Per-player longest historical win + loss streaks vs i.i.d. baseline.
+
+    Compares each player's observed max streak (per side) against Schilling's
+    first-order expected max run length under a coin-flip with that player's
+    realised WR. The interesting cases are streaks well above expected --
+    that's where the i.i.d. null is least plausible (tilt, hot/cold runs).
+    """
+    frame = _longest_streak_frame(df)
+    qualifying = frame[frame["n_games"] >= _LONGEST_STREAK_MIN_GAMES].copy()
+
+    if _is_aggregate(player):
+        if len(qualifying) < 3:
+            return _empty_figure("Need >=3 players with >=50 games")
+        return _plot_longest_streaks_aggregate(qualifying)
+
+    label = _display_label(player) or "this player"
+    person = _resolve_person(df, player)
+    if person is None:
+        return _empty_figure(f"No games for {label}")
+    row = frame[frame["person"] == person]
+    if row.empty:
+        return _empty_figure(f"No games for {label}")
+    n = int(row["n_games"].iloc[0])
+    if n < _LONGEST_STREAK_MIN_GAMES:
+        return _empty_figure(f"Need >=50 games for streak baseline ({n})")
+    return _plot_longest_streaks_per_person(row.iloc[0], label)
+
+
+def _plot_longest_streaks_aggregate(qualifying: pd.DataFrame) -> plt.Figure:
+    # Spec: alphabetical (case-insensitive) so the chart stays stable when
+    # players have similar streak numbers and ordering by metric would jitter.
+    qualifying = qualifying.sort_values(
+        "person", key=lambda s: s.str.lower(), kind="mergesort"
+    ).reset_index(drop=True)
+
+    n = len(qualifying)
+    y = np.arange(n)
+    bar_h = 0.38
+
+    win_obs = qualifying["max_win_streak"].to_numpy(dtype=float)
+    loss_obs = qualifying["max_loss_streak"].to_numpy(dtype=float)
+    win_exp = qualifying["expected_win_streak"].to_numpy(dtype=float)
+    loss_exp = qualifying["expected_loss_streak"].to_numpy(dtype=float)
+
+    fig, ax = plt.subplots(figsize=(11, max(4.5, 0.6 * n + 2.0)))
+    ax.barh(
+        y - bar_h / 2,
+        win_obs,
+        height=bar_h,
+        color=PALETTE["win"],
+        label="Max win streak",
+        zorder=2,
+    )
+    ax.barh(
+        y + bar_h / 2,
+        loss_obs,
+        height=bar_h,
+        color=PALETTE["loss"],
+        label="Max loss streak",
+        zorder=2,
+    )
+
+    rightmost = float(max(win_obs.max(), loss_obs.max()))
+
+    def _annotate(actual: float, expected: float, ypos: float) -> None:
+        if math.isnan(expected):
+            text = f"{int(actual)}  (expected ~n/a)"
+        else:
+            text = f"{int(actual)}  (expected ~{expected:.0f})"
+            if actual - expected >= 2:
+                text += " *"
+        ax.text(
+            actual + max(0.15, rightmost * 0.015),
+            ypos,
+            text,
+            va="center",
+            ha="left",
+            fontsize=9,
+            color=PALETTE["text"],
+        )
+
+    for i in range(n):
+        _annotate(win_obs[i], win_exp[i], y[i] - bar_h / 2)
+        _annotate(loss_obs[i], loss_exp[i], y[i] + bar_h / 2)
+
+    ax.set_yticks(y)
+    ax.set_yticklabels(qualifying["person"].tolist())
+    ax.invert_yaxis()
+    ax.set_xlim(0, rightmost * 1.30 + 2.5)
+    ax.set_xlabel("Streak length (games)")
+    ax.legend(loc="lower right", frameon=False)
+
+    ax.set_title("Longest win & loss streaks per player")
+    _subtitle(
+        ax,
+        "Observed max vs coin-flip baseline assuming each game is i.i.d. with "
+        "the player's WR. A '*' marks streaks at least 2 games above the "
+        "i.i.d. expectation.",
+    )
+    _polish_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
+def _plot_longest_streaks_per_person(row: pd.Series, label: str) -> plt.Figure:
+    n = int(row["n_games"])
+    wr = float(row["wr"])
+    max_w = int(row["max_win_streak"])
+    max_l = int(row["max_loss_streak"])
+    exp_w = float(row["expected_win_streak"])
+    exp_l = float(row["expected_loss_streak"])
+    win_dates = _format_streak_dates(row["win_start"], row["win_end"])
+    loss_dates = _format_streak_dates(row["loss_start"], row["loss_end"])
+
+    fig = plt.figure(figsize=(9.5, 4.8))
+    ax = fig.add_axes((0.06, 0.10, 0.88, 0.70))
+    ax.set_axis_off()
+
+    def _exp_text(expected: float) -> str:
+        return "n/a" if math.isnan(expected) else f"{expected:.1f}"
+
+    # Two big headline numbers side-by-side.
+    ax.text(
+        0.25,
+        0.78,
+        str(max_w),
+        ha="center",
+        va="center",
+        fontsize=56,
+        fontweight="bold",
+        color=PALETTE["win"],
+    )
+    ax.text(
+        0.25,
+        0.40,
+        "MAX WIN STREAK",
+        ha="center",
+        va="center",
+        fontsize=11,
+        color=PALETTE["muted"],
+    )
+    ax.text(
+        0.25,
+        0.28,
+        win_dates or "no win streak",
+        ha="center",
+        va="center",
+        fontsize=10,
+        color=PALETTE["text"],
+    )
+    ax.text(
+        0.25,
+        0.14,
+        f"{max_w} vs expected {_exp_text(exp_w)}",
+        ha="center",
+        va="center",
+        fontsize=10,
+        color=PALETTE["muted"],
+    )
+
+    ax.text(
+        0.75,
+        0.78,
+        str(max_l),
+        ha="center",
+        va="center",
+        fontsize=56,
+        fontweight="bold",
+        color=PALETTE["loss"],
+    )
+    ax.text(
+        0.75,
+        0.40,
+        "MAX LOSS STREAK",
+        ha="center",
+        va="center",
+        fontsize=11,
+        color=PALETTE["muted"],
+    )
+    ax.text(
+        0.75,
+        0.28,
+        loss_dates or "no loss streak",
+        ha="center",
+        va="center",
+        fontsize=10,
+        color=PALETTE["text"],
+    )
+    ax.text(
+        0.75,
+        0.14,
+        f"{max_l} vs expected {_exp_text(exp_l)}",
+        ha="center",
+        va="center",
+        fontsize=10,
+        color=PALETTE["muted"],
+    )
+
+    fig.suptitle(f"Longest streaks - {label}", fontsize=14, fontweight="bold", y=0.96)
+    fig.text(
+        0.5,
+        0.86,
+        f"WR = {wr:.0%}, total games = {n}. Expected max under i.i.d. baseline shown.",
+        ha="center",
+        va="center",
+        fontsize=10,
+        style="italic",
+        color=PALETTE["muted"],
+    )
+    return fig
+
+
 # --- registry --------------------------------------------------------------
 
 #: All aggregate plot functions, in the order the runner script + notebook
@@ -12466,4 +12801,5 @@ ALL_PLOTS = [
     ("52_kda_dominance", plot_kda_dominance),
     ("53_rank_recovery", plot_rank_recovery),
     ("54_last_game_of_day", plot_last_game_of_day),
+    ("55_longest_streaks", plot_longest_streaks),
 ]

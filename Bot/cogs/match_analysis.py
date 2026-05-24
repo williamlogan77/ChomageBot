@@ -299,6 +299,12 @@ MORE_CHART_DEFS = [
         "🌙",
         "WR of last game on multi-game days — play-until-win or quit-while-ahead?",
     ),
+    (
+        "55_longest_streaks",
+        "Longest streaks",
+        "⛓️",
+        "Longest historical win/loss streaks vs coin-flip expectation",
+    ),
 ]
 
 

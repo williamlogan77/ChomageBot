@@ -6157,6 +6157,144 @@ def plot_role_winrate(df: pd.DataFrame, player: str | None = None) -> plt.Figure
     return fig
 
 
+def plot_player_role_matrix(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Player x role WR heatmap, coloured by each row's gap to that
+    player's own overall WR.
+
+    A flat heatmap of role WRs would be dominated by the fact that some
+    players are just better than others. Re-centring each row on the
+    player's personal baseline pulls out the role-specific story: who
+    over-performs on jungle relative to their own mean, who tanks on
+    support, etc.
+
+    Aggregate-only: per-person view returns an empty figure pointing the
+    reader back to the dropdown.
+    """
+    if not _is_aggregate(player):
+        return _empty_figure("Aggregate view only - pick 'All' from the dropdown")
+
+    mapped = df[df["role"].isin(ROLE_ORDER)]
+    if mapped.empty:
+        return _empty_figure("No matches with a mapped role")
+
+    # Per-player totals come from mapped games only — the same basis the
+    # cells and baselines use, so the n shown beside the row matches the
+    # n the baseline was computed from.
+    totals = mapped.groupby("person").agg(games=("win", "size"), wins=("win", "sum")).reset_index()
+    totals = totals[totals["games"] >= 100]
+    if totals.empty:
+        return _empty_figure("No player has >=100 mapped games")
+    totals["wr"] = totals["wins"] / totals["games"]
+    totals = totals.sort_values("games", ascending=False).head(10).reset_index(drop=True)
+    players = totals["person"].tolist()
+
+    cell = (
+        mapped[mapped["person"].isin(players)]
+        .groupby(["person", "role"])
+        .agg(games=("win", "size"), wins=("win", "sum"))
+        .reset_index()
+    )
+    cell["wr"] = cell["wins"] / cell["games"]
+
+    n_players = len(players)
+    n_roles = len(ROLE_ORDER)
+    wr_grid = np.full((n_players, n_roles), np.nan)
+    games_grid = np.zeros((n_players, n_roles), dtype=int)
+    delta_grid = np.full((n_players, n_roles), np.nan)
+
+    baseline_by_person = dict(zip(totals["person"], totals["wr"], strict=False))
+    for _, row in cell.iterrows():
+        pi = players.index(row["person"])
+        ri = ROLE_ORDER.index(row["role"])
+        games_grid[pi, ri] = int(row["games"])
+        if row["games"] >= 15:
+            wr_grid[pi, ri] = float(row["wr"])
+            delta_grid[pi, ri] = float(row["wr"]) - baseline_by_person[row["person"]]
+
+    # Colour scale: clip delta to +/-10pp, map to RdYlGn so the strongest
+    # over-/under-performers anchor the extremes. Anything inside the band
+    # interpolates linearly. set_bad paints low-n cells grey via NaN.
+    import matplotlib as mpl
+
+    cmap = mpl.colormaps.get_cmap("RdYlGn").copy()
+    cmap.set_bad(color="#dcdcdc")
+    norm = mpl.colors.Normalize(vmin=-0.10, vmax=0.10)
+    # delta_grid carries NaN where games < 15, so masking is automatic.
+    colour_data = np.clip(delta_grid, -0.10, 0.10)
+
+    fig, (ax, cax) = plt.subplots(
+        1, 2, figsize=(11.5, 0.55 * n_players + 2.5), gridspec_kw={"width_ratios": [22, 1]}
+    )
+    im = ax.imshow(colour_data, cmap=cmap, norm=norm, aspect="auto")
+
+    ax.set_xticks(np.arange(n_roles))
+    ax.set_xticklabels(ROLE_ORDER)
+    ax.set_yticks(np.arange(n_players))
+    # Bake the personal baseline into the y-tick label — keeps the layout
+    # simple (no extra axes to fight tight_layout) and puts the reference
+    # number physically next to the row it belongs to.
+    ax.set_yticklabels(
+        [
+            f"{_display_label(p) or p}\n{baseline_by_person[p]:.0%} (n={int(totals.loc[i, 'games'])})"
+            for i, p in enumerate(players)
+        ],
+        fontsize=9,
+    )
+
+    for pi in range(n_players):
+        for ri in range(n_roles):
+            n = games_grid[pi, ri]
+            if n < 15 or np.isnan(wr_grid[pi, ri]):
+                ax.text(
+                    ri,
+                    pi,
+                    "-",
+                    ha="center",
+                    va="center",
+                    fontsize=11,
+                    color=PALETTE["muted"],
+                )
+                continue
+            wr = wr_grid[pi, ri]
+            d = delta_grid[pi, ri]
+            # Near-baseline cells sit in the yellow zone of RdYlGn — dark
+            # text reads, white text disappears. Outside ~4pp the cmap
+            # darkens and white wins.
+            txt_colour = PALETTE["text"] if abs(d) < 0.04 else "white"
+            ax.text(
+                ri,
+                pi,
+                f"{wr:.0%}\nn={n}",
+                ha="center",
+                va="center",
+                fontsize=9,
+                color=txt_colour,
+            )
+
+    ax.set_xticks(np.arange(n_roles + 1) - 0.5, minor=True)
+    ax.set_yticks(np.arange(n_players + 1) - 0.5, minor=True)
+    ax.grid(which="minor", color="white", linewidth=2)
+    ax.tick_params(which="minor", length=0)
+    ax.tick_params(which="major", length=0)
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+
+    ax.set_title("Role winrate vs personal baseline")
+    _subtitle(
+        ax,
+        "Each cell coloured by gap to player's overall WR "
+        "(red below, green above, +/-10pp). Cells with <15 games shown grey.",
+    )
+
+    cbar = fig.colorbar(im, cax=cax)
+    cbar.set_label("Delta vs personal baseline (pp)")
+    cbar.set_ticks([-0.10, -0.05, 0.0, 0.05, 0.10])
+    cbar.ax.set_yticklabels(["-10", "-5", "0", "+5", "+10"])
+
+    fig.tight_layout()
+    return fig
+
+
 # --- registry --------------------------------------------------------------
 
 #: All aggregate plot functions, in the order the runner script + notebook
@@ -6192,4 +6330,5 @@ ALL_PLOTS = [
     ("28_playstyle_clusters", plot_playstyle_clusters),
     ("29_champion_freshness", plot_champion_freshness),
     ("30_role_winrate", plot_role_winrate),
+    ("31_player_role_matrix", plot_player_role_matrix),
 ]

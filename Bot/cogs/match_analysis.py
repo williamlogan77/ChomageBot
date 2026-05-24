@@ -25,6 +25,7 @@ that wants to render these charts.
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import io
 import logging
 import time
@@ -713,6 +714,9 @@ class MatchAnalysis(commands.Cog):
         # admin slash command posts one, or recovery finds an existing
         # panel in channel history.
         self._panel_message_id: int | None = None
+        # Heartbeat watchdog reads this; set at the end of each successful
+        # sticky_panel tick (topmost-check passed or re-post completed).
+        self._sticky_panel_last_fired: dt.datetime | None = None
         self.sticky_panel.start()
 
     def cog_unload(self) -> None:
@@ -834,6 +838,7 @@ class MatchAnalysis(commands.Cog):
             latest = m
             break
         if latest is not None and latest.id == self._panel_message_id:
+            self._sticky_panel_last_fired = dt.datetime.now()
             return
 
         bumper = f"{latest.id} from {latest.author}" if latest is not None else "(empty channel)"
@@ -863,6 +868,7 @@ class MatchAnalysis(commands.Cog):
                 f"Sticky panel: missing permission to post in <#{PANEL_CHANNEL_ID}>"
             )
         # Any other exception bubbles into sticky_panel_error and restarts.
+        self._sticky_panel_last_fired = dt.datetime.now()
 
     @sticky_panel.before_loop
     async def before_sticky_panel(self) -> None:

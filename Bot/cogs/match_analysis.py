@@ -182,6 +182,12 @@ MORE_CHART_DEFS = [
         "💰",
         "Does riding hot champs actually win? Per-cohort WR test.",
     ),
+    (
+        "44_win_autocorrelation",
+        "Win autocorrelation",
+        "📡",
+        "Lag-k correlation of win/loss series - momentum or mean-reversion?",
+    ),
 ]
 
 

@@ -9185,6 +9185,243 @@ def _ride_payoff_figure(
     return fig
 
 
+# --- 44. Win-sequence autocorrelation --------------------------------------
+
+# Minimum games for a player's win series to qualify. Below ~200 the
+# Bartlett ±1.96/sqrt(n) band is so wide that lag-k bars rarely cross,
+# which makes the chart misleadingly "all noise".
+_ACF_MIN_GAMES = 200
+
+# Lags we estimate. Beyond ~10 the sample size for the inner sum shrinks
+# noticeably and the cross-player overlap (different career lengths) gets
+# harder to interpret.
+_ACF_MAX_LAG = 10
+
+# Bootstrap iterations for the aggregate per-lag CI ribbon.
+_ACF_BOOTSTRAP = 2000
+
+
+def _win_acf(wins: np.ndarray, max_lag: int = _ACF_MAX_LAG) -> np.ndarray:
+    """Sample autocorrelation r(k) for k=1..max_lag on a binary series.
+
+    Uses the biased (n-denominator) estimator the task spec calls for so
+    the white-noise ±1.96/sqrt(n) Bartlett band is directly comparable.
+    Returns NaN at lag k if the series mean has zero variance (all wins
+    or all losses — the denominator vanishes).
+    """
+    w = np.asarray(wins, dtype=float)
+    n = w.size
+    mean = w.mean()
+    centred = w - mean
+    denom = float((centred * centred).sum())
+    if denom <= 0 or n <= 1:
+        return np.full(max_lag, np.nan)
+    out = np.empty(max_lag)
+    for k in range(1, max_lag + 1):
+        if k >= n:
+            out[k - 1] = np.nan
+            continue
+        out[k - 1] = float((centred[: n - k] * centred[k:]).sum()) / denom
+    return out
+
+
+def _person_win_series(df: pd.DataFrame, person: str) -> np.ndarray:
+    """Chronological 0/1 win sequence for one person across all their
+    accounts, sorted by game_start (the load_matches sort is by person
+    then game_start, but we re-sort defensively in case a caller pre-
+    filtered)."""
+    d = df[df["person"] == person].sort_values("game_start")
+    return d["win"].to_numpy(dtype=float)
+
+
+def plot_win_autocorrelation(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Lag-k autocorrelation of the win/loss sequence — direct momentum
+    test that doesn't condition on a streak.
+
+    Per-person: stem plot of r(k) for k=1..10 against the Bartlett white-
+    noise band ±1.96/sqrt(n). Bars outside the band are evidence that
+    "win at game t" carries information about "win at game t+k".
+
+    Aggregate: macro-average r(k) across players with >=200 games, with
+    bootstrap 95% CIs (B=2000) on the per-player vector. A lag whose CI
+    excludes zero is group-wide non-random structure.
+    """
+    if _is_aggregate(player):
+        return _plot_win_autocorrelation_aggregate(df)
+
+    person = _resolve_person(df, player)
+    label = _display_label(player) or "this player"
+    if person is None:
+        return _empty_figure(f"No games for {label}")
+    wins = _person_win_series(df, person)
+    n = wins.size
+    if n < _ACF_MIN_GAMES:
+        return _empty_figure(f"Need >=200 games for autocorrelation ({n} games)")
+
+    r = _win_acf(wins, _ACF_MAX_LAG)
+    ci = 1.96 / math.sqrt(n)
+    lags = np.arange(1, _ACF_MAX_LAG + 1)
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    markerline, stemlines, baseline = ax.stem(
+        lags,
+        r,
+        linefmt="-",
+        markerfmt="o",
+        basefmt=" ",
+    )
+    plt.setp(stemlines, color=PALETTE["primary"], linewidth=1.8, alpha=0.85)
+    plt.setp(markerline, color=PALETTE["primary"], markersize=6, markeredgecolor="white")
+    plt.setp(baseline, visible=False)
+
+    ax.axhline(0.0, color=PALETTE["spine"], linewidth=1.0)
+    ax.axhline(
+        ci,
+        color=PALETTE["muted"],
+        linewidth=0.9,
+        linestyle=(0, (4, 4)),
+        alpha=0.7,
+        label=f"95% white-noise band (+/- {ci:.3f})",
+    )
+    ax.axhline(
+        -ci,
+        color=PALETTE["muted"],
+        linewidth=0.9,
+        linestyle=(0, (4, 4)),
+        alpha=0.7,
+    )
+
+    # Annotate any lag that escapes the IID band — the whole point of the
+    # chart is "which lags are real signal".
+    for lag, val in zip(lags, r, strict=False):
+        if np.isnan(val):
+            continue
+        if abs(val) > ci:
+            colour = PALETTE["win"] if val > 0 else PALETTE["loss"]
+            ax.annotate(
+                f"{val:+.3f}",
+                xy=(lag, val),
+                xytext=(0, 10 if val > 0 else -14),
+                textcoords="offset points",
+                ha="center",
+                fontsize=9,
+                color=colour,
+                fontweight="bold",
+            )
+
+    ax.set_xticks(lags)
+    ax.set_xlabel("Lag k (games)")
+    ax.set_ylabel("Autocorrelation r(k)")
+    ax.set_title(_title(f"Win autocorrelation - {label}", None))
+    _subtitle(
+        ax,
+        f"Lag-k correlation of win/loss sequence (n={n}). Bars outside "
+        f"+/- {ci:.3f} indicate non-random structure (momentum if positive, "
+        f"mean-reversion if negative).",
+    )
+    # Symmetric y-limits so the +/- band reads visually balanced.
+    ymax = max(0.15, float(np.nanmax(np.abs(r))) * 1.3 if np.isfinite(r).any() else 0.15, ci * 1.6)
+    ax.set_ylim(-ymax, ymax)
+    ax.legend(loc="upper right", frameon=False, fontsize=9)
+    _polish_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
+def _plot_win_autocorrelation_aggregate(df: pd.DataFrame) -> plt.Figure:
+    counts = df.groupby("person").size()
+    qualifying = counts[counts >= _ACF_MIN_GAMES].index.tolist()
+    if len(qualifying) < 3:
+        return _empty_figure("Need >=3 players with >=200 games")
+
+    # Per-player ACF matrix: rows = players, cols = lag 1..max_lag.
+    rows: list[np.ndarray] = []
+    for person in qualifying:
+        wins = _person_win_series(df, person)
+        rows.append(_win_acf(wins, _ACF_MAX_LAG))
+    acf_matrix = np.vstack(rows)
+    n_players = acf_matrix.shape[0]
+
+    macro = np.nanmean(acf_matrix, axis=0)
+
+    # Bootstrap: resample player indices with replacement, take nanmean
+    # per lag, percentile across resamples.
+    rng = np.random.default_rng(0)
+    boot = np.empty((_ACF_BOOTSTRAP, _ACF_MAX_LAG))
+    for b in range(_ACF_BOOTSTRAP):
+        idx = rng.integers(0, n_players, size=n_players)
+        boot[b] = np.nanmean(acf_matrix[idx], axis=0)
+    ci_lo = np.nanpercentile(boot, 2.5, axis=0)
+    ci_hi = np.nanpercentile(boot, 97.5, axis=0)
+
+    lags = np.arange(1, _ACF_MAX_LAG + 1)
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    # Bootstrap ribbon first so the stem sits on top.
+    ax.fill_between(
+        lags,
+        ci_lo,
+        ci_hi,
+        color=PALETTE["primary"],
+        alpha=0.18,
+        linewidth=0,
+        label="Bootstrap 95% CI",
+    )
+
+    markerline, stemlines, baseline = ax.stem(
+        lags,
+        macro,
+        linefmt="-",
+        markerfmt="o",
+        basefmt=" ",
+    )
+    plt.setp(stemlines, color=PALETTE["primary"], linewidth=1.8, alpha=0.9)
+    plt.setp(markerline, color=PALETTE["primary"], markersize=6, markeredgecolor="white")
+    plt.setp(baseline, visible=False)
+
+    ax.axhline(0.0, color=PALETTE["spine"], linewidth=1.0)
+
+    # Lags whose bootstrap CI excludes zero = group-wide signal at that lag.
+    for lag, val, lo, hi in zip(lags, macro, ci_lo, ci_hi, strict=False):
+        if np.isnan(val) or np.isnan(lo) or np.isnan(hi):
+            continue
+        if lo > 0 or hi < 0:
+            colour = PALETTE["win"] if val > 0 else PALETTE["loss"]
+            ax.annotate(
+                f"{val:+.3f}\n[{lo:+.3f}, {hi:+.3f}]",
+                xy=(lag, val),
+                xytext=(0, 14 if val > 0 else -28),
+                textcoords="offset points",
+                ha="center",
+                fontsize=8.5,
+                color=colour,
+                fontweight="bold",
+            )
+
+    ax.set_xticks(lags)
+    ax.set_xlabel("Lag k (games)")
+    ax.set_ylabel("Macro-averaged r(k)")
+    ax.set_title("Win autocorrelation - aggregate")
+    _subtitle(
+        ax,
+        f"Macro-averaged lag-k correlation across {n_players} players "
+        f"(>=200 games each). Bands = bootstrap 95% CI on per-player values; "
+        f"a lag whose CI excludes zero is group-wide momentum or mean-reversion.",
+    )
+    span = max(
+        0.05,
+        float(np.nanmax(np.abs(np.concatenate([macro, ci_lo, ci_hi])))) * 1.35
+        if np.isfinite(np.concatenate([macro, ci_lo, ci_hi])).any()
+        else 0.05,
+    )
+    ax.set_ylim(-span, span)
+    ax.legend(loc="upper right", frameon=False, fontsize=9)
+    _polish_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
 # --- registry --------------------------------------------------------------
 
 #: All aggregate plot functions, in the order the runner script + notebook
@@ -9233,4 +9470,5 @@ ALL_PLOTS = [
     ("41_dow_hour_heatmap", plot_dow_hour_heatmap),
     ("42_same_champ_behavior", plot_same_champ_behavior),
     ("43_ride_payoff", plot_ride_payoff),
+    ("44_win_autocorrelation", plot_win_autocorrelation),
 ]

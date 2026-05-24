@@ -194,6 +194,12 @@ MORE_CHART_DEFS = [
         "💱",
         "Buy/sell champion recs based on shrunken WR + play frequency",
     ),
+    (
+        "46_per_account_breakdown",
+        "Per-account WR",
+        "🎭",
+        "Smurf/alt detection - does each Riot account have the same WR?",
+    ),
 ]
 
 

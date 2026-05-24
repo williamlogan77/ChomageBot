@@ -9625,6 +9625,222 @@ def plot_champ_swap_recs(df: pd.DataFrame, player: str | None = None) -> plt.Fig
     return fig
 
 
+def _per_account_table(d: pd.DataFrame, min_games: int = 10) -> pd.DataFrame:
+    """Per-account WR table for one person: (riot_account, games, wins, wr, ci_lo, ci_hi).
+
+    Filters out accounts with fewer than ``min_games`` games, since Wilson
+    CIs on tiny samples (e.g. a 2-game throwaway alt) drown the chart in
+    [0, 1] whiskers and tell us nothing about smurf vs main.
+    """
+    agg = d.groupby("riot_account")["win"].agg(games="count", wins="sum").reset_index()
+    agg = agg[agg["games"] >= min_games].copy()
+    if agg.empty:
+        return agg
+    agg["wr"] = agg["wins"] / agg["games"]
+    cis = [wilson_ci(int(w), int(n)) for w, n in zip(agg["wins"], agg["games"], strict=False)]
+    agg["ci_lo"] = [c[0] for c in cis]
+    agg["ci_hi"] = [c[1] for c in cis]
+    return agg.sort_values("games", ascending=False).reset_index(drop=True)
+
+
+def _chi2_accounts_pvalue(accounts: pd.DataFrame) -> tuple[float, float]:
+    """2×k chi² of (wins, losses) across this person's k Riot accounts.
+
+    Tests "do these accounts share one true WR?" — small p means the
+    accounts behave differently (smurf/main split). Returns (chi2, p).
+    Uses the in-module ``chi2_pvalue`` Wilson-Hilferty approximation so we
+    don't pull in scipy.
+    """
+    if len(accounts) < 2:
+        return (0.0, 1.0)
+    wins = accounts["wins"].to_numpy(dtype=float)
+    games = accounts["games"].to_numpy(dtype=float)
+    losses = games - wins
+    grand = float(games.sum())
+    total_wins = float(wins.sum())
+    total_losses = float(losses.sum())
+    if grand <= 0 or total_wins <= 0 or total_losses <= 0:
+        return (0.0, 1.0)
+    chi2 = 0.0
+    for w, lo, n in zip(wins, losses, games, strict=False):
+        exp_w = total_wins * n / grand
+        exp_l = total_losses * n / grand
+        if exp_w > 0:
+            chi2 += (w - exp_w) ** 2 / exp_w
+        if exp_l > 0:
+            chi2 += (lo - exp_l) ** 2 / exp_l
+    df_chi = len(accounts) - 1
+    return (chi2, chi2_pvalue(chi2, df_chi))
+
+
+def plot_per_account_breakdown(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Smurf/alt detection — split each person's games by Riot account.
+
+    Per-person view shows one bar per account with Wilson 95% CI and a
+    reference line at the person's overall WR. Aggregate view stacks
+    every person with ≥2 qualifying accounts so you can scan the whole
+    cohort for within-person WR gaps. A 2×k chi² flags accounts whose
+    win rates differ more than chance would explain.
+    """
+    is_agg = _is_aggregate(player)
+
+    if is_agg:
+        # One row per (person, riot_account) for everyone in the cohort,
+        # then keep only persons who clear both gates: ≥50 games total
+        # AND ≥2 accounts that themselves clear the ≥10-games floor.
+        person_totals = df.groupby("person").size()
+        candidates = [p for p, n in person_totals.items() if n >= 50]
+        per_person: list[tuple[str, pd.DataFrame, float]] = []
+        for name in candidates:
+            sub = df[df["person"] == name]
+            tbl = _per_account_table(sub, min_games=10)
+            if len(tbl) >= 2:
+                _, p_val = _chi2_accounts_pvalue(tbl)
+                per_person.append((name, tbl, p_val))
+
+        if len(per_person) < 2:
+            return _empty_figure("No person has ≥2 Riot accounts with ≥10 games each")
+
+        # Order persons by within-person WR spread, biggest variation on
+        # top — that's where the smurf/main story is most visible.
+        per_person.sort(key=lambda t: t[1]["wr"].max() - t[1]["wr"].min(), reverse=True)
+
+        n_people = len(per_person)
+        fig, ax = plt.subplots(figsize=(10, max(7.0, 0.95 * n_people + 1.6)))
+
+        # Each person occupies one "row slot" at integer y. Within that
+        # slot we stack the person's accounts vertically as sub-bars
+        # spanning ±row_h/2 around the centre, sized to fit k accounts
+        # without overlap regardless of k.
+        row_h = 0.78
+        row_centres = np.arange(n_people)
+        # Slim navy → teal → orange cycle keeps adjacent person blocks
+        # visually distinct without relying on the ride-payoff/win-loss
+        # green/red that mean something elsewhere on the dashboard.
+        acct_colours = [PALETTE["primary"], PALETTE["accent_teal"], PALETTE["accent_orange"]]
+
+        for row_i, (name, tbl, p_val) in enumerate(per_person):
+            k = len(tbl)
+            bar_h = row_h / k
+            # Largest n at the top of each block (tbl is sorted desc on
+            # games already) so the main account leads visually.
+            offsets = np.linspace(-row_h / 2 + bar_h / 2, row_h / 2 - bar_h / 2, k)
+            for j, (offset, (_, row)) in enumerate(zip(offsets, tbl.iterrows(), strict=False)):
+                y = row_centres[row_i] + offset
+                colour = acct_colours[j % len(acct_colours)]
+                ax.barh(y, row["wr"], height=bar_h * 0.92, color=colour, alpha=0.85)
+                ax.errorbar(
+                    row["wr"],
+                    y,
+                    xerr=[[row["wr"] - row["ci_lo"]], [row["ci_hi"] - row["wr"]]],
+                    **WHISKER_STYLE,
+                )
+                # Anchor the annotation to the bar tip but clip at 0.97
+                # so very-high-WR alts don't push text past the axis.
+                ax.annotate(
+                    f"{row['riot_account']}  n={int(row['games'])}  {row['wr']:.0%}",
+                    xy=(min(row["wr"] + 0.01, 0.97), y),
+                    xytext=(6, 0),
+                    textcoords="offset points",
+                    va="center",
+                    fontsize=8.5,
+                    color=PALETTE["text"],
+                )
+
+        # Person-name labels on the left axis, with the chi² p-value
+        # inline so the reader can spot significant splits in one pass.
+        ax.set_yticks(row_centres)
+        ax.set_yticklabels(
+            [f"{name}  (p={p:.3f})" for name, _, p in per_person],
+            color=PALETTE["text"],
+        )
+        ax.invert_yaxis()
+        ax.set_xlim(0, 1)
+        ax.axvline(0.5, color=PALETTE["muted"], linewidth=0.8, linestyle=(0, (4, 4)), alpha=0.55)
+        ax.set_xlabel("Win rate")
+        ax.set_title(_title("Per-account WR breakdown - main vs smurf/alt detection", None))
+        _subtitle(
+            ax,
+            "Each row = one person, one bar per Riot account (>=10 games). "
+            "Chi-square p-values flag significant within-person WR differences.",
+        )
+        _polish_ax(ax)
+        fig.tight_layout()
+        return fig
+
+    # --- per-person view ---------------------------------------------------
+    person_name = _resolve_person(df, player)
+    if person_name is None:
+        return _empty_figure("No data for the selection")
+    d = df[df["person"] == person_name]
+    if d.empty:
+        return _empty_figure("No data for the selection")
+
+    n_total = len(d)
+    n_accounts_raw = d["riot_account"].nunique()
+    # Account-count gate comes before the games-count gate: a 200-game
+    # single-account player is "only 1 Riot account", not "Need >=50".
+    if n_accounts_raw < 2:
+        return _empty_figure(f"{person_name} has only 1 Riot account")
+    if n_total < 50:
+        return _empty_figure(f"Need >=50 games ({n_total})")
+
+    tbl = _per_account_table(d, min_games=10)
+    if len(tbl) < 2:
+        return _empty_figure(f"{person_name} has <2 Riot accounts with >=10 games")
+
+    chi2, p_val = _chi2_accounts_pvalue(tbl)
+    overall_wr = float(d["win"].mean())
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    y = np.arange(len(tbl))
+    wrs = tbl["wr"].to_numpy()
+    lo = tbl["ci_lo"].to_numpy()
+    hi = tbl["ci_hi"].to_numpy()
+    counts = tbl["games"].to_numpy()
+
+    max_n = max(counts.max(), 1)
+    alphas = np.clip(0.45 + 0.55 * np.sqrt(counts / max_n), 0.45, 1.0)
+    colours = [(*plt.matplotlib.colors.to_rgb(PALETTE["primary"]), a) for a in alphas]
+
+    ax.barh(y, wrs, color=colours, height=0.65)
+    ax.errorbar(wrs, y, xerr=[wrs - lo, hi - wrs], **WHISKER_STYLE)
+    ax.axvline(
+        overall_wr,
+        color=PALETTE["accent_orange"],
+        linewidth=1.2,
+        linestyle=(0, (3, 3)),
+        alpha=0.85,
+        label=f"overall WR {overall_wr:.0%}",
+    )
+    ax.set_yticks(y)
+    ax.set_yticklabels(tbl["riot_account"], color=PALETTE["text"])
+    ax.invert_yaxis()
+    ax.set_xlim(0, 1)
+    ax.set_xlabel("Win rate")
+    ax.set_title(_title(f"Per-account breakdown - {person_name}", None))
+    sig_label = "significant" if p_val < 0.05 else "not significant"
+    _subtitle(
+        ax,
+        f"{len(tbl)} Riot accounts with >=10 games. "
+        f"Chi-square p={p_val:.3f}: {sig_label} within-person variation.",
+    )
+    for yi, (wr, n, acct) in enumerate(zip(wrs, counts, tbl["riot_account"], strict=False)):
+        ax.annotate(
+            f"{acct}  n={int(n)}  WR={wr:.0%}",
+            xy=(min(wr + 0.01, 0.97), yi),
+            xytext=(6, 0),
+            textcoords="offset points",
+            va="center",
+            fontsize=9,
+            color=PALETTE["text"],
+        )
+    ax.legend(loc="lower right")
+    _polish_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
 # --- registry --------------------------------------------------------------
 
 #: All aggregate plot functions, in the order the runner script + notebook
@@ -9675,4 +9891,5 @@ ALL_PLOTS = [
     ("43_ride_payoff", plot_ride_payoff),
     ("44_win_autocorrelation", plot_win_autocorrelation),
     ("45_champ_swap_recs", plot_champ_swap_recs),
+    ("46_per_account_breakdown", plot_per_account_breakdown),
 ]

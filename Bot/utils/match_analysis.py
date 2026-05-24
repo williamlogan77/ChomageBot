@@ -65,6 +65,194 @@ MAX_INTER_SNAPSHOT_MIN = 120
 RANK_GAP_HOURS = 24 * 30
 
 
+# Canonical role display order — used for x-axis ordering of role charts.
+ROLE_ORDER = ["TOP", "JUNGLE", "MID", "ADC", "SUPPORT"]
+
+
+# Heuristic primary-role mapping; some champs flex (e.g. Sett: top/support — we say TOP).
+# Keys match the Riot internal `dataName` (Chogath, Leblanc, FiddleSticks, MonkeyKing, ...)
+# as stored in match_stats.champion. Champions not present here resolve to "UNKNOWN" and
+# are skipped by the per-role winrate chart.
+CHAMPION_ROLES: dict[str, str] = {
+    # TOP
+    "Aatrox": "TOP",
+    "Ambessa": "TOP",
+    "Camille": "TOP",
+    "Chogath": "TOP",
+    "Darius": "TOP",
+    "DrMundo": "TOP",
+    "Fiora": "TOP",
+    "Gangplank": "TOP",
+    "Garen": "TOP",
+    "Gnar": "TOP",
+    "Gwen": "TOP",
+    "Illaoi": "TOP",
+    "Irelia": "TOP",
+    "Jax": "TOP",
+    "Jayce": "TOP",
+    "Kayle": "TOP",
+    "Kennen": "TOP",
+    "Kled": "TOP",
+    "KSante": "TOP",
+    "Malphite": "TOP",
+    "Mordekaiser": "TOP",
+    "Nasus": "TOP",
+    "Ornn": "TOP",
+    "Pantheon": "TOP",
+    "Poppy": "TOP",
+    "Quinn": "TOP",
+    "Renekton": "TOP",
+    "Riven": "TOP",
+    "Rumble": "TOP",
+    "Sett": "TOP",
+    "Shen": "TOP",
+    "Singed": "TOP",
+    "Sion": "TOP",
+    "Teemo": "TOP",
+    "Tryndamere": "TOP",
+    "Urgot": "TOP",
+    "Vladimir": "TOP",
+    "Volibear": "TOP",
+    "Warwick": "TOP",
+    "Yasuo": "TOP",
+    "Yorick": "TOP",
+    # JUNGLE
+    "Amumu": "JUNGLE",
+    "Belveth": "JUNGLE",
+    "Briar": "JUNGLE",
+    "Diana": "JUNGLE",
+    "Ekko": "JUNGLE",
+    "Elise": "JUNGLE",
+    "Evelynn": "JUNGLE",
+    "FiddleSticks": "JUNGLE",
+    "Gragas": "JUNGLE",
+    "Graves": "JUNGLE",
+    "Hecarim": "JUNGLE",
+    "Ivern": "JUNGLE",
+    "JarvanIV": "JUNGLE",
+    "Karthus": "JUNGLE",
+    "Kayn": "JUNGLE",
+    "Khazix": "JUNGLE",
+    "Kindred": "JUNGLE",
+    "LeeSin": "JUNGLE",
+    "Lillia": "JUNGLE",
+    "MasterYi": "JUNGLE",
+    "MonkeyKing": "JUNGLE",
+    "Naafiri": "JUNGLE",
+    "Nidalee": "JUNGLE",
+    "Nocturne": "JUNGLE",
+    "Nunu": "JUNGLE",
+    "Olaf": "JUNGLE",
+    "Rammus": "JUNGLE",
+    "RekSai": "JUNGLE",
+    "Rengar": "JUNGLE",
+    "Sejuani": "JUNGLE",
+    "Shaco": "JUNGLE",
+    "Shyvana": "JUNGLE",
+    "Skarner": "JUNGLE",
+    "Trundle": "JUNGLE",
+    "Udyr": "JUNGLE",
+    "Vi": "JUNGLE",
+    "Viego": "JUNGLE",
+    "XinZhao": "JUNGLE",
+    "Zac": "JUNGLE",
+    # MID
+    "Ahri": "MID",
+    "Akali": "MID",
+    "Akshan": "MID",
+    "Anivia": "MID",
+    "Annie": "MID",
+    "AurelionSol": "MID",
+    "Aurora": "MID",
+    "Azir": "MID",
+    "Cassiopeia": "MID",
+    "Fizz": "MID",
+    "Galio": "MID",
+    "Heimerdinger": "MID",
+    "Hwei": "MID",
+    "Kassadin": "MID",
+    "Katarina": "MID",
+    "Leblanc": "MID",
+    "Lissandra": "MID",
+    "Lux": "MID",
+    "Malzahar": "MID",
+    "Neeko": "MID",
+    "Orianna": "MID",
+    "Qiyana": "MID",
+    "Ryze": "MID",
+    "Sylas": "MID",
+    "Syndra": "MID",
+    "Taliyah": "MID",
+    "Talon": "MID",
+    "TwistedFate": "MID",
+    "Veigar": "MID",
+    "Velkoz": "MID",
+    "Vex": "MID",
+    "Viktor": "MID",
+    "Xerath": "MID",
+    "Yone": "MID",
+    "Zed": "MID",
+    "Ziggs": "MID",
+    "Zoe": "MID",
+    # ADC
+    "Aphelios": "ADC",
+    "Ashe": "ADC",
+    "Caitlyn": "ADC",
+    "Corki": "ADC",
+    "Draven": "ADC",
+    "Ezreal": "ADC",
+    "Jhin": "ADC",
+    "Jinx": "ADC",
+    "Kaisa": "ADC",
+    "Kalista": "ADC",
+    "KogMaw": "ADC",
+    "Lucian": "ADC",
+    "MissFortune": "ADC",
+    "Nilah": "ADC",
+    "Samira": "ADC",
+    "Senna": "ADC",
+    "Sivir": "ADC",
+    "Smolder": "ADC",
+    "Tristana": "ADC",
+    "Twitch": "ADC",
+    "Varus": "ADC",
+    "Vayne": "ADC",
+    "Xayah": "ADC",
+    "Yunara": "ADC",
+    "Zeri": "ADC",
+    # SUPPORT
+    "Alistar": "SUPPORT",
+    "Bard": "SUPPORT",
+    "Blitzcrank": "SUPPORT",
+    "Brand": "SUPPORT",
+    "Braum": "SUPPORT",
+    "Janna": "SUPPORT",
+    "Karma": "SUPPORT",
+    "Leona": "SUPPORT",
+    "Lulu": "SUPPORT",
+    "Maokai": "SUPPORT",
+    "Mel": "SUPPORT",
+    "Milio": "SUPPORT",
+    "Morgana": "SUPPORT",
+    "Nami": "SUPPORT",
+    "Nautilus": "SUPPORT",
+    "Pyke": "SUPPORT",
+    "Rakan": "SUPPORT",
+    "Rell": "SUPPORT",
+    "Renata": "SUPPORT",
+    "Seraphine": "SUPPORT",
+    "Sona": "SUPPORT",
+    "Soraka": "SUPPORT",
+    "Swain": "SUPPORT",
+    "TahmKench": "SUPPORT",
+    "Taric": "SUPPORT",
+    "Thresh": "SUPPORT",
+    "Yuumi": "SUPPORT",
+    "Zilean": "SUPPORT",
+    "Zyra": "SUPPORT",
+}
+
+
 # --- Visual style -----------------------------------------------------------
 
 PALETTE = {
@@ -523,6 +711,7 @@ def load_matches(db_path: Path = DEFAULT_DB) -> pd.DataFrame:
     df["duration_bucket"] = pd.cut(
         df["duration_min"], bins=DURATION_BINS_MIN, labels=DURATION_LABELS, right=False
     )
+    df["role"] = df["champion"].map(CHAMPION_ROLES).fillna("UNKNOWN")
 
     # Per-person time-series features (treats multi-account users as one
     # continuous game stream — sorted by game_start so the streak/gap
@@ -5841,6 +6030,133 @@ def plot_champion_freshness(df: pd.DataFrame, player: str | None = None) -> plt.
     return fig
 
 
+def plot_role_winrate(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Win rate split by inferred champion role.
+
+    Role is a heuristic from CHAMPION_ROLES — champions that flex get
+    their more common role. Rows with an unmapped champion (role
+    "UNKNOWN") are skipped.
+
+    Per-person: bars are coloured against the player's overall baseline
+    so a glance reads "which roles am I outperforming my own average on?".
+    Aggregate: macro-mean across players with >=30 games in that role.
+    """
+    d = df[df["role"].isin(ROLE_ORDER)]
+    if d.empty:
+        return _empty_figure("No matches with a mapped role")
+
+    if _is_aggregate(player):
+        per_person = (
+            d.groupby(["role", "person"])
+            .agg(games=("win", "size"), wins=("win", "sum"))
+            .reset_index()
+        )
+        # Macro across people with a credible sample at that role — a
+        # single 60% Zac main shouldn't swing the cohort JUNGLE WR.
+        per_person = per_person[per_person["games"] >= 30]
+        if per_person.empty:
+            return _empty_figure("No role has >=30 games for any player")
+        per_person["wr"] = per_person["wins"] / per_person["games"]
+        agg = (
+            per_person.groupby("role")
+            .agg(
+                winrate=("wr", "mean"),
+                std=("wr", "std"),
+                n_people=("person", "nunique"),
+                games=("games", "sum"),
+            )
+            .reset_index()
+        )
+        agg["ci_lo"] = (agg["winrate"] - agg["std"].fillna(0)).clip(lower=0)
+        agg["ci_hi"] = (agg["winrate"] + agg["std"].fillna(0)).clip(upper=1)
+        # Cohort baseline = macro-mean of per-person overall WR (people
+        # with >=30 mapped games), matching the per-role aggregation rule.
+        per_person_overall = (
+            d.groupby("person").agg(games=("win", "size"), wins=("win", "sum")).query("games >= 30")
+        )
+        baseline = (
+            (per_person_overall["wins"] / per_person_overall["games"]).mean()
+            if not per_person_overall.empty
+            else 0.5
+        )
+        subtitle = (
+            "Macro-mean per-role WR across players with >=30 games at that role. "
+            "Compare to the cohort baseline (dashed)."
+        )
+    else:
+        d_p = _filter_player(d, player)
+        if d_p.empty:
+            return _empty_figure("No matches for the selection")
+        agg = d_p.groupby("role").agg(games=("win", "size"), wins=("win", "sum")).reset_index()
+        agg = agg[agg["games"] >= 10]
+        if agg.empty:
+            return _empty_figure("No role with >=10 games for this player")
+        agg["winrate"] = agg["wins"] / agg["games"]
+        cis = [wilson_ci(int(w), int(n)) for w, n in zip(agg["wins"], agg["games"], strict=False)]
+        agg["ci_lo"] = [c[0] for c in cis]
+        agg["ci_hi"] = [c[1] for c in cis]
+        baseline = float(d_p["win"].mean())
+        subtitle = "Per-role WR with Wilson 95% CI. Compare to your overall baseline (dashed)."
+
+    role_pos = {r: i for i, r in enumerate(ROLE_ORDER)}
+    agg["order"] = agg["role"].map(role_pos)
+    agg = agg.sort_values("order").reset_index(drop=True)
+
+    means = agg["winrate"].to_numpy()
+    lo = agg["ci_lo"].to_numpy()
+    hi = agg["ci_hi"].to_numpy()
+    counts = agg["games"].to_numpy()
+
+    # Colour each bar against the focal baseline so the chart answers
+    # "where am I above/below my own average?" at a glance. 5pp deadband
+    # keeps tiny noise-level deltas neutral.
+    def role_colour(wr: float) -> str:
+        if wr > baseline + 0.05:
+            return PALETTE["win"]
+        if wr < baseline - 0.05:
+            return PALETTE["loss"]
+        return PALETTE["neutral"]
+
+    colours = [role_colour(float(wr)) for wr in means]
+
+    fig, ax = plt.subplots(figsize=(11, 5.2))
+    x = np.arange(len(agg))
+    ax.bar(x, means, color=colours, width=0.65, edgecolor="white", linewidth=0.6)
+    ax.errorbar(x, means, yerr=[means - lo, hi - means], **WHISKER_STYLE)
+
+    ax.axhline(
+        baseline,
+        color=PALETTE["muted"],
+        linewidth=1.0,
+        linestyle=(0, (4, 4)),
+        alpha=0.7,
+        label=f"baseline {baseline:.0%}",
+    )
+    ax.set_xticks(x)
+    ax.set_xticklabels(agg["role"].tolist())
+    ax.set_ylim(0, 1)
+    ax.set_ylabel("Win rate")
+    ax.set_title(_title("Win rate by role", player))
+    _subtitle(ax, subtitle)
+    ax.legend(loc="upper right")
+
+    for xi, (wr, n) in enumerate(zip(means, counts, strict=False)):
+        ax.annotate(
+            f"{wr:.0%}  ·  n={int(n)}",
+            xy=(xi, wr),
+            xytext=(0, 8),
+            textcoords="offset points",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+            color=PALETTE["text"],
+        )
+
+    _polish_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
 # --- registry --------------------------------------------------------------
 
 #: All aggregate plot functions, in the order the runner script + notebook
@@ -5875,4 +6191,5 @@ ALL_PLOTS = [
     ("27_recent_sessions", plot_recent_sessions),
     ("28_playstyle_clusters", plot_playstyle_clusters),
     ("29_champion_freshness", plot_champion_freshness),
+    ("30_role_winrate", plot_role_winrate),
 ]

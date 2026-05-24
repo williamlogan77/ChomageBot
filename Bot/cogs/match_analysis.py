@@ -1436,11 +1436,17 @@ class MatchAnalysis(commands.Cog):
 
     @app_commands.command(
         name="me",
-        description="Post your personal insights card (TL;DR of your stats)",
+        description="Post your (or someone's) insights card",
     )
     @app_commands.guild_only()
-    async def me(self, interaction: discord.Interaction) -> None:
+    @app_commands.describe(user="(optional) look up another player's card instead of yours")
+    async def me(
+        self,
+        interaction: discord.Interaction,
+        user: discord.User | None = None,
+    ) -> None:
         await interaction.response.defer(ephemeral=False)
+        target = user or interaction.user
 
         try:
             df = await _load_matches_cached(self.bot.db_path)
@@ -1457,10 +1463,10 @@ class MatchAnalysis(commands.Cog):
 
         # discord_user_id is stored as TEXT in SQLite for legacy reasons;
         # cast both sides to str so we don't miss matches on dtype mismatch.
-        matches = df[df["discord_user_id"].astype(str) == str(interaction.user.id)]
+        matches = df[df["discord_user_id"].astype(str) == str(target.id)]
         if matches.empty:
             await interaction.followup.send(
-                f"No League account linked for {interaction.user.mention}. "
+                f"No League account linked for {target.mention}. "
                 "Link one with `/add_player` first.",
                 ephemeral=True,
             )
@@ -1490,11 +1496,17 @@ class MatchAnalysis(commands.Cog):
 
     @app_commands.command(
         name="me_text",
-        description="Compact text summary of your stats (no chart)",
+        description="Compact text summary (yours or someone's)",
     )
     @app_commands.guild_only()
-    async def me_text(self, interaction: discord.Interaction) -> None:
+    @app_commands.describe(user="(optional) look up another player's summary instead of yours")
+    async def me_text(
+        self,
+        interaction: discord.Interaction,
+        user: discord.User | None = None,
+    ) -> None:
         await interaction.response.defer(ephemeral=False)
+        target = user or interaction.user
 
         try:
             df = await _load_matches_cached(self.bot.db_path)
@@ -1509,10 +1521,10 @@ class MatchAnalysis(commands.Cog):
             )
             return
 
-        matches = df[df["discord_user_id"].astype(str) == str(interaction.user.id)]
+        matches = df[df["discord_user_id"].astype(str) == str(target.id)]
         if matches.empty:
             await interaction.followup.send(
-                f"No League account linked for {interaction.user.mention}. "
+                f"No League account linked for {target.mention}. "
                 "Link one with `/add_player` first.",
                 ephemeral=True,
             )
@@ -1534,11 +1546,17 @@ class MatchAnalysis(commands.Cog):
 
     @app_commands.command(
         name="me_todo",
-        description="3-5 actionable bullets — what to change to win more",
+        description="Prescriptive bullets (yours or someone's)",
     )
     @app_commands.guild_only()
-    async def me_todo(self, interaction: discord.Interaction) -> None:
+    @app_commands.describe(user="(optional) look up another player's to-do list instead of yours")
+    async def me_todo(
+        self,
+        interaction: discord.Interaction,
+        user: discord.User | None = None,
+    ) -> None:
         await interaction.response.defer(ephemeral=False)
+        target = user or interaction.user
 
         try:
             df = await _load_matches_cached(self.bot.db_path)
@@ -1553,10 +1571,10 @@ class MatchAnalysis(commands.Cog):
             )
             return
 
-        matches = df[df["discord_user_id"].astype(str) == str(interaction.user.id)]
+        matches = df[df["discord_user_id"].astype(str) == str(target.id)]
         if matches.empty:
             await interaction.followup.send(
-                f"No League account linked for {interaction.user.mention}. "
+                f"No League account linked for {target.mention}. "
                 "Link one with `/add_player` first.",
                 ephemeral=True,
             )

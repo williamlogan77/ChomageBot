@@ -32,7 +32,7 @@ import matplotlib
 matplotlib.use("Agg")  # headless render — no display backend needed
 import matplotlib.pyplot as plt
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 from utils import match_analysis as analysis
 
 log = logging.getLogger(__name__)
@@ -54,6 +54,20 @@ SELECT_PERSON_LIMIT = 24
 # new view until /match_stats_panel re-posts.
 PANEL_CUSTOM_ID_PREFIX = "ms:panel"
 PANEL_SELECT_ID = f"{PANEL_CUSTOM_ID_PREFIX}:person"
+
+# Marker used by the sticky-pin loop to recognise an existing panel
+# message in channel history. Must match the title set in
+# ``_build_panel_embed``.
+PANEL_EMBED_TITLE = "📊 ChomageBot — Match Stats"
+
+# How often the sticky-pin loop checks whether the panel is still the
+# most-recent message in PANEL_CHANNEL_ID. Cheap (one history call),
+# generous enough to avoid API noise.
+STICKY_CHECK_MINUTES = 5
+
+# How many recent messages to scan on cog load when trying to recover
+# the panel's message ID after a restart.
+STICKY_RECOVERY_HISTORY_LIMIT = 50
 
 # Sentinel value used by the persistence stub so the dropdown is valid
 # even before /match_stats_panel has been run with real data.
@@ -113,7 +127,7 @@ def _figure_to_file(fig, name: str = "chart.png") -> discord.File:
 def _build_panel_embed() -> discord.Embed:
     """The static description sitting above the panel buttons."""
     embed = discord.Embed(
-        title="📊 ChomageBot — Match Stats",
+        title=PANEL_EMBED_TITLE,
         description=(
             "Browse what factors influence wins vs. losses across every "
             "tracked Ranked Solo/Duo game.\n\n"
@@ -360,8 +374,15 @@ class MatchAnalysis(commands.Cog):
         # dispatch; discord.py routes by custom_id.
         self._panel_view = MatchStatsPanel()
         bot.add_view(self._panel_view)
+        # Tracks the most recent panel message so the sticky loop knows
+        # which message to delete when re-posting. None until either the
+        # admin slash command posts one, or recovery finds an existing
+        # panel in channel history.
+        self._panel_message_id: int | None = None
+        self.sticky_panel.start()
 
     def cog_unload(self) -> None:
+        self.sticky_panel.cancel()
         self._panel_view.stop()
 
     @app_commands.command(
@@ -384,36 +405,148 @@ class MatchAnalysis(commands.Cog):
             )
             return
 
-        # Build the dropdown options from the current DB so this person
-        # list reflects the freshest tracked-player set.
         try:
-            df = await asyncio.to_thread(analysis.load_matches, self.bot.db_path)
-            person_rows = analysis.people_summary(df).to_dict("records") if not df.empty else []
-        except Exception as exc:
-            self.bot.logging.error(f"match_stats_panel data load failed: {exc!r}")
-            await ctx.followup.send(f"Failed to load match data: {exc!r}", ephemeral=True)
-            return
-
-        view = MatchStatsPanel(person_rows=person_rows)
-        try:
-            msg = await channel.send(embed=_build_panel_embed(), view=view)
+            msg, person_count = await self._post_panel(channel)
         except discord.Forbidden:
             await ctx.followup.send(
                 f"I don't have permission to post in <#{PANEL_CHANNEL_ID}>.", ephemeral=True
             )
             return
         except Exception as exc:
-            self.bot.logging.error(f"match_stats_panel post failed: {exc!r}")
+            self.bot.logging.error(f"match_stats_panel failed: {exc!r}")
             await ctx.followup.send(f"Failed to post panel: {exc!r}", ephemeral=True)
             return
 
         await ctx.followup.send(
             f"Panel posted in <#{channel.id}> → [jump]({msg.jump_url}).\n"
-            f"Dropdown lists {len(person_rows)} players. "
+            f"Dropdown lists {person_count} players. "
             "If there's a previous panel above this one, delete it manually — "
             "both will work but you probably don't want two.",
             ephemeral=True,
         )
+
+    async def _post_panel(self, channel: discord.abc.Messageable) -> tuple[discord.Message, int]:
+        """Load player rows, build the view, post the panel. Shared by the
+        admin slash command and the sticky-pin loop. Updates
+        ``self._panel_message_id`` so the next sticky check knows which
+        message represents the live panel.
+
+        Returns ``(message, person_count)``. Raises ``discord.Forbidden``
+        if the bot lacks send permission; other exceptions propagate.
+        """
+        df = await asyncio.to_thread(analysis.load_matches, self.bot.db_path)
+        person_rows = analysis.people_summary(df).to_dict("records") if not df.empty else []
+        view = MatchStatsPanel(person_rows=person_rows)
+        msg = await channel.send(
+            embed=_build_panel_embed(),
+            view=view,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        self._panel_message_id = msg.id
+        return msg, len(person_rows)
+
+    def _is_panel_message(self, message: discord.Message) -> bool:
+        """True if this message looks like our match-stats panel.
+
+        Identification is by author + embed title — robust across both
+        the persistence-stub view and the live view, and doesn't depend
+        on ``message.components`` introspection which is fiddly across
+        discord.py versions.
+        """
+        if message.author.id != self.bot.user.id:
+            return False
+        if not message.embeds:
+            return False
+        return message.embeds[0].title == PANEL_EMBED_TITLE
+
+    @tasks.loop(minutes=STICKY_CHECK_MINUTES)
+    async def sticky_panel(self) -> None:
+        """Re-post the panel if it's been bumped off being the most-recent
+        message in PANEL_CHANNEL_ID.
+
+        Cold start (no panel ever posted via the admin command, no panel
+        found in history) is a no-op — we don't auto-create panels the
+        admin never asked for.
+        """
+        channel = self.bot.get_channel(PANEL_CHANNEL_ID)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(PANEL_CHANNEL_ID)
+            except (discord.NotFound, discord.Forbidden):
+                return
+
+        # Recover the panel's message ID after a restart by scanning the
+        # last N messages for our embed signature. Only the *first* panel
+        # we see (newest-first iteration) matters — older ones are stale.
+        if self._panel_message_id is None:
+            async for old in channel.history(limit=STICKY_RECOVERY_HISTORY_LIMIT):
+                if self._is_panel_message(old):
+                    self._panel_message_id = old.id
+                    self.bot.logging.info(
+                        f"Sticky panel: recovered existing panel message id={old.id}"
+                    )
+                    break
+            if self._panel_message_id is None:
+                # No panel has ever been posted (or it scrolled off). Wait
+                # for an admin to invoke /match_stats_panel before doing
+                # anything.
+                return
+
+        # Topmost message check: if the latest message in the channel is
+        # the panel, we're sticky and there's nothing to do.
+        latest = None
+        async for m in channel.history(limit=1):
+            latest = m
+            break
+        if latest is not None and latest.id == self._panel_message_id:
+            self.bot.logging.info("Sticky panel: still topmost, no action")
+            return
+
+        bumper = f"{latest.id} from {latest.author}" if latest is not None else "(empty channel)"
+        self.bot.logging.info(f"Sticky panel: bumped by message {bumper}, re-posting")
+
+        # Delete the previous panel before re-posting so the channel
+        # doesn't accumulate stale panels. If the message is already gone
+        # (manual delete, etc.) discord.NotFound is fine.
+        old_id = self._panel_message_id
+        try:
+            old_msg = await channel.fetch_message(old_id)
+            await old_msg.delete()
+        except discord.NotFound:
+            pass
+        except discord.Forbidden:
+            self.bot.logging.warning(
+                f"Sticky panel: missing permission to delete old panel {old_id}; "
+                "re-posting anyway"
+            )
+        except Exception as exc:
+            self.bot.logging.error(f"Sticky panel: failed to delete old panel {old_id}: {exc!r}")
+
+        try:
+            await self._post_panel(channel)
+        except discord.Forbidden:
+            self.bot.logging.warning(
+                f"Sticky panel: missing permission to post in <#{PANEL_CHANNEL_ID}>"
+            )
+        # Any other exception bubbles into sticky_panel_error → restart.
+
+    @sticky_panel.before_loop
+    async def before_sticky_panel(self) -> None:
+        await self.bot.wait_until_ready()
+
+    @sticky_panel.error
+    async def sticky_panel_error(self, exc: BaseException) -> None:
+        """Auto-restart sticky_panel on unhandled error.
+
+        Default @tasks.loop behaviour on exception is log + stop. Mirror
+        the post_ranks / stream_matches recovery pattern so a transient
+        failure (rate-limit blip, Gateway hiccup) doesn't permanently
+        disable sticky behaviour.
+        """
+        self.bot.logging.error(f"sticky_panel errored: {exc!r}, restarting in 60s")
+        await asyncio.sleep(60)
+        if not self.sticky_panel.is_running():
+            self.sticky_panel.start()
 
     async def open_explorer(
         self, interaction: discord.Interaction, chart_idx: int, person: str | None

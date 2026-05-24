@@ -311,6 +311,12 @@ MORE_CHART_DEFS = [
         "🚨",
         "Most anomalous games via multivariate Mahalanobis distance",
     ),
+    (
+        "57_monthly_champion_shifts",
+        "Monthly champ shifts",
+        "📅",
+        "Per-champion monthly WR shifts (finer than quarterly meta chart)",
+    ),
 ]
 
 

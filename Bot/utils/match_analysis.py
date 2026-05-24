@@ -9422,6 +9422,209 @@ def _plot_win_autocorrelation_aggregate(df: pd.DataFrame) -> plt.Figure:
     return fig
 
 
+# --- 45. Champion swap cheat sheet -----------------------------------------
+
+
+def _render_swap_panel(
+    ax,
+    rows: list[dict],
+    *,
+    side: str,
+    baseline_wr: float,
+    baseline_label: str,
+) -> None:
+    """Render one BUY or SELL panel of the swap cheat-sheet.
+
+    ``rows`` is already filtered + sorted desc by score; ``side`` is
+    ``"buy"`` or ``"sell"`` and selects the bar colour. Empty ``rows``
+    renders a "No candidates" placeholder so the other panel can still
+    populate normally.
+    """
+    colour = PALETTE["win"] if side == "buy" else PALETTE["loss"]
+    heading = (
+        "BUY: under-played, above baseline"
+        if side == "buy"
+        else "SELL: over-played, below baseline"
+    )
+    ax.set_title(heading)
+
+    if not rows:
+        ax.text(
+            0.5,
+            0.5,
+            "No candidates",
+            ha="center",
+            va="center",
+            color=PALETTE["muted"],
+            fontsize=11,
+            transform=ax.transAxes,
+        )
+        ax.set_xticks([])
+        ax.set_yticks([])
+        _polish_ax(ax)
+        return
+
+    # Reverse so highest-score row plots at the top of the horizontal bar
+    # chart (barh y=0 is at the bottom).
+    rows = list(reversed(rows))
+    y = np.arange(len(rows))
+    shrunk = [r["shrunk_wr"] for r in rows]
+
+    ax.barh(y, shrunk, color=colour, height=0.65, alpha=0.85, edgecolor=colour)
+    ax.axvline(
+        baseline_wr,
+        color=PALETTE["muted"],
+        linestyle="--",
+        linewidth=1.0,
+        label=baseline_label,
+    )
+    ax.set_yticks(y)
+    ax.set_yticklabels([r["champion"] for r in rows])
+    ax.set_xlim(0, 1.0)
+    ax.set_xlabel("Shrunken win rate")
+
+    # Stats annotation immediately to the right of each bar — no overflow
+    # into the neighbouring axes because the x-axis is hard-capped at 1.0.
+    for yi, r in zip(y, rows, strict=False):
+        ax.text(
+            r["shrunk_wr"] + 0.012,
+            yi,
+            f"shrunk={r['shrunk_wr']:.0%}, raw={r['raw_wr']:.0%}  "
+            f"n={int(r['n'])}, freq={r['play_freq']:.0%}",
+            va="center",
+            ha="left",
+            fontsize=8.5,
+            color=PALETTE["text"],
+        )
+
+    ax.legend(loc="lower right", framealpha=0.85, fontsize=9)
+    _polish_ax(ax)
+
+
+def plot_champ_swap_recs(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Champion swap cheat sheet — top BUY (try more) and SELL (try less)
+    recommendations based on Bayesian-shrunk WR and play frequency.
+
+    A "buy" champ is one whose shrunken WR sits clearly above baseline
+    but is under-played; a "sell" champ is over-played with shrunken WR
+    clearly below baseline. The shrinkage matters: it pulls flukey
+    small-sample WRs back toward the player's (or group's) baseline so
+    the recommendations are signal-driven, not noise-driven.
+    """
+    is_agg = _is_aggregate(player)
+
+    if is_agg:
+        total_games = len(df)
+        if total_games < 500:
+            return _empty_figure("Insufficient data")
+        baseline_wr = float(df["win"].mean())
+        prior_n = 50.0
+        min_n_buy = 20
+        min_n_sell = 100
+        top_k = 5
+        g = df.groupby("champion")["win"].agg(["count", "sum"])
+        g = g.rename(columns={"count": "games", "sum": "wins"})
+        # ≥3 game floor before computing shrunk WR (redundant with buy/sell
+        # cutoffs but skips a lot of noise champs).
+        g = g[g["games"] >= 3]
+        title = "Champion swap cheat sheet - group"
+        baseline_label = f"group baseline ({baseline_wr:.0%})"
+        subtitle = (
+            f"BUY: under-played champs with above-baseline shrunken WR. "
+            f"SELL: over-played champs with below-baseline shrunken WR. "
+            f"Baseline = {baseline_wr:.0%}, total = {total_games} games."
+        )
+    else:
+        d = _filter_player(df, player)
+        total_games = len(d)
+        if total_games < 100:
+            return _empty_figure(f"Need >=100 games for swap recs ({total_games} games)")
+        baseline_wr = float(d["win"].mean())
+        prior_n = 30.0
+        min_n_buy = 5
+        min_n_sell = 20
+        top_k = 3
+        g = d.groupby("champion")["win"].agg(["count", "sum"])
+        g = g.rename(columns={"count": "games", "sum": "wins"})
+        g = g[g["games"] >= 3]
+        name = _display_label(player) or "this player"
+        title = f"Champion swap cheat sheet - {name}"
+        baseline_label = f"{name}'s baseline ({baseline_wr:.0%})"
+        subtitle = (
+            f"BUY: under-played champs with above-baseline shrunken WR. "
+            f"SELL: over-played champs with below-baseline shrunken WR. "
+            f"Baseline = {baseline_wr:.0%}, total = {total_games} games."
+        )
+
+    if g.empty:
+        return _empty_figure("No champion has enough games")
+
+    g["raw_wr"] = g["wins"] / g["games"]
+    g["shrunk_wr"] = [
+        bayesian_shrunk_wr(int(w), int(n), baseline_wr, prior_n)
+        for w, n in zip(g["wins"], g["games"], strict=False)
+    ]
+    g["play_freq"] = g["games"] / total_games
+    g["vs_baseline"] = g["shrunk_wr"] - baseline_wr
+
+    # Buy: shrunk clearly above baseline AND enough signal. Both factors of
+    # the score are positive after the filter, so sort desc works directly.
+    buy = g[(g["shrunk_wr"] > baseline_wr + 0.02) & (g["games"] >= min_n_buy)].copy()
+    buy["score"] = buy["vs_baseline"] * (1.0 - buy["play_freq"])
+    buy = buy.sort_values("score", ascending=False).head(top_k)
+
+    # Sell: shrunk clearly below baseline AND we play it a lot.
+    sell = g[(g["shrunk_wr"] < baseline_wr - 0.02) & (g["games"] >= min_n_sell)].copy()
+    sell["score"] = (-sell["vs_baseline"]) * sell["play_freq"]
+    sell = sell.sort_values("score", ascending=False).head(top_k)
+
+    buy_rows = [
+        {
+            "champion": idx,
+            "n": int(row["games"]),
+            "raw_wr": float(row["raw_wr"]),
+            "shrunk_wr": float(row["shrunk_wr"]),
+            "play_freq": float(row["play_freq"]),
+        }
+        for idx, row in buy.iterrows()
+    ]
+    sell_rows = [
+        {
+            "champion": idx,
+            "n": int(row["games"]),
+            "raw_wr": float(row["raw_wr"]),
+            "shrunk_wr": float(row["shrunk_wr"]),
+            "play_freq": float(row["play_freq"]),
+        }
+        for idx, row in sell.iterrows()
+    ]
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    _render_swap_panel(
+        axes[0], buy_rows, side="buy", baseline_wr=baseline_wr, baseline_label=baseline_label
+    )
+    _render_swap_panel(
+        axes[1], sell_rows, side="sell", baseline_wr=baseline_wr, baseline_label=baseline_label
+    )
+
+    fig.suptitle(title, fontsize=13, fontweight="bold", y=0.99)
+    # Figure-level subtitle so both panels share the explanation. Wrapped
+    # to the figure width via a manual newline rather than wrap=True (which
+    # leans on the renderer's text-extent and is fragile in tight_layout).
+    fig.text(
+        0.5,
+        0.945,
+        subtitle,
+        ha="center",
+        va="top",
+        color=PALETTE["muted"],
+        fontsize=9.5,
+        style="italic",
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.91), w_pad=3.0)
+    return fig
+
+
 # --- registry --------------------------------------------------------------
 
 #: All aggregate plot functions, in the order the runner script + notebook
@@ -9471,4 +9674,5 @@ ALL_PLOTS = [
     ("42_same_champ_behavior", plot_same_champ_behavior),
     ("43_ride_payoff", plot_ride_payoff),
     ("44_win_autocorrelation", plot_win_autocorrelation),
+    ("45_champ_swap_recs", plot_champ_swap_recs),
 ]

@@ -188,6 +188,12 @@ MORE_CHART_DEFS = [
         "📡",
         "Lag-k correlation of win/loss series - momentum or mean-reversion?",
     ),
+    (
+        "45_champ_swap_recs",
+        "Swap cheat sheet",
+        "💱",
+        "Buy/sell champion recs based on shrunken WR + play frequency",
+    ),
 ]
 
 

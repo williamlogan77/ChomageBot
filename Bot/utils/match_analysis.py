@@ -6295,6 +6295,221 @@ def plot_player_role_matrix(df: pd.DataFrame, player: str | None = None) -> plt.
     return fig
 
 
+# --- 32. Tilt by gap since previous game ----------------------------------
+
+# Bin edges in minutes for the tilt-by-gap chart. Distinct from the
+# load_matches gap_bucket bins — this set zooms in on the short-gap region
+# (sub-5m rage-queue, 5-15m re-queue) where the tilt hypothesis lives, and
+# stretches out to a multi-day break so the "tilt is gone" baseline is
+# visible on the same axis.
+_TILT_GAP_BINS_MIN = [0.0, 5.0, 15.0, 30.0, 60.0, 180.0, 1440.0, np.inf]
+_TILT_GAP_LABELS = ["<5m", "5-15m", "15-30m", "30-60m", "1-3h", "3-24h", ">24h"]
+
+
+def plot_tilt_by_gap(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """WR by inter-game gap, split by whether the previous game was a win
+    or a loss. The "tilt" hypothesis predicts the after-loss line dips at
+    short gaps and converges to the after-win line as the gap grows.
+
+    Aggregate mode macro-averages per-person WRs (each person weighted
+    equally) and bootstraps a 95% CI across people. Per-person mode uses
+    a Wilson CI on the binomial outcome — bootstrap adds nothing for a
+    single proportion.
+    """
+    d_all = _filter_player(df, player)
+    if d_all.empty:
+        return _empty_figure("No games to plot")
+
+    # Sort by (person, game_start) so the shift below picks up the right
+    # previous game even when the caller hands us a multi-person df.
+    d = d_all.sort_values(["person", "game_start"]).copy()
+    d["prev_win"] = d.groupby("person")["win"].shift(1)
+    d = d.dropna(subset=["prev_win", "gap_since_prev_min"])
+    if d.empty:
+        return _empty_figure("Not enough consecutive games to plot")
+
+    d["prev_outcome"] = np.where(d["prev_win"] >= 0.5, "win", "loss")
+    d["gap_clamped"] = d["gap_since_prev_min"].clip(lower=0.0)
+    d["tilt_bucket"] = pd.cut(
+        d["gap_clamped"],
+        bins=_TILT_GAP_BINS_MIN,
+        labels=_TILT_GAP_LABELS,
+        right=False,
+        ordered=True,
+    )
+    d = d.dropna(subset=["tilt_bucket"])
+    if d.empty:
+        return _empty_figure("No games inside the gap buckets")
+
+    is_aggregate_mode = _is_aggregate(player)
+    rng = np.random.default_rng(40)
+    n_boot = 2000
+    min_per_bucket = 8
+
+    # Wide-form per (prev_outcome, bucket): WR, n, ci_lo, ci_hi.
+    rows: list[dict] = []
+    if is_aggregate_mode:
+        # Per-person WR per cell, drop sparse cells, then macro-average and
+        # bootstrap across the surviving per-person WRs.
+        per_person = (
+            d.groupby(["prev_outcome", "tilt_bucket", "person"], observed=True)
+            .agg(games=("win", "size"), wins=("win", "sum"))
+            .reset_index()
+        )
+        per_person = per_person[per_person["games"] >= min_per_bucket]
+        per_person["wr"] = per_person["wins"] / per_person["games"]
+
+        for prev_outcome in ("loss", "win"):
+            for bucket in _TILT_GAP_LABELS:
+                cell = per_person[
+                    (per_person["prev_outcome"] == prev_outcome)
+                    & (per_person["tilt_bucket"] == bucket)
+                ]
+                if cell.empty:
+                    continue
+                wrs = cell["wr"].to_numpy()
+                if wrs.size < 2:
+                    ci_lo = ci_hi = np.nan
+                else:
+                    boot = rng.choice(wrs, size=(n_boot, wrs.size), replace=True).mean(axis=1)
+                    ci_lo = float(np.quantile(boot, 0.025))
+                    ci_hi = float(np.quantile(boot, 0.975))
+                rows.append(
+                    {
+                        "prev_outcome": prev_outcome,
+                        "bucket": bucket,
+                        "wr": float(wrs.mean()),
+                        "n": int(cell["games"].sum()),
+                        "n_people": int(wrs.size),
+                        "ci_lo": ci_lo,
+                        "ci_hi": ci_hi,
+                    }
+                )
+    else:
+        # Single person: Wilson 95% CI on the binomial.
+        cell = (
+            d.groupby(["prev_outcome", "tilt_bucket"], observed=True)
+            .agg(games=("win", "size"), wins=("win", "sum"))
+            .reset_index()
+        )
+        cell = cell[cell["games"] >= min_per_bucket]
+        for _, row in cell.iterrows():
+            lo, hi = wilson_ci(int(row["wins"]), int(row["games"]))
+            rows.append(
+                {
+                    "prev_outcome": row["prev_outcome"],
+                    "bucket": str(row["tilt_bucket"]),
+                    "wr": float(row["wins"]) / float(row["games"]),
+                    "n": int(row["games"]),
+                    "n_people": 1,
+                    "ci_lo": lo,
+                    "ci_hi": hi,
+                }
+            )
+
+    if not rows:
+        return _empty_figure("No buckets had >=8 samples")
+
+    series = pd.DataFrame(rows)
+
+    # X positions: integer index into the bucket label list so missing
+    # buckets leave the right visual gap.
+    bucket_to_x = {label: i for i, label in enumerate(_TILT_GAP_LABELS)}
+
+    # Baseline: macro-averaged overall WR for aggregate mode, per-person
+    # overall WR otherwise.
+    if is_aggregate_mode:
+        per_person_overall = d.groupby("person")["win"].mean()
+        baseline_wr = float(per_person_overall.mean())
+        baseline_label = f"macro-average overall WR {baseline_wr:.0%}"
+    else:
+        baseline_wr = float(d["win"].mean())
+        baseline_label = f"overall WR {baseline_wr:.0%}"
+
+    fig, ax = plt.subplots(figsize=(11, 5.0))
+
+    series_styles = {
+        "loss": {"colour": PALETTE["loss"], "label": "After loss"},
+        "win": {"colour": PALETTE["win"], "label": "After win"},
+    }
+    for prev_outcome in ("loss", "win"):
+        sub = series[series["prev_outcome"] == prev_outcome].copy()
+        if sub.empty:
+            continue
+        sub = sub.sort_values("bucket", key=lambda s: s.map(bucket_to_x))
+        xs = sub["bucket"].map(bucket_to_x).to_numpy()
+        ys = sub["wr"].to_numpy()
+        colour = series_styles[prev_outcome]["colour"]
+        ax.plot(
+            xs,
+            ys,
+            color=colour,
+            marker="o",
+            markersize=6,
+            linewidth=2.2,
+            label=series_styles[prev_outcome]["label"],
+        )
+        # Ribbon only where CI is defined (>=2 people in aggregate, always
+        # in per-person via Wilson).
+        ci_ok = sub["ci_lo"].notna() & sub["ci_hi"].notna()
+        if ci_ok.any():
+            ax.fill_between(
+                xs[ci_ok.to_numpy()],
+                sub.loc[ci_ok, "ci_lo"].to_numpy(),
+                sub.loc[ci_ok, "ci_hi"].to_numpy(),
+                color=colour,
+                alpha=0.18,
+                linewidth=0,
+            )
+        # n=... annotation under each point; loss series sits below the
+        # marker, win series above, so labels don't collide when the two
+        # lines cross.
+        y_offset = -14 if prev_outcome == "loss" else 10
+        va = "top" if prev_outcome == "loss" else "bottom"
+        for xi, yi, ni in zip(xs, ys, sub["n"].to_numpy(), strict=False):
+            ax.annotate(
+                f"n={int(ni)}",
+                xy=(xi, yi),
+                xytext=(0, y_offset),
+                textcoords="offset points",
+                ha="center",
+                va=va,
+                fontsize=8,
+                color=colour,
+            )
+
+    _baseline(ax, y=baseline_wr, label=baseline_label)
+
+    ax.set_xticks(list(range(len(_TILT_GAP_LABELS))))
+    ax.set_xticklabels(_TILT_GAP_LABELS)
+    ax.set_xlabel("Gap since previous game")
+    ax.set_ylabel("Win rate")
+    ax.set_ylim(0.0, 1.0)
+
+    if is_aggregate_mode:
+        ax.set_title("Tilt analysis - does replaying right after a loss hurt?")
+        _subtitle(
+            ax,
+            "Macro-averaged WR by gap since previous game, split by previous outcome. "
+            "Tilt hypothesis: after-loss line dips at short gaps. "
+            "Ribbons = bootstrap 95% CI across players (B=2000); per-person cells need >=8 games.",
+        )
+    else:
+        name = _display_label(player) or ""
+        ax.set_title(f"Tilt analysis - {name}")
+        _subtitle(
+            ax,
+            "Your WR by gap since previous game, split by previous outcome. "
+            "Tilt hypothesis: after-loss line dips at short gaps. "
+            "Ribbons = Wilson 95% CI; buckets need >=8 games.",
+        )
+
+    ax.legend(loc="lower right", fontsize=9)
+    _polish_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
 # --- registry --------------------------------------------------------------
 
 #: All aggregate plot functions, in the order the runner script + notebook
@@ -6331,4 +6546,5 @@ ALL_PLOTS = [
     ("29_champion_freshness", plot_champion_freshness),
     ("30_role_winrate", plot_role_winrate),
     ("31_player_role_matrix", plot_player_role_matrix),
+    ("32_tilt_by_gap", plot_tilt_by_gap),
 ]

@@ -5456,6 +5456,306 @@ def plot_recent_sessions(df: pd.DataFrame, player: str | None = None) -> plt.Fig
     return fig
 
 
+# --- 28. Playstyle clusters (k-means + PCA) ---------------------------------
+
+
+def kmeans_simple(
+    X: np.ndarray,
+    k: int = 3,
+    n_init: int = 10,
+    max_iter: int = 100,
+    seed: int = 0,
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """Numpy k-means with k-means++ init and multiple restarts.
+
+    Returns (labels, centroids, inertia). Inertia is the sum of squared
+    distances of each point to its assigned centroid.
+    """
+    rng = np.random.default_rng(seed)
+    n = X.shape[0]
+    best_inertia = np.inf
+    best_labels: np.ndarray | None = None
+    best_centroids: np.ndarray | None = None
+    for _trial in range(n_init):
+        # k-means++ init
+        centroids = X[rng.integers(n)].reshape(1, -1)
+        for _ in range(k - 1):
+            dist = np.min(((X[:, None] - centroids[None]) ** 2).sum(-1), axis=1)
+            total = dist.sum()
+            if total <= 0:
+                next_idx = int(rng.integers(n))
+            else:
+                probs = dist / total
+                next_idx = int(rng.choice(n, p=probs))
+            centroids = np.vstack([centroids, X[next_idx]])
+        # Lloyd iterations
+        labels = np.zeros(n, dtype=int)
+        for _ in range(max_iter):
+            dist = ((X[:, None] - centroids[None]) ** 2).sum(-1)
+            labels = dist.argmin(axis=1)
+            new_centroids = np.array(
+                [X[labels == j].mean(0) if (labels == j).any() else centroids[j] for j in range(k)]
+            )
+            if np.allclose(new_centroids, centroids):
+                centroids = new_centroids
+                break
+            centroids = new_centroids
+        inertia = float(((X - centroids[labels]) ** 2).sum())
+        if inertia < best_inertia:
+            best_inertia = inertia
+            best_labels = labels
+            best_centroids = centroids
+    assert best_labels is not None and best_centroids is not None
+    return best_labels, best_centroids, best_inertia
+
+
+def pca_2d(X: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Project X (n, d) to (n, 2) via top-2 principal components.
+
+    Returns (projected, components, variance_ratio).
+    """
+    X_centered = X - X.mean(0)
+    cov = np.cov(X_centered.T)
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    # eigh returns ascending; take top 2 in descending order
+    top2 = eigvecs[:, -2:][:, ::-1]
+    total = float(eigvals.sum())
+    var_ratio = (eigvals[-2:][::-1] / total) if total > 0 else np.array([0.0, 0.0])
+    return X_centered @ top2, top2, var_ratio
+
+
+def _shannon_entropy(counts: pd.Series) -> float:
+    """Shannon entropy of a count distribution (in bits)."""
+    total = counts.sum()
+    if total <= 0:
+        return 0.0
+    p = counts.values / total
+    p = p[p > 0]
+    return float(-(p * np.log2(p)).sum())
+
+
+def _loss_streak_propensity(wins: pd.Series) -> float:
+    """Fraction of a player's games that fall inside a loss-run of length >= 3.
+
+    Labels each maximal run of consecutive losses with its length, then
+    asks what share of all games belong to a run with length >= 3.
+    """
+    arr = wins.astype(int).values
+    n = len(arr)
+    if n == 0:
+        return 0.0
+    run_len = np.zeros(n, dtype=int)
+    current = 0
+    starts: list[int] = []
+    for i, w in enumerate(arr):
+        if w == 0:
+            if current == 0:
+                starts.append(i)
+            current += 1
+            run_len[i] = current
+        else:
+            current = 0
+    # Backfill so every game in the run carries the full run length
+    in_run = np.zeros(n, dtype=bool)
+    for s in starts:
+        e = s
+        while e < n and arr[e] == 0:
+            e += 1
+        if (e - s) >= 3:
+            in_run[s:e] = True
+    return float(in_run.mean())
+
+
+def plot_playstyle_clusters(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """K-means playstyle archetypes over the friend group.
+
+    Builds a per-player feature vector (KDA, deaths, duration, champ
+    diversity, time-of-day, session shape, loss-streak propensity),
+    z-scores it, runs numpy k-means (k=3, k-means++ init, multi-restart),
+    then projects players into a 2D PCA scatter coloured by cluster. The
+    aim is to surface natural archetypes ("late-night spam grinders"
+    vs "early-evening one-trick steady players") that none of the
+    per-player charts can show.
+    """
+    if not _is_aggregate(player):
+        return _empty_figure(
+            "Clustering is a group-level chart - pick 'All players' from the dropdown."
+        )
+
+    if df.empty:
+        return _empty_figure("No games to cluster.")
+
+    feature_names = [
+        "avg_kda",
+        "avg_kills",
+        "avg_deaths",
+        "avg_duration_min",
+        "champ_diversity",
+        "top_champ_concentration",
+        "prime_time_share",
+        "weekend_share",
+        "avg_session_length",
+        "loss_streak_propensity",
+    ]
+
+    rows: list[dict] = []
+    for person, g in df.groupby("person"):
+        if len(g) < 100:
+            continue
+        champ_counts = g["champion"].value_counts()
+        top_champ_n = int(champ_counts.iloc[0]) if not champ_counts.empty else 0
+        if "session_id" in g.columns:
+            sess_sizes = g.groupby("session_id").size()
+            avg_session = float(sess_sizes.mean())
+        else:
+            avg_session = float("nan")
+        rows.append(
+            {
+                "person": person,
+                "avg_kda": float(g["kda"].mean()),
+                "avg_kills": float(g["kills"].mean()),
+                "avg_deaths": float(g["deaths"].mean()),
+                "avg_duration_min": float(g["duration_min"].mean()),
+                "champ_diversity": _shannon_entropy(champ_counts),
+                "top_champ_concentration": top_champ_n / len(g),
+                "prime_time_share": float(g["hour"].between(19, 23).mean()),
+                "weekend_share": float(g["dow"].isin([5, 6]).mean()),
+                "avg_session_length": avg_session,
+                "loss_streak_propensity": _loss_streak_propensity(
+                    g.sort_values("game_start")["win"]
+                ),
+            }
+        )
+
+    if len(rows) < 3:
+        return _empty_figure("Need at least 3 players with 100+ games to cluster.")
+
+    feat_df = pd.DataFrame(rows).set_index("person")
+    feat_df = feat_df.dropna()
+    if len(feat_df) < 3:
+        return _empty_figure("Need at least 3 players with 100+ games to cluster.")
+
+    raw = feat_df[feature_names].values.astype(float)
+    mean = raw.mean(0)
+    std = raw.std(0)
+    safe_std = np.where(std == 0, 1.0, std)
+    X_z = (raw - mean) / safe_std
+
+    k = min(3, len(feat_df))
+    labels, centroids, _inertia = kmeans_simple(X_z, k=k, n_init=20, seed=0)
+
+    pca_pts, _components, var_ratio = pca_2d(X_z)
+    centroid_pca = (centroids - X_z.mean(0)) @ _components
+
+    cluster_colors = [
+        PALETTE["primary"],
+        PALETTE["accent_orange"],
+        PALETTE["accent_teal"],
+        PALETTE["accent_purple"],
+    ]
+
+    fig, ax = plt.subplots(figsize=(12, 7.5))
+
+    # Per-cluster distinguishing features (top-2 by |mean z-score|).
+    cluster_descriptions: list[str] = []
+    for c in range(k):
+        mask = labels == c
+        members = feat_df.index[mask].tolist()
+        if not members:
+            cluster_descriptions.append(f"Cluster {chr(65 + c)} (empty)")
+            continue
+        cluster_z = X_z[mask].mean(0)
+        # Two largest absolute deviations from group mean (z-score is
+        # already a deviation from the overall mean, which is 0).
+        top_idx = np.argsort(np.abs(cluster_z))[::-1][:2]
+        descriptors = []
+        for idx in top_idx:
+            direction = "high" if cluster_z[idx] >= 0 else "low"
+            descriptors.append(f"{direction} {feature_names[idx]}")
+        cluster_descriptions.append(
+            f"Cluster {chr(65 + c)} (n={len(members)}): " + ", ".join(descriptors)
+        )
+
+    # Scatter points coloured by cluster
+    for c in range(k):
+        mask = labels == c
+        if not mask.any():
+            continue
+        ax.scatter(
+            pca_pts[mask, 0],
+            pca_pts[mask, 1],
+            s=180,
+            color=cluster_colors[c % len(cluster_colors)],
+            edgecolor="white",
+            linewidth=1.2,
+            alpha=0.9,
+            label=f"Cluster {chr(65 + c)}",
+            zorder=3,
+        )
+
+    # Labels next to each point
+    for i, name in enumerate(feat_df.index):
+        ax.annotate(
+            str(name),
+            (pca_pts[i, 0], pca_pts[i, 1]),
+            xytext=(7, 4),
+            textcoords="offset points",
+            fontsize=10,
+            color=PALETTE["text"],
+            zorder=4,
+        )
+
+    # Centroid X markers
+    for c in range(k):
+        ax.scatter(
+            centroid_pca[c, 0],
+            centroid_pca[c, 1],
+            marker="x",
+            s=220,
+            color=cluster_colors[c % len(cluster_colors)],
+            linewidth=3,
+            zorder=5,
+        )
+        ax.annotate(
+            f"Cluster {chr(65 + c)}",
+            (centroid_pca[c, 0], centroid_pca[c, 1]),
+            xytext=(10, -12),
+            textcoords="offset points",
+            fontsize=10,
+            fontweight="bold",
+            color=cluster_colors[c % len(cluster_colors)],
+            zorder=5,
+        )
+
+    ax.axhline(0, color=PALETTE["grid"], linewidth=0.8, zorder=1)
+    ax.axvline(0, color=PALETTE["grid"], linewidth=0.8, zorder=1)
+    ax.set_xlabel(f"PC1 ({var_ratio[0] * 100:.0f}% var)")
+    ax.set_ylabel(f"PC2 ({var_ratio[1] * 100:.0f}% var)")
+    ax.legend(loc="best")
+    _polish_ax(ax)
+
+    var_total = float((var_ratio[0] + var_ratio[1]) * 100)
+    subtitle = f"PC1 + PC2 = {var_total:.0f}% of variance  |  " + "  |  ".join(cluster_descriptions)
+    fig.suptitle(
+        f"Playstyle clusters ({len(feat_df)} players, k={k})",
+        fontsize=16,
+        fontweight="bold",
+        y=0.98,
+    )
+    fig.text(
+        0.5,
+        0.93,
+        subtitle,
+        ha="center",
+        fontsize=9,
+        color=PALETTE["muted"],
+        style="italic",
+        wrap=True,
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.91))
+    return fig
+
+
 # --- registry --------------------------------------------------------------
 
 #: All aggregate plot functions, in the order the runner script + notebook
@@ -5488,4 +5788,5 @@ ALL_PLOTS = [
     ("25_tier_winrate", plot_tier_winrate),
     ("26_match_highlights", plot_match_highlights),
     ("27_recent_sessions", plot_recent_sessions),
+    ("28_playstyle_clusters", plot_playstyle_clusters),
 ]

@@ -5846,6 +5846,18 @@ def plot_playstyle_clusters(df: pd.DataFrame, player: str | None = None) -> plt.
     fig, ax = plt.subplots(figsize=(12, 7.5))
 
     # Per-cluster distinguishing features (top-2 by |mean z-score|).
+    feature_labels = {
+        "avg_kda": "KDA",
+        "avg_kills": "kills",
+        "avg_deaths": "deaths",
+        "avg_duration_min": "game length",
+        "champ_diversity": "champ variety",
+        "top_champ_concentration": "main-champ focus",
+        "prime_time_share": "prime-time play",
+        "weekend_share": "weekend play",
+        "avg_session_length": "session length",
+        "loss_streak_propensity": "loss-streak streakiness",
+    }
     cluster_descriptions: list[str] = []
     for c in range(k):
         mask = labels == c
@@ -5860,7 +5872,7 @@ def plot_playstyle_clusters(df: pd.DataFrame, player: str | None = None) -> plt.
         descriptors = []
         for idx in top_idx:
             direction = "high" if cluster_z[idx] >= 0 else "low"
-            descriptors.append(f"{direction} {feature_names[idx]}")
+            descriptors.append(f"{direction} {feature_labels[feature_names[idx]]}")
         cluster_descriptions.append(
             f"Cluster {chr(65 + c)} (n={len(members)}): " + ", ".join(descriptors)
         )
@@ -5908,12 +5920,18 @@ def plot_playstyle_clusters(df: pd.DataFrame, player: str | None = None) -> plt.
         ax.annotate(
             f"Cluster {chr(65 + c)}",
             (centroid_pca[c, 0], centroid_pca[c, 1]),
-            xytext=(10, -12),
+            xytext=(10, -14),
             textcoords="offset points",
             fontsize=10,
             fontweight="bold",
             color=cluster_colors[c % len(cluster_colors)],
-            zorder=5,
+            zorder=6,
+            bbox={
+                "facecolor": "white",
+                "alpha": 0.85,
+                "edgecolor": "none",
+                "pad": 1.5,
+            },
         )
 
     ax.axhline(0, color=PALETTE["grid"], linewidth=0.8, zorder=1)
@@ -6140,10 +6158,16 @@ def plot_role_winrate(df: pd.DataFrame, player: str | None = None) -> plt.Figure
     _subtitle(ax, subtitle)
     ax.legend(loc="upper right")
 
-    for xi, (wr, n) in enumerate(zip(means, counts, strict=False)):
+    for xi, (wr, n, hi_i) in enumerate(zip(means, counts, hi, strict=False)):
+        # Anchor above the whisker top, and never within 1.5pp of the
+        # baseline dashed line — otherwise the annotation crashes into the
+        # baseline when bar height ≈ baseline.
+        anchor_y = max(float(hi_i), float(wr))
+        if abs(anchor_y - baseline) < 0.015:
+            anchor_y = baseline + 0.015
         ax.annotate(
             f"{wr:.0%}  ·  n={int(n)}",
-            xy=(xi, wr),
+            xy=(xi, anchor_y),
             xytext=(0, 8),
             textcoords="offset points",
             ha="center",
@@ -6800,9 +6824,11 @@ def plot_improvement_slope(df: pd.DataFrame, player: str | None = None) -> plt.F
         )
         _polish_ax(ax)
 
+        # Leave enough horizontal headroom for the per-bar annotation that
+        # sits just beyond each CI whisker (label is ~10pp wide visually).
         max_abs = max(
             8.0,
-            float(np.nanmax(np.abs(rows[["ci_lo_pp", "ci_hi_pp", "slope_pp"]].to_numpy()))) + 4.0,
+            float(np.nanmax(np.abs(rows[["ci_lo_pp", "ci_hi_pp", "slope_pp"]].to_numpy()))) + 10.0,
         )
         ax.set_xlim(-max_abs, max_abs)
 

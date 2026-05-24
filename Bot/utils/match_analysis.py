@@ -8293,6 +8293,189 @@ def _plot_rust_per_person(person_rows: pd.DataFrame, label: str, player: str | N
     return fig
 
 
+# --- DOW x time-of-day WR heatmap -----------------------------------------
+
+
+#: Order matters for the 4-column heatmap layout.
+_HOUR_BUCKET_LABELS = [
+    "Morning (5-12)",
+    "Afternoon (12-18)",
+    "Evening (18-22)",
+    "Night (22-5)",
+]
+
+
+def _hour_bucket(hour: int) -> str:
+    """Map 0-23 hour-of-day to one of the four named buckets.
+
+    Night wraps midnight (22, 23, 0, 1, 2, 3, 4) so ``pd.cut`` won't fit;
+    a tiny lookup is clearer than a ranged categorical with a join.
+    """
+    if 5 <= hour < 12:
+        return "Morning (5-12)"
+    if 12 <= hour < 18:
+        return "Afternoon (12-18)"
+    if 18 <= hour < 22:
+        return "Evening (18-22)"
+    return "Night (22-5)"
+
+
+def plot_dow_hour_heatmap(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Win-rate heatmap on the day-of-week x time-of-day grid.
+
+    Coarser bucketing than the 24x7 hour heatmap so each cell has enough
+    samples to colour confidently. Aggregate cells need >=30 games AND
+    >=3 contributing players; per-person cells need >=15 games. Colour
+    encodes the gap to the relevant baseline (overall macro WR for
+    aggregate, personal overall WR for the per-person view), clipped at
+    +/- 10pp and mapped on RdYlGn so red is below baseline and green
+    above.
+    """
+    d = _filter_player(df, player).copy()
+    if d.empty:
+        return _empty_figure("No games to plot")
+
+    is_aggregate = _is_aggregate(player)
+    label = _display_label(player)
+
+    if not is_aggregate:
+        person_total = len(d)
+        if person_total < 100:
+            return _empty_figure(f"Need >=100 games for heatmap ({person_total} games)")
+
+    d["hour_bucket"] = d["hour"].map(_hour_bucket)
+    d["hour_bucket"] = pd.Categorical(
+        d["hour_bucket"], categories=_HOUR_BUCKET_LABELS, ordered=True
+    )
+
+    n_rows = len(DOW_LABELS)
+    n_cols = len(_HOUR_BUCKET_LABELS)
+    wr_grid = np.full((n_rows, n_cols), np.nan)
+    n_grid = np.zeros((n_rows, n_cols), dtype=int)
+    qualified = np.zeros((n_rows, n_cols), dtype=bool)
+
+    if is_aggregate:
+        per_person_cell = (
+            d.groupby(["dow", "hour_bucket", "person"], observed=True)
+            .agg(games=("win", "size"), wins=("win", "sum"))
+            .reset_index()
+        )
+        per_person_cell["wr"] = per_person_cell["wins"] / per_person_cell["games"]
+        cells = (
+            per_person_cell.groupby(["dow", "hour_bucket"], observed=True)
+            .agg(
+                wr=("wr", "mean"),
+                n_games=("games", "sum"),
+                n_players=("person", "nunique"),
+            )
+            .reset_index()
+        )
+        # Overall baseline: macro-average across people of their pooled WR.
+        per_person_overall = d.groupby("person")["win"].mean()
+        baseline = float(per_person_overall.mean())
+
+        for _, row in cells.iterrows():
+            r = int(row["dow"])
+            c = _HOUR_BUCKET_LABELS.index(str(row["hour_bucket"]))
+            n_grid[r, c] = int(row["n_games"])
+            if int(row["n_games"]) >= 30 and int(row["n_players"]) >= 3:
+                wr_grid[r, c] = float(row["wr"])
+                qualified[r, c] = True
+
+        if not qualified.any():
+            return _empty_figure("Not enough games for any cell")
+
+        title = "When does the group win? - DOW x time heatmap"
+        subtitle = (
+            "Macro-averaged WR per cell, coloured by gap to overall WR. "
+            "Cells with <30 games or <3 contributing players shown grey."
+        )
+    else:
+        cells = (
+            d.groupby(["dow", "hour_bucket"], observed=True)
+            .agg(games=("win", "size"), wins=("win", "sum"))
+            .reset_index()
+        )
+        cells["wr"] = cells["wins"] / cells["games"]
+        baseline = float(d["win"].mean())
+
+        for _, row in cells.iterrows():
+            r = int(row["dow"])
+            c = _HOUR_BUCKET_LABELS.index(str(row["hour_bucket"]))
+            n_grid[r, c] = int(row["games"])
+            if int(row["games"]) >= 15:
+                wr_grid[r, c] = float(row["wr"])
+                qualified[r, c] = True
+
+        title = f"When does {label} win? - DOW x time heatmap"
+        subtitle = (
+            "WR per cell, coloured by gap to your overall WR. " "Cells with <15 games shown grey."
+        )
+
+    # Delta in percentage points, clipped at +/- 10pp.
+    delta_pp = (wr_grid - baseline) * 100.0
+    delta_clipped = np.clip(delta_pp, -10.0, 10.0)
+
+    fig, ax = plt.subplots(figsize=(8, 7))
+    cmap = plt.get_cmap("RdYlGn").copy()
+    cmap.set_bad(color="#d9d9d9")
+
+    masked = np.ma.array(delta_clipped, mask=~qualified)
+    im = ax.imshow(
+        masked,
+        aspect="auto",
+        cmap=cmap,
+        vmin=-10.0,
+        vmax=10.0,
+        origin="upper",
+    )
+
+    ax.set_xticks(range(n_cols))
+    ax.set_xticklabels(_HOUR_BUCKET_LABELS, rotation=20, ha="right")
+    ax.set_yticks(range(n_rows))
+    ax.set_yticklabels(DOW_LABELS)
+    ax.set_xlabel("Time of day (local)")
+    ax.set_ylabel("Day of week")
+    ax.set_title(title)
+    _subtitle(ax, subtitle)
+    ax.grid(False)
+    ax.tick_params(axis="both", which="both", length=0)
+
+    for r in range(n_rows):
+        for c in range(n_cols):
+            if qualified[r, c]:
+                # Text colour: black on the lighter middle of the cmap,
+                # white at the extremes where the cmap goes saturated.
+                intensity = abs(delta_clipped[r, c])
+                txt_color = "white" if intensity >= 7.5 else PALETTE["text"]
+                ax.text(
+                    c,
+                    r,
+                    f"{wr_grid[r, c]:.0%}\nn={n_grid[r, c]}",
+                    ha="center",
+                    va="center",
+                    fontsize=8,
+                    color=txt_color,
+                )
+            else:
+                ax.text(
+                    c,
+                    r,
+                    "-",
+                    ha="center",
+                    va="center",
+                    fontsize=12,
+                    color=PALETTE["muted"],
+                )
+
+    cbar = fig.colorbar(im, ax=ax, label="Δ vs baseline (pp)", shrink=0.85, pad=0.03)
+    cbar.outline.set_visible(False)
+    cbar.ax.axhline(0.0, color=PALETTE["muted"], linewidth=0.8, alpha=0.6)
+
+    fig.tight_layout()
+    return fig
+
+
 # --- registry --------------------------------------------------------------
 
 #: All aggregate plot functions, in the order the runner script + notebook
@@ -8338,4 +8521,5 @@ ALL_PLOTS = [
     ("38_champ_pool_concentration", plot_champ_pool_concentration),
     ("39_champion_mastery", plot_champion_mastery),
     ("40_champion_rust", plot_champion_rust),
+    ("41_dow_hour_heatmap", plot_dow_hour_heatmap),
 ]

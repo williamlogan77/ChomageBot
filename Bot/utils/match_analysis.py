@@ -4028,16 +4028,19 @@ def _draw_card(
         mutation_aspect=h / w,
     )
     ax.add_patch(body)
+    # Plain Rectangle for the stripe — FancyBboxPatch with a non-trivial
+    # rounding_size on a sliver-thin box renders as a stretched stadium
+    # because the rounded ends consume the entire width.
+    from matplotlib.patches import Rectangle
+
     stripe_w = w * 0.035
-    stripe = FancyBboxPatch(
+    stripe = Rectangle(
         (x, y),
         stripe_w,
         h,
-        boxstyle="round,pad=0,rounding_size=0.012",
         facecolor=accent,
         edgecolor="none",
         zorder=3,
-        mutation_aspect=h / stripe_w,
     )
     ax.add_patch(stripe)
 
@@ -4680,7 +4683,7 @@ def plot_model_calibration(df: pd.DataFrame, player: str | None = None) -> plt.F
     ax_cal.set_ylim(0, 1)
     ax_cal.set_xlabel("Predicted win probability")
     ax_cal.set_ylabel("Observed win rate (holdout)")
-    ax_cal.set_title(_title("Calibration curve (holdout)", player))
+    ax_cal.set_title("Calibration curve (holdout)")
     _subtitle(
         ax_cal,
         "Markers on the 45° line = well-calibrated. Below the line = overconfident "
@@ -5331,10 +5334,13 @@ def plot_tier_winrate(df: pd.DataFrame, player: str | None = None) -> plt.Figure
         "Higher tier = harder competition. Drops typically signal you're near your "
         f"skill ceiling. {subtitle_extra}",
     )
-    for yi, (wr, n) in enumerate(zip(means, counts, strict=False)):
+    for yi, (wr, hi_i, n) in enumerate(zip(means, hi, counts, strict=False)):
+        # Anchor past the whisker tip so the percentage/n label doesn't
+        # collide with the error-bar line at high-CI tiers.
+        anchor_x = min(max(float(wr) + 0.02, float(hi_i) + 0.01), 0.97)
         ax.annotate(
             f"{wr:.0%}  ·  n={int(n)}",
-            xy=(min(wr + 0.02, 0.97), yi),
+            xy=(anchor_x, yi),
             xytext=(6, 0),
             textcoords="offset points",
             va="center",
@@ -5610,10 +5616,11 @@ def plot_recent_sessions(df: pd.DataFrame, player: str | None = None) -> plt.Fig
             fontsize=10,
             color=PALETTE["text"],
         )
+        n_games_sess = int(sess["games"])
         ax.text(
             col_games,
             y,
-            f"{int(sess['games'])} games",
+            f"{n_games_sess} game" + ("s" if n_games_sess != 1 else ""),
             ha="left",
             va="center",
             fontsize=10,
@@ -5663,18 +5670,19 @@ def plot_recent_sessions(df: pd.DataFrame, player: str | None = None) -> plt.Fig
         _title("Recent sessions", player),
         fontsize=16,
         fontweight="bold",
-        y=0.97,
+        y=0.98,
     )
     fig.text(
         0.5,
-        0.93,
+        0.935,
         f"Newest {n} sessions of {total_sessions} total.",
         ha="center",
+        va="top",
         fontsize=10,
         color=PALETTE["muted"],
         style="italic",
     )
-    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    fig.tight_layout(rect=(0, 0, 1, 0.90))
     return fig
 
 
@@ -6520,8 +6528,9 @@ def plot_tilt_by_gap(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
             )
         # n=... annotation under each point; loss series sits below the
         # marker, win series above, so labels don't collide when the two
-        # lines cross.
-        y_offset = -14 if prev_outcome == "loss" else 10
+        # lines cross. Push labels far enough out that the OTHER series'
+        # marker at the same x doesn't sit on the text glyphs.
+        y_offset = -18 if prev_outcome == "loss" else 14
         va = "top" if prev_outcome == "loss" else "bottom"
         for xi, yi, ni in zip(xs, ys, sub["n"].to_numpy(), strict=False):
             ax.annotate(
@@ -6533,6 +6542,7 @@ def plot_tilt_by_gap(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
                 va=va,
                 fontsize=8,
                 color=colour,
+                zorder=5,
             )
 
     _baseline(ax, y=baseline_wr, label=baseline_label)
@@ -7544,20 +7554,31 @@ def plot_shrunk_champ_rankings(df: pd.DataFrame, player: str | None = None) -> p
 
     ax.set_yticks(y)
     ax.set_yticklabels(
-        [
-            f"{champ}  n={int(n)}  raw={raw:.0%} -> shrunk={shr:.0%}"
-            for champ, n, raw, shr in zip(
-                top.index, top["games"], top["raw_wr"], top["shrunk_wr"], strict=False
-            )
-        ]
+        [f"{champ}  (n={int(n)})" for champ, n in zip(top.index, top["games"], strict=False)]
     )
     ax.set_xlabel("Win rate")
-    ax.set_xlim(0, max(1.0, float(top["shrunk_wr"].max()) + 0.05))
+    ax.set_xlim(0, max(1.0, float(top["shrunk_wr"].max()) + 0.18))
     ax.set_title(title)
     _subtitle(ax, subtitle)
     ax.legend(loc="lower right", framealpha=0.85, fontsize=9)
-    _polish_ax(ax)
 
+    # Inline annotation past the raw-WR marker showing raw -> shrunk so
+    # the correction magnitude stays visible without bloating the y-tick
+    # text. Anchor at max(raw, shrunk) so the text always clears both the
+    # bar tip and the raw "|" marker.
+    for yi, raw, shr in zip(y, top["raw_wr"], top["shrunk_wr"], strict=False):
+        ax.annotate(
+            f"raw {raw:.0%} -> shrunk {shr:.0%}",
+            xy=(max(float(shr), float(raw)), yi),
+            xytext=(10, 0),
+            textcoords="offset points",
+            va="center",
+            ha="left",
+            fontsize=8.5,
+            color=PALETTE["muted"],
+        )
+
+    _polish_ax(ax)
     fig.tight_layout()
     return fig
 
@@ -8817,10 +8838,12 @@ def _plot_same_champ_per_person(row: pd.Series, label: str) -> plt.Figure:
     )
     ax.errorbar(x, means, yerr=[err_lo, err_hi], **WHISKER_STYLE, zorder=3)
 
-    for i, (mean, n) in enumerate(zip(means, (n_w, n_l), strict=True)):
+    # Anchor labels past the whisker top so they don't sit on the error bar.
+    label_ys = means + err_hi + 0.02
+    for i, (mean, n, label_y) in enumerate(zip(means, (n_w, n_l), label_ys, strict=True)):
         ax.text(
             i,
-            mean + 0.02,
+            label_y,
             f"{mean:.0%}\nn={n}",
             ha="center",
             va="bottom",
@@ -8831,7 +8854,7 @@ def _plot_same_champ_per_person(row: pd.Series, label: str) -> plt.Figure:
     ax.set_xticks(x)
     ax.set_xticklabels(["After win", "After loss"])
     ax.set_ylabel("P(same champion next game)")
-    ax.set_ylim(0, max(0.6, float(means.max()) + 0.20))
+    ax.set_ylim(0, max(0.6, float(label_ys.max()) + 0.15))
     ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
 
     ax.set_title(f"Same-champion behavior - {label}")
@@ -9170,17 +9193,20 @@ def _ride_payoff_figure(
         x = np.arange(2)
         bar_values = np.array([0.0 if math.isnan(v) else v for v in wrs])
         ax.bar(x, bar_values, color=colours, width=0.55, zorder=2)
-        # Whiskers when CIs are provided (per-person view).
+        # Whiskers when CIs are provided (per-person view). Track per-bar
+        # whisker tops so labels can be anchored past them.
+        whisker_tops = list(bar_values)
         if any(ci is not None for ci in cis):
             err_lo = []
             err_hi = []
-            for wr, ci in zip(wrs, cis, strict=True):
+            for i_bar, (wr, ci) in enumerate(zip(wrs, cis, strict=True)):
                 if ci is None or math.isnan(wr):
                     err_lo.append(0.0)
                     err_hi.append(0.0)
                 else:
                     err_lo.append(wr - ci[0])
                     err_hi.append(ci[1] - wr)
+                    whisker_tops[i_bar] = ci[1]
             ax.errorbar(x, bar_values, yerr=[err_lo, err_hi], **WHISKER_STYLE, zorder=3)
             for ci in cis:
                 if ci is not None:
@@ -9189,7 +9215,7 @@ def _ride_payoff_figure(
             if not math.isnan(v):
                 ymax_cap = max(ymax_cap, v)
 
-        for xi, wr, n in zip(x, wrs, ns, strict=True):
+        for xi, wr, n, top in zip(x, wrs, ns, whisker_tops, strict=True):
             if math.isnan(wr) or n == 0:
                 ax.text(
                     xi,
@@ -9203,7 +9229,7 @@ def _ride_payoff_figure(
                 continue
             ax.text(
                 xi,
-                wr + 0.02,
+                float(top) + 0.02,
                 f"{wr:.0%}\nn={n}",
                 ha="center",
                 va="bottom",
@@ -9803,11 +9829,12 @@ def plot_per_account_breakdown(df: pd.DataFrame, player: str | None = None) -> p
                     xerr=[[row["wr"] - row["ci_lo"]], [row["ci_hi"] - row["wr"]]],
                     **WHISKER_STYLE,
                 )
-                # Anchor the annotation to the bar tip but clip at 0.97
-                # so very-high-WR alts don't push text past the axis.
+                # Anchor the annotation past the upper-CI whisker tip so
+                # the text doesn't sit on top of the error bar. Clip at
+                # 0.97 so very-high-WR alts don't push text past the axis.
                 ax.annotate(
                     f"{row['riot_account']}  n={int(row['games'])}  {row['wr']:.0%}",
-                    xy=(min(row["wr"] + 0.01, 0.97), y),
+                    xy=(min(float(row["ci_hi"]) + 0.005, 0.97), y),
                     xytext=(6, 0),
                     textcoords="offset points",
                     va="center",
@@ -9893,10 +9920,14 @@ def plot_per_account_breakdown(df: pd.DataFrame, player: str | None = None) -> p
         f"{len(tbl)} Riot accounts with >=10 games. "
         f"Chi-square p={p_val:.3f}: {sig_label} within-person variation.",
     )
-    for yi, (wr, n, acct) in enumerate(zip(wrs, counts, tbl["riot_account"], strict=False)):
+    for yi, (wr, n, acct, hi_i) in enumerate(
+        zip(wrs, counts, tbl["riot_account"], hi, strict=False)
+    ):
+        # Anchor past the upper Wilson tip so the whisker doesn't strike
+        # through the account label.
         ax.annotate(
             f"{acct}  n={int(n)}  WR={wr:.0%}",
-            xy=(min(wr + 0.01, 0.97), yi),
+            xy=(min(float(hi_i) + 0.005, 0.97), yi),
             xytext=(6, 0),
             textcoords="offset points",
             va="center",
@@ -11087,6 +11118,7 @@ def plot_session_stamina(df: pd.DataFrame, player: str | None = None) -> plt.Fig
         linewidth=0,
     )
 
+    last_x = int(xs[-1]) if len(xs) else 0
     for xi, yi, n_s, n_g in zip(
         xs,
         ys,
@@ -11094,12 +11126,23 @@ def plot_session_stamina(df: pd.DataFrame, player: str | None = None) -> plt.Fig
         series["n_games"].to_numpy(),
         strict=False,
     ):
+        # Pin the first/last labels to the axis side so they don't bleed
+        # past the y-axis (xi=0) or off the right edge (xi=last).
+        if int(xi) == 0:
+            ha = "left"
+            x_offset = -2
+        elif int(xi) == last_x:
+            ha = "right"
+            x_offset = 2
+        else:
+            ha = "center"
+            x_offset = 0
         ax.annotate(
             f"n={int(n_s)} sessions, {int(n_g)} games",
             xy=(xi, yi),
-            xytext=(0, 10),
+            xytext=(x_offset, 10),
             textcoords="offset points",
-            ha="center",
+            ha=ha,
             va="bottom",
             fontsize=8,
             color=PALETTE["muted"],

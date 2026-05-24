@@ -7119,6 +7119,274 @@ def plot_stat_sheet(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
     return fig
 
 
+# --- 36. Game pace - early stomper vs late scaler --------------------------
+
+_PACE_MIN_GAMES = 50
+
+# 5-minute duration bins from 15 to 50 min for the per-person WR-by-bin panel.
+# Games outside [15, 50) are folded into the edge bins so they don't
+# silently disappear via pd.cut returning NaN.
+_PACE_BIN_EDGES = [15, 20, 25, 30, 35, 40, 45, 50]
+_PACE_BIN_LABELS = ["15-20", "20-25", "25-30", "30-35", "35-40", "40-45", "45-50"]
+
+# Shared bin edges for the overlaid win/loss duration histograms — both
+# distributions must use the same bins or the overlay misleads.
+_PACE_HIST_EDGES = np.arange(10, 56, 2)
+
+
+def _welch_t(a: np.ndarray, b: np.ndarray) -> tuple[float, float]:
+    """Welch's two-sample t-test, returns (mean_a - mean_b, two-sided p).
+
+    Uses the Welch-Satterthwaite df and a normal-tail p-value approximation
+    (erfc) — accurate enough for the n>=20-per-group regime this function
+    sees and keeps us off scipy. Degenerate cases (n<2 in either group,
+    zero variance in both) return p=1.0.
+    """
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    n1, n2 = len(a), len(b)
+    if n1 < 2 or n2 < 2:
+        return (float("nan"), 1.0)
+    m1, m2 = float(np.mean(a)), float(np.mean(b))
+    s1, s2 = float(np.var(a, ddof=1)), float(np.var(b, ddof=1))
+    diff = m1 - m2
+    se2 = s1 / n1 + s2 / n2
+    if se2 <= 0:
+        return (diff, 1.0)
+    t = diff / math.sqrt(se2)
+    p = math.erfc(abs(t) / math.sqrt(2.0))
+    return (diff, float(p))
+
+
+def plot_game_pace(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Are wins shorter than losses (stomper) or longer (late scaler)?
+
+    Aggregate: horizontal bar per player of ``avg_win_dur - avg_loss_dur``
+    in minutes, sorted ascending. Negative bars are clear stompers (their
+    wins end fast), positive bars are scalers. Welch's t p-value annotates
+    each bar.
+
+    Per-person: top panel overlays win/loss duration histograms with mean
+    markers. Bottom panel shows WR per 5-minute duration bin with Wilson
+    95% CIs - descriptive only, since duration is partly an outcome (stomps
+    end fast).
+    """
+    if _is_aggregate(player):
+        rows: list[dict] = []
+        for person, sub in df.groupby("person", observed=True):
+            if len(sub) < _PACE_MIN_GAMES:
+                continue
+            wins = sub.loc[sub["win"] == 1, "duration_min"].to_numpy()
+            losses = sub.loc[sub["win"] == 0, "duration_min"].to_numpy()
+            if len(wins) < 2 or len(losses) < 2:
+                continue
+            diff, p = _welch_t(wins, losses)
+            rows.append(
+                {
+                    "person": str(person),
+                    "avg_win_dur": float(np.mean(wins)),
+                    "avg_loss_dur": float(np.mean(losses)),
+                    "win_minus_loss": diff,
+                    "p_value": p,
+                    "n": len(sub),
+                }
+            )
+
+        if len(rows) < 3:
+            return _empty_figure("Need >=3 players with >=50 games")
+
+        # Sort descending so the most-negative (stomper) bar lands at the
+        # highest y, which renders at the TOP of a default barh axis.
+        frame = (
+            pd.DataFrame(rows).sort_values("win_minus_loss", ascending=False).reset_index(drop=True)
+        )
+        y = np.arange(len(frame))
+
+        colours: list[str] = []
+        for v in frame["win_minus_loss"]:
+            if v < -1:
+                colours.append(PALETTE["loss"])  # stomper - wins short, losses drag
+            elif v > 1:
+                colours.append(PALETTE["win"])  # scaler - wins long, losses end fast
+            else:
+                colours.append(PALETTE["neutral"])
+
+        fig_h = max(4.2, len(frame) * 0.45)
+        fig, ax = plt.subplots(figsize=(10, fig_h))
+        ax.barh(y, frame["win_minus_loss"], color=colours, height=0.7)
+        ax.axvline(0, color=PALETTE["text"], linewidth=0.8, linestyle=(0, (4, 4)))
+        ax.set_yticks(y)
+        ax.set_yticklabels(frame["person"])
+        ax.set_xlabel("Avg win duration - avg loss duration (min)")
+        ax.set_title("Game-pace style - wins vs losses duration delta")
+        _subtitle(
+            ax,
+            "Negative = stomper (wins short, losses drag). Positive = scaler "
+            "(wins long, losses end fast). Welch's t-test p-value shown.",
+        )
+        _polish_ax(ax)
+
+        # Pad x-range so the right-aligned annotations don't clip.
+        max_abs = max(2.0, float(np.max(np.abs(frame["win_minus_loss"]))) + 1.5)
+        ax.set_xlim(-max_abs, max_abs)
+
+        for yi, (_, r) in enumerate(frame.iterrows()):
+            val = r["win_minus_loss"]
+            label = f"{val:+.1f} min  (p={r['p_value']:.3f})"
+            sign_pad = 1 if val >= 0 else -1
+            ax.annotate(
+                label,
+                xy=(val, yi),
+                xytext=(6 * sign_pad, 0),
+                textcoords="offset points",
+                va="center",
+                ha="left" if val >= 0 else "right",
+                fontsize=9,
+                color=PALETTE["text"],
+            )
+
+        fig.tight_layout()
+        return fig
+
+    # --- per-person ---------------------------------------------------------
+    person = _resolve_person(df, player)
+    if person is None:
+        return _empty_figure("No games to plot")
+    sub = df[df["person"] == person]
+    n = len(sub)
+    if n < _PACE_MIN_GAMES:
+        return _empty_figure(f"Need >=50 games for pace analysis ({n} games)")
+
+    wins = sub.loc[sub["win"] == 1, "duration_min"].to_numpy()
+    losses = sub.loc[sub["win"] == 0, "duration_min"].to_numpy()
+    avg_win = float(np.mean(wins)) if len(wins) else float("nan")
+    avg_loss = float(np.mean(losses)) if len(losses) else float("nan")
+
+    fig, axes = plt.subplots(2, 1, figsize=(10, 7))
+    name = _display_label(player) or person
+
+    # --- top: duration histograms ---
+    ax_top = axes[0]
+    ax_top.hist(
+        wins,
+        bins=_PACE_HIST_EDGES,
+        color=PALETTE["win"],
+        alpha=0.55,
+        label=f"Wins (n={len(wins)})",
+    )
+    ax_top.hist(
+        losses,
+        bins=_PACE_HIST_EDGES,
+        color=PALETTE["loss"],
+        alpha=0.55,
+        label=f"Losses (n={len(losses)})",
+    )
+    if math.isfinite(avg_win):
+        ax_top.axvline(
+            avg_win,
+            color=PALETTE["win"],
+            linewidth=1.6,
+            linestyle=(0, (5, 4)),
+        )
+        ax_top.annotate(
+            f"win avg {avg_win:.1f}",
+            xy=(avg_win, ax_top.get_ylim()[1] if False else 0),
+            xytext=(4, 4),
+            textcoords="offset points",
+            xycoords=("data", "axes fraction"),
+            fontsize=9,
+            color=PALETTE["win"],
+            va="bottom",
+        )
+    if math.isfinite(avg_loss):
+        ax_top.axvline(
+            avg_loss,
+            color=PALETTE["loss"],
+            linewidth=1.6,
+            linestyle=(0, (5, 4)),
+        )
+        # Stagger the loss annotation vertically so the two means don't
+        # overlap when win/loss averages are close together.
+        ax_top.annotate(
+            f"loss avg {avg_loss:.1f}",
+            xy=(avg_loss, 0),
+            xytext=(4, 18),
+            textcoords="offset points",
+            xycoords=("data", "axes fraction"),
+            fontsize=9,
+            color=PALETTE["loss"],
+            va="bottom",
+        )
+    ax_top.set_xlabel("Game duration (min)")
+    ax_top.set_ylabel("Games")
+    ax_top.set_title(f"Game pace - {name}")
+    diff, p = _welch_t(wins, losses)
+    _subtitle(
+        ax_top,
+        "Top: duration distributions of wins vs losses. Bottom: WR by duration bin. "
+        "Note: duration is partly determined by outcome (stomps end fast) - read this "
+        f"as descriptive, not causal. Win-loss delta {diff:+.1f} min (p={p:.3f}).",
+    )
+    ax_top.legend(loc="upper right", fontsize=9)
+    _polish_ax(ax_top)
+
+    # --- bottom: WR by 5-min duration bin (15-50 min) ---
+    # Fold games <15 into the first bin and games >=50 into the last so
+    # they aren't silently dropped by pd.cut returning NaN.
+    dur_clipped = sub["duration_min"].clip(
+        lower=_PACE_BIN_EDGES[0], upper=_PACE_BIN_EDGES[-1] - 0.01
+    )
+    binned = pd.cut(dur_clipped, bins=_PACE_BIN_EDGES, labels=_PACE_BIN_LABELS, right=False)
+    pace = (
+        pd.DataFrame({"bin": binned, "win": sub["win"].to_numpy()})
+        .groupby("bin", observed=False)["win"]
+        .agg(["count", "sum", "mean"])
+        .rename(columns={"count": "games", "sum": "wins_n", "mean": "winrate"})
+        .reset_index()
+    )
+    # Wilson CI per bin - bin can legitimately have 0 games, in which case
+    # we skip drawing the bar but keep the x-tick.
+    cis = [
+        wilson_ci(int(w), int(g)) if g > 0 else (float("nan"), float("nan"))
+        for w, g in zip(pace["wins_n"], pace["games"], strict=False)
+    ]
+    lo = np.array([c[0] for c in cis])
+    hi = np.array([c[1] for c in cis])
+    means = pace["winrate"].to_numpy(dtype=float)
+
+    ax_bot = axes[1]
+    x = np.arange(len(pace))
+    has_data = pace["games"].to_numpy() > 0
+    ax_bot.bar(
+        x[has_data],
+        means[has_data],
+        color=PALETTE["primary"],
+        width=0.7,
+    )
+    if has_data.any():
+        yerr = np.vstack(
+            [
+                means - lo,
+                hi - means,
+            ]
+        )
+        yerr[:, ~has_data] = 0.0
+        ax_bot.errorbar(x, means, yerr=yerr, **WHISKER_STYLE)
+    _baseline(ax_bot)
+    ax_bot.set_xticks(x)
+    ax_bot.set_xticklabels(pace["bin"])
+    ax_bot.set_ylim(0, 1.1)
+    ax_bot.set_xlabel("Game duration bin (min)")
+    ax_bot.set_ylabel("Win rate")
+    ax_bot.set_title("Win rate by duration bin")
+    _subtitle(ax_bot, "Bars = pooled WR in bin; whiskers = Wilson 95% CI; n labelled per bin.")
+    _annotate_bars(ax_bot, x, means, pace["games"])
+    _polish_ax(ax_bot)
+
+    fig.tight_layout()
+    return fig
+
+
 # --- registry --------------------------------------------------------------
 
 #: All aggregate plot functions, in the order the runner script + notebook
@@ -7159,4 +7427,5 @@ ALL_PLOTS = [
     ("33_session_position_wr", plot_session_position_wr),
     ("34_improvement_slope", plot_improvement_slope),
     ("35_stat_sheet", plot_stat_sheet),
+    ("36_game_pace", plot_game_pace),
 ]

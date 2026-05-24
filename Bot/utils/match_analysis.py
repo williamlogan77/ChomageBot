@@ -7494,6 +7494,223 @@ def plot_shrunk_champ_rankings(df: pd.DataFrame, player: str | None = None) -> p
     return fig
 
 
+def _pearson_r_with_p(x: np.ndarray, y: np.ndarray) -> tuple[float, float]:
+    """Pearson correlation + 2-sided p-value via t -> normal approximation.
+
+    Returns (nan, nan) when n < 3 or the variance is too small for the t
+    statistic to be defined (perfect correlation, zero variance, etc.).
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    n = len(x)
+    if n < 3:
+        return float("nan"), float("nan")
+    xm = x - x.mean()
+    ym = y - y.mean()
+    denom = float(np.sqrt((xm * xm).sum() * (ym * ym).sum()))
+    if denom <= 1e-12:
+        return float("nan"), float("nan")
+    r = float((xm * ym).sum() / denom)
+    r = max(-1.0, min(1.0, r))
+    if 1.0 - r * r <= 1e-12:
+        return r, 0.0
+    t = r * math.sqrt((n - 2) / (1.0 - r * r))
+    # 2-sided p via standard-normal approximation to the t distribution.
+    p = 2.0 * (1.0 - 0.5 * (1.0 + math.erf(abs(t) / math.sqrt(2.0))))
+    return r, float(p)
+
+
+def plot_champ_pool_concentration(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Champion pool concentration via Shannon entropy / effective N.
+
+    Effective N = exp(H) where H is Shannon entropy (nats) of the pick
+    distribution. Identifies one-tricks (low N) vs flex players (high N).
+    Per-person view is a Pareto chart of pick frequency; aggregate view
+    compares everyone's effective N and tests whether pool size correlates
+    with WR.
+    """
+    if _is_aggregate(player):
+        per_person = df.groupby("person").agg(games=("win", "size"), wins=("win", "sum"))
+        per_person = per_person[per_person["games"] >= 50]
+        if len(per_person) < 3:
+            return _empty_figure("Need >=3 players with >=50 games")
+
+        rows = []
+        for person in per_person.index:
+            d = df[df["person"] == person]
+            counts = d["champion"].value_counts()
+            total = int(counts.sum())
+            p = counts.values / total
+            p = p[p > 0]
+            h = float(-(p * np.log(p)).sum())
+            eff_n = float(np.exp(h))
+            top3 = float(counts.head(3).sum()) / total
+            rows.append(
+                {
+                    "person": person,
+                    "eff_n": eff_n,
+                    "distinct": int((counts > 0).sum()),
+                    "top3_frac": top3,
+                    "wr": float(per_person.loc[person, "wins"])
+                    / float(per_person.loc[person, "games"]),
+                    "games": int(per_person.loc[person, "games"]),
+                }
+            )
+
+        agg = pd.DataFrame(rows).sort_values("eff_n", ascending=True)
+
+        fig, axes = plt.subplots(2, 1, figsize=(10, 9))
+
+        # Top panel: horizontal bar chart of eff_N.
+        y_pos = np.arange(len(agg))
+        axes[0].barh(y_pos, agg["eff_n"].values, color=PALETTE["primary"], height=0.7, alpha=0.85)
+        axes[0].set_yticks(y_pos)
+        axes[0].set_yticklabels(
+            [
+                f"{p}  eff_N={en:.1f}  distinct={k}  top3={t3:.0%}"
+                for p, en, k, t3 in zip(
+                    agg["person"], agg["eff_n"], agg["distinct"], agg["top3_frac"], strict=False
+                )
+            ]
+        )
+        median_eff = float(agg["eff_n"].median())
+        axes[0].axvline(
+            median_eff,
+            color=PALETTE["muted"],
+            linestyle="--",
+            linewidth=1.0,
+            label=f"median ({median_eff:.1f})",
+        )
+        axes[0].set_xlabel("Effective number of champions  (exp(Shannon entropy))")
+        axes[0].set_title("Champion pool concentration - one-tricks vs flex")
+        _subtitle(
+            axes[0],
+            "Top: effective number of champions (= exp(Shannon entropy)). "
+            "Higher = wider pool. Lower = one-trick.",
+        )
+        axes[0].legend(loc="lower right", framealpha=0.85, fontsize=9)
+        _polish_ax(axes[0])
+
+        # Bottom panel: scatter of eff_N vs WR with regression line.
+        x = agg["eff_n"].values
+        y = agg["wr"].values
+        axes[1].scatter(x, y, s=70, color=PALETTE["primary"], alpha=0.85, zorder=3)
+        # Player name labels — slight x-offset so they sit beside the dot.
+        x_span = float(x.max() - x.min()) if x.max() > x.min() else 1.0
+        x_offset = 0.012 * x_span
+        for xi, yi, name in zip(x, y, agg["person"], strict=False):
+            axes[1].annotate(
+                str(name),
+                xy=(xi, yi),
+                xytext=(xi + x_offset, yi),
+                fontsize=9,
+                color=PALETTE["text"],
+                va="center",
+            )
+        # Least-squares fit line spanning the observed x range.
+        if len(x) >= 2 and x.std() > 1e-9:
+            slope, intercept = np.polyfit(x, y, 1)
+            xs = np.array([x.min(), x.max()])
+            axes[1].plot(
+                xs,
+                slope * xs + intercept,
+                color=PALETTE["accent_orange"],
+                linewidth=1.4,
+                alpha=0.8,
+                label="least-squares fit",
+            )
+            axes[1].legend(loc="lower right", framealpha=0.85, fontsize=9)
+        r, p_val = _pearson_r_with_p(x, y)
+        axes[1].set_xlabel("Effective number of champions")
+        axes[1].set_ylabel("Win rate")
+        axes[1].set_title("Pool size vs win rate")
+        if np.isnan(r):
+            sub = "Not enough data to compute Pearson correlation."
+        else:
+            sub = f"Pearson r={r:.2f}, p={p_val:.3f}. Does pool size correlate with WR?"
+        _subtitle(axes[1], sub)
+        _polish_ax(axes[1])
+
+        fig.tight_layout()
+        return fig
+
+    # --- per-person view ---------------------------------------------------
+    d = _filter_player(df, player)
+    n = len(d)
+    if n < 50:
+        return _empty_figure(f"Need >=50 games for pool analysis ({n} games)")
+
+    counts = d["champion"].value_counts()
+    total = int(counts.sum())
+    probs = counts.values / total
+    probs = probs[probs > 0]
+    h = float(-(probs * np.log(probs)).sum())
+    eff_n = float(np.exp(h))
+    k_distinct = int((counts > 0).sum())
+    top3_pct = float(counts.head(3).sum()) / total
+    top10_pct = float(counts.head(10).sum()) / total
+
+    top = counts.head(30)
+    cum_frac = top.cumsum().values / total
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+    x_pos = np.arange(len(top))
+    ax.bar(x_pos, top.values, color=PALETTE["primary"], alpha=0.85, width=0.78)
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels(top.index, rotation=45, ha="right", fontsize=9)
+    ax.set_ylabel("Games on champion")
+    name = _display_label(player) or "this player"
+    ax.set_title(f"Champion pool - {name}")
+    _subtitle(
+        ax,
+        f"Effective N = {eff_n:.1f}, distinct = {k_distinct}, "
+        f"top3 cover {top3_pct:.0%}, top10 cover {top10_pct:.0%}.",
+    )
+    _polish_ax(ax)
+
+    ax2 = ax.twinx()
+    ax2.plot(
+        x_pos,
+        cum_frac,
+        color=PALETTE["accent_orange"],
+        linewidth=1.6,
+        marker="o",
+        markersize=3.5,
+        label="cumulative share",
+    )
+    ax2.set_ylim(0, 1.02)
+    ax2.set_ylabel("Cumulative share of games")
+    ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
+    ax2.grid(False)
+    ax2.spines["top"].set_visible(False)
+
+    # Annotate threshold crossings. With heavy concentration these can fall
+    # on adjacent bars, so y-stagger keeps the labels readable.
+    y_offsets = [0.08, 0.16, 0.24]
+    for threshold, y_off in zip((0.5, 0.8, 1.0), y_offsets, strict=False):
+        hit = np.where(cum_frac >= threshold - 1e-9)[0]
+        if len(hit) == 0:
+            continue
+        idx = int(hit[0])
+        ax2.axvline(idx, color=PALETTE["muted"], linewidth=0.7, linestyle=":", alpha=0.7)
+        ax2.annotate(
+            f"{threshold:.0%} at {top.index[idx]}",
+            xy=(idx, cum_frac[idx]),
+            xytext=(idx + 0.4, min(1.0, cum_frac[idx]) - y_off),
+            fontsize=9,
+            color=PALETTE["muted"],
+            arrowprops={
+                "arrowstyle": "-",
+                "color": PALETTE["muted"],
+                "linewidth": 0.7,
+                "alpha": 0.6,
+            },
+        )
+
+    fig.tight_layout()
+    return fig
+
+
 # --- registry --------------------------------------------------------------
 
 #: All aggregate plot functions, in the order the runner script + notebook
@@ -7536,4 +7753,5 @@ ALL_PLOTS = [
     ("35_stat_sheet", plot_stat_sheet),
     ("36_game_pace", plot_game_pace),
     ("37_shrunk_champ_rankings", plot_shrunk_champ_rankings),
+    ("38_champ_pool_concentration", plot_champ_pool_concentration),
 ]

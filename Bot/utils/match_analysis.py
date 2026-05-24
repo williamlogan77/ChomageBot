@@ -10027,6 +10027,489 @@ def plot_champion_meta_shifts(df: pd.DataFrame, player: str | None = None) -> pl
     return fig
 
 
+# --- 48. Insights card - TL;DR for one person ------------------------------
+
+_INSIGHTS_MIN_GAMES = 50
+_INSIGHTS_SWAP_MIN_GAMES = 100
+_INSIGHTS_ROLE_MIN_GAMES = 10
+_INSIGHTS_CELL_MIN_GAMES = 15
+
+
+def _insights_panel_off(ax) -> None:
+    """Strip axis chrome from a text-only insights panel."""
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+
+
+def _insights_panel_header(ax, title: str, color: str) -> None:
+    """Coloured strip across the top of a panel with the panel name."""
+    ax.add_patch(
+        plt.Rectangle(
+            (0.0, 0.86),
+            1.0,
+            0.14,
+            transform=ax.transAxes,
+            facecolor=color,
+            edgecolor="none",
+            zorder=1,
+        )
+    )
+    ax.text(
+        0.5,
+        0.93,
+        title,
+        ha="center",
+        va="center",
+        transform=ax.transAxes,
+        fontsize=11,
+        fontweight="bold",
+        color="white",
+        zorder=2,
+    )
+
+
+def _insights_insufficient(ax, title: str, header_color: str) -> None:
+    """Drop a styled 'INSUFFICIENT DATA' message into a panel."""
+    _insights_panel_off(ax)
+    _insights_panel_header(ax, title, header_color)
+    ax.text(
+        0.5,
+        0.45,
+        "INSUFFICIENT\nDATA",
+        ha="center",
+        va="center",
+        fontsize=12,
+        color=PALETTE["muted"],
+        family="monospace",
+    )
+
+
+def _insights_pace_panel(ax, sub: pd.DataFrame) -> None:
+    wins = sub.loc[sub["win"] == 1, "duration_min"].to_numpy()
+    losses = sub.loc[sub["win"] == 0, "duration_min"].to_numpy()
+    if len(wins) < 2 or len(losses) < 2:
+        _insights_insufficient(ax, "PACE", PALETTE["primary"])
+        return
+
+    diff, p = _welch_t(wins, losses)
+    if diff < -1.0:
+        verdict = "Stomper"
+        accent = PALETTE["loss"]
+    elif diff > 1.0:
+        verdict = "Scaler"
+        accent = PALETTE["win"]
+    else:
+        verdict = "Neutral"
+        accent = PALETTE["neutral"]
+
+    _insights_panel_off(ax)
+    _insights_panel_header(ax, "PACE", PALETTE["primary"])
+    ax.text(
+        0.5,
+        0.62,
+        verdict,
+        ha="center",
+        va="center",
+        fontsize=22,
+        fontweight="bold",
+        color=accent,
+    )
+    sign = "+" if diff >= 0 else ""
+    ax.text(
+        0.5,
+        0.34,
+        f"wins {sign}{diff:.1f} min vs losses",
+        ha="center",
+        va="center",
+        fontsize=10,
+        color=PALETTE["text"],
+        family="monospace",
+    )
+    ax.text(
+        0.5,
+        0.18,
+        f"p = {p:.3f}",
+        ha="center",
+        va="center",
+        fontsize=10,
+        color=PALETTE["muted"],
+        family="monospace",
+    )
+
+
+def _insights_role_panel(ax, sub: pd.DataFrame, *, side: str) -> None:
+    """side: 'best' or 'worst'."""
+    title = "BEST ROLE" if side == "best" else "WORST ROLE"
+    header_color = PALETTE["win"] if side == "best" else PALETTE["loss"]
+
+    d = sub[sub["role"].isin(ROLE_ORDER)]
+    if d.empty:
+        _insights_insufficient(ax, title, header_color)
+        return
+    agg = d.groupby("role").agg(games=("win", "size"), wins=("win", "sum")).reset_index()
+    agg = agg[agg["games"] >= _INSIGHTS_ROLE_MIN_GAMES]
+    if agg.empty:
+        _insights_insufficient(ax, title, header_color)
+        return
+    agg["wr"] = agg["wins"] / agg["games"]
+    agg = agg.sort_values("wr", ascending=False)
+    row = agg.iloc[-1] if side == "worst" else agg.iloc[0]
+
+    role = str(row["role"])
+    wr = float(row["wr"])
+    n = int(row["games"])
+    wins = int(row["wins"])
+    lo, hi = wilson_ci(wins, n)
+
+    _insights_panel_off(ax)
+    _insights_panel_header(ax, title, header_color)
+    ax.text(
+        0.5,
+        0.62,
+        role,
+        ha="center",
+        va="center",
+        fontsize=22,
+        fontweight="bold",
+        color=header_color,
+    )
+    ax.text(
+        0.5,
+        0.36,
+        f"{wr:.1%}  (n={n})",
+        ha="center",
+        va="center",
+        fontsize=11,
+        color=PALETTE["text"],
+        family="monospace",
+    )
+    ax.text(
+        0.5,
+        0.20,
+        f"CI [{lo:.0%}, {hi:.0%}]",
+        ha="center",
+        va="center",
+        fontsize=9,
+        color=PALETTE["muted"],
+        family="monospace",
+    )
+
+
+def _insights_swap_panel(ax, sub: pd.DataFrame, *, side: str) -> None:
+    """Top-3 BUY or SELL champion recs. side: 'buy' or 'sell'."""
+    title = "BUY" if side == "buy" else "SELL"
+    header_color = PALETTE["win"] if side == "buy" else PALETTE["loss"]
+    n_total = len(sub)
+    if n_total < _INSIGHTS_SWAP_MIN_GAMES:
+        _insights_insufficient(ax, title, header_color)
+        return
+
+    baseline_wr = float(sub["win"].mean())
+    prior_n = 30.0
+    min_n_buy = 5
+    min_n_sell = 20
+    top_k = 3
+
+    g = sub.groupby("champion")["win"].agg(["count", "sum"])
+    g = g.rename(columns={"count": "games", "sum": "wins"})
+    g = g[g["games"] >= 3]
+    if g.empty:
+        _insights_insufficient(ax, title, header_color)
+        return
+    g["raw_wr"] = g["wins"] / g["games"]
+    g["shrunk_wr"] = [
+        bayesian_shrunk_wr(int(w), int(n), baseline_wr, prior_n)
+        for w, n in zip(g["wins"], g["games"], strict=False)
+    ]
+    g["play_freq"] = g["games"] / n_total
+    g["vs_baseline"] = g["shrunk_wr"] - baseline_wr
+
+    if side == "buy":
+        cand = g[(g["shrunk_wr"] > baseline_wr + 0.02) & (g["games"] >= min_n_buy)].copy()
+        cand["score"] = cand["vs_baseline"] * (1.0 - cand["play_freq"])
+    else:
+        cand = g[(g["shrunk_wr"] < baseline_wr - 0.02) & (g["games"] >= min_n_sell)].copy()
+        cand["score"] = (-cand["vs_baseline"]) * cand["play_freq"]
+    cand = cand.sort_values("score", ascending=False).head(top_k)
+
+    _insights_panel_off(ax)
+    _insights_panel_header(ax, title, header_color)
+
+    if cand.empty:
+        ax.text(
+            0.5,
+            0.45,
+            "No candidates",
+            ha="center",
+            va="center",
+            fontsize=11,
+            color=PALETTE["muted"],
+            family="monospace",
+        )
+        return
+
+    # Three rows of monospace text. Y positions chosen to leave room under header.
+    y_positions = [0.68, 0.48, 0.28]
+    for y, (champ, row) in zip(y_positions, cand.iterrows(), strict=False):
+        ax.text(
+            0.5,
+            y,
+            f"{champ}",
+            ha="center",
+            va="bottom",
+            fontsize=11,
+            fontweight="bold",
+            color=PALETTE["text"],
+        )
+        ax.text(
+            0.5,
+            y - 0.02,
+            f"{row['shrunk_wr']:.0%}  (n={int(row['games'])})",
+            ha="center",
+            va="top",
+            fontsize=9,
+            color=PALETTE["muted"],
+            family="monospace",
+        )
+
+
+def _insights_golden_hour_panel(ax, sub: pd.DataFrame) -> None:
+    title = "GOLDEN HOUR"
+    header_color = PALETTE["accent_purple"]
+
+    if sub.empty:
+        _insights_insufficient(ax, title, header_color)
+        return
+
+    d = sub.copy()
+    d["hour_bucket"] = d["hour"].map(_hour_bucket)
+    cells = (
+        d.groupby(["dow", "hour_bucket"], observed=True)
+        .agg(games=("win", "size"), wins=("win", "sum"))
+        .reset_index()
+    )
+    cells = cells[cells["games"] >= _INSIGHTS_CELL_MIN_GAMES]
+    if cells.empty:
+        _insights_insufficient(ax, title, header_color)
+        return
+    cells["wr"] = cells["wins"] / cells["games"]
+    best = cells.sort_values("wr", ascending=False).iloc[0]
+    worst = cells.sort_values("wr", ascending=True).iloc[0]
+
+    _insights_panel_off(ax)
+    _insights_panel_header(ax, title, header_color)
+
+    # BEST sub-block
+    ax.text(
+        0.5,
+        0.72,
+        "BEST",
+        ha="center",
+        va="center",
+        fontsize=9,
+        color=PALETTE["win"],
+        fontweight="bold",
+    )
+    ax.text(
+        0.5,
+        0.60,
+        f"{DOW_LABELS[int(best['dow'])]}  {str(best['hour_bucket']).split(' ')[0]}",
+        ha="center",
+        va="center",
+        fontsize=10,
+        color=PALETTE["text"],
+        family="monospace",
+    )
+    ax.text(
+        0.5,
+        0.49,
+        f"{best['wr']:.0%}  (n={int(best['games'])})",
+        ha="center",
+        va="center",
+        fontsize=10,
+        color=PALETTE["text"],
+        family="monospace",
+    )
+
+    # WORST sub-block
+    ax.text(
+        0.5,
+        0.32,
+        "WORST",
+        ha="center",
+        va="center",
+        fontsize=9,
+        color=PALETTE["loss"],
+        fontweight="bold",
+    )
+    ax.text(
+        0.5,
+        0.20,
+        f"{DOW_LABELS[int(worst['dow'])]}  {str(worst['hour_bucket']).split(' ')[0]}",
+        ha="center",
+        va="center",
+        fontsize=10,
+        color=PALETTE["text"],
+        family="monospace",
+    )
+    ax.text(
+        0.5,
+        0.09,
+        f"{worst['wr']:.0%}  (n={int(worst['games'])})",
+        ha="center",
+        va="center",
+        fontsize=10,
+        color=PALETTE["text"],
+        family="monospace",
+    )
+
+
+def plot_insights_card(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """TL;DR insights card - one chart that consolidates the most actionable
+    findings for a single player into a 7-panel info-graphic.
+
+    Aggregate view rejects with a "pick a player" placeholder. Per-player
+    view requires >=50 games (matching the stat-sheet floor) — anything
+    less and the card is empty by design. Inside the card, each panel
+    gates independently: BUY/SELL needs >=100 games, best/worst role needs
+    >=10 games at that role, golden hour needs >=15 games in some cell.
+    """
+    if _is_aggregate(player):
+        return _empty_figure("Per-person only - pick a player")
+
+    person = _resolve_person(df, player)
+    sub = _filter_player(df, player)
+    n_games = int(len(sub))
+    if person is None or n_games < _INSIGHTS_MIN_GAMES:
+        return _empty_figure(f"Need >=50 games ({n_games})")
+
+    display_name = _display_label(player) or person
+
+    # Per-group WR percentile via the same logic as the stat sheet.
+    frame = _stat_sheet_frame(df)
+    wr = float(sub["win"].mean())
+    if person in set(frame["person"]):
+        wr_values = frame["wr"].to_numpy(dtype=float)
+        ranks = pd.Series(wr_values).rank(method="average")
+        focal_idx = int(np.where(frame["person"].to_numpy() == person)[0][0])
+        if len(wr_values) > 1:
+            pct = (ranks.iloc[focal_idx] - 1) / (len(wr_values) - 1) * 100.0
+        else:
+            pct = 50.0
+        pct_int = int(round(pct))
+    else:
+        # Shouldn't happen given the >=50 gate, but degrade gracefully.
+        pct_int = None
+
+    fig = plt.figure(figsize=(14, 9))
+    # Three rows: short banner+headline, behaviour panels, recommendation panels.
+    gs = fig.add_gridspec(3, 3, height_ratios=[1.0, 1.4, 1.6], hspace=0.30, wspace=0.18)
+
+    # Row 1 spans all three columns — banner + big WR + games count.
+    ax_head = fig.add_subplot(gs[0, :])
+    _insights_panel_off(ax_head)
+    ax_head.add_patch(
+        plt.Rectangle(
+            (0.0, 0.78),
+            1.0,
+            0.22,
+            transform=ax_head.transAxes,
+            facecolor=PALETTE["primary"],
+            edgecolor="none",
+            zorder=1,
+        )
+    )
+    ax_head.text(
+        0.02,
+        0.89,
+        f"STAT SHEET  -  {display_name}",
+        ha="left",
+        va="center",
+        transform=ax_head.transAxes,
+        fontsize=16,
+        fontweight="bold",
+        color="white",
+        zorder=2,
+    )
+    ax_head.text(
+        0.98,
+        0.89,
+        f"{n_games} games",
+        ha="right",
+        va="center",
+        transform=ax_head.transAxes,
+        fontsize=11,
+        color="white",
+        family="monospace",
+        zorder=2,
+    )
+    # Big WR centerpiece.
+    ax_head.text(
+        0.25,
+        0.38,
+        f"{wr:.1%}",
+        ha="center",
+        va="center",
+        fontsize=42,
+        fontweight="bold",
+        color=PALETTE["primary"],
+    )
+    ax_head.text(
+        0.25,
+        0.06,
+        "Win rate",
+        ha="center",
+        va="center",
+        fontsize=10,
+        color=PALETTE["muted"],
+        family="monospace",
+    )
+    pct_label = f"{pct_int}th pct" if pct_int is not None else "n/a"
+    ax_head.text(
+        0.65,
+        0.38,
+        pct_label,
+        ha="center",
+        va="center",
+        fontsize=34,
+        fontweight="bold",
+        color=PALETTE["text"],
+    )
+    ax_head.text(
+        0.65,
+        0.06,
+        "vs friend group",
+        ha="center",
+        va="center",
+        fontsize=10,
+        color=PALETTE["muted"],
+        family="monospace",
+    )
+
+    # Row 2: pace / best role / worst role.
+    ax_pace = fig.add_subplot(gs[1, 0])
+    ax_best = fig.add_subplot(gs[1, 1])
+    ax_worst = fig.add_subplot(gs[1, 2])
+    _insights_pace_panel(ax_pace, sub)
+    _insights_role_panel(ax_best, sub, side="best")
+    _insights_role_panel(ax_worst, sub, side="worst")
+
+    # Row 3: BUY / SELL / golden hour.
+    ax_buy = fig.add_subplot(gs[2, 0])
+    ax_sell = fig.add_subplot(gs[2, 1])
+    ax_gold = fig.add_subplot(gs[2, 2])
+    _insights_swap_panel(ax_buy, sub, side="buy")
+    _insights_swap_panel(ax_sell, sub, side="sell")
+    _insights_golden_hour_panel(ax_gold, sub)
+
+    fig.subplots_adjust(left=0.03, right=0.97, top=0.96, bottom=0.04)
+    return fig
+
+
 # --- registry --------------------------------------------------------------
 
 #: All aggregate plot functions, in the order the runner script + notebook
@@ -10079,4 +10562,5 @@ ALL_PLOTS = [
     ("45_champ_swap_recs", plot_champ_swap_recs),
     ("46_per_account_breakdown", plot_per_account_breakdown),
     ("47_champion_meta_shifts", plot_champion_meta_shifts),
+    ("48_insights_card", plot_insights_card),
 ]

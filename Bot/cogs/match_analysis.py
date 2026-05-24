@@ -206,6 +206,12 @@ MORE_CHART_DEFS = [
         "🌊",
         "Quarterly champion WR changes — patch / meta detection (chi-square + BH-FDR)",
     ),
+    (
+        "48_insights_card",
+        "Insights card",
+        "🧾",
+        "TL;DR — your role, pace, BUY/SELL champs, golden hour in one chart",
+    ),
 ]
 
 

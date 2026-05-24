@@ -1165,9 +1165,10 @@ def plot_kda_vs_outcome(df: pd.DataFrame, player: str | None = None) -> plt.Figu
     axes[1].set_ylabel("Win rate")
     axes[1].set_xlabel("KDA bucket")
     axes[1].set_title(_title("Win rate by KDA", player))
+    whisker_note = "; whiskers = spread across people" if macro_n > 1 else ""
     _subtitle(
         axes[1],
-        f"Higher buckets should win more. {_macro_label(macro_n)}; whiskers = spread across people.",
+        f"Higher buckets should win more. {_macro_label(macro_n)}{whisker_note}.",
     )
     _baseline(axes[1])
     _annotate_bars(axes[1], range(len(g)), g["winrate"], g["games"])
@@ -1206,9 +1207,10 @@ def plot_duration_vs_outcome(df: pd.DataFrame, player: str | None = None) -> plt
     axes[0].set_xlabel("Game duration (min)")
     axes[0].set_ylabel("Win rate")
     axes[0].set_title(_title("Win rate by game duration", player))
+    whisker_note = "; whiskers = spread across people" if macro_n > 1 else ""
     _subtitle(
         axes[0],
-        f"Stomps vs scaling. {_macro_label(macro_n)}; whiskers = spread across people.",
+        f"Stomps vs scaling. {_macro_label(macro_n)}{whisker_note}.",
     )
     _baseline(axes[0])
     _annotate_bars(axes[0], range(len(g)), g["winrate"], g["games"])
@@ -1432,14 +1434,18 @@ def plot_champion_picks(
                     color="white",
                 )
         else:
-            sign_pad = 1 if r["delta_pp"] >= 0 else -1
+            # Non-significant / short bars: anchor the annotation to the
+            # right of the bar's outer tip when positive, or to the right
+            # of the zero line when negative — never to the left, so the
+            # (sometimes long) champion name on the y-axis stays readable.
+            anchor_x = max(r["delta_pp"], 0.0)
             ax.annotate(
                 label,
-                xy=(r["delta_pp"], yi),
-                xytext=(8 * sign_pad, 0),
+                xy=(anchor_x, yi),
+                xytext=(8, 0),
                 textcoords="offset points",
                 va="center",
-                ha="left" if r["delta_pp"] >= 0 else "right",
+                ha="left",
                 fontsize=9,
                 color=PALETTE["text"],
             )
@@ -1455,12 +1461,15 @@ def plot_champion_picks(
         if not top_winners.empty:
             top_row = top_winners.iloc[-1]
             top_idx = list(picks.index).index(top_row.name)
+            # Park the callout above the top bar so it sits in the
+            # axes-top margin instead of overlapping the row below (the
+            # row below often has its own long grey-bar annotation).
             ax.annotate(
                 "Play this more — confident lift",
                 xy=(top_row["delta_pp"], top_idx),
                 xytext=(
-                    top_row["delta_pp"] + 4,
-                    top_idx - 0.8 if top_idx > 1 else top_idx + 0.8,
+                    top_row["delta_pp"] + 1,
+                    top_idx + 0.9,
                 ),
                 fontsize=9,
                 color=PALETTE["win"],
@@ -2988,7 +2997,16 @@ def plot_rank_trajectory(df: pd.DataFrame, player: str | None = None) -> plt.Fig
             f"{len(ranks):,} LP snapshots across {ranks['person'].nunique()} people."
             f"{gap_note}",
         )
-        ax.legend(loc="lower left", ncol=2, fontsize=9)
+        # Bottom-left is where the lowest-rank lines live (Bronze/Silver
+        # area). Anchor the legend outside the data area on the right so
+        # it can't cover anyone's trajectory.
+        ax.legend(
+            loc="upper left",
+            bbox_to_anchor=(1.02, 1.0),
+            ncol=1,
+            fontsize=9,
+            frameon=True,
+        )
         _polish_ax(ax)
         fig.autofmt_xdate()
         fig.tight_layout()
@@ -3945,14 +3963,19 @@ def plot_feature_impact(
                     color="white",
                 )
         else:
-            sign_pad = 1 if r["effect_pp"] >= 0 else -1
+            # Non-significant / short bars: anchor the long annotation
+            # string to the right of the bar's outer tip when positive,
+            # or to the right of the zero line when negative — never to
+            # the left, so it can't crash into the y-tick labels for
+            # narrow negative bars.
+            anchor_x = max(r["effect_pp"], 0.0)
             ax.annotate(
                 label,
-                xy=(r["effect_pp"], yi),
-                xytext=(6 * sign_pad, 0),
+                xy=(anchor_x, yi),
+                xytext=(6, 0),
                 textcoords="offset points",
                 va="center",
-                ha="left" if r["effect_pp"] >= 0 else "right",
+                ha="left",
                 fontsize=9,
                 color=PALETTE["text"],
             )
@@ -4331,14 +4354,19 @@ def plot_logistic_coefficients(
                     color="white",
                 )
         else:
-            sign_pad = 1 if r["coef"] >= 0 else -1
+            # Non-significant / short bars: anchor the long annotation
+            # string to the right of the bar's outer tip when positive,
+            # or to the right of the zero line when negative — never to
+            # the left, so it can't crash into the y-tick labels for
+            # narrow negative bars.
+            anchor_x = max(r["coef"], 0.0)
             ax.annotate(
                 label,
-                xy=(r["coef"], yi),
-                xytext=(8 * sign_pad, 0),
+                xy=(anchor_x, yi),
+                xytext=(8, 0),
                 textcoords="offset points",
                 va="center",
-                ha="left" if r["coef"] >= 0 else "right",
+                ha="left",
                 fontsize=9,
                 color=PALETTE["text"],
             )
@@ -4346,11 +4374,16 @@ def plot_logistic_coefficients(
     max_abs = max(0.4, float(coefs_df["coef"].abs().max() + 1.96 * coefs_df["se"].max()) * 1.05)
     ax.set_xlim(-max_abs, max_abs)
 
+    # Reserve a strip below the bottom bar so the OOS AUC box sits in
+    # empty space instead of overlapping that row's annotation.
+    cur_lo, cur_hi = ax.get_ylim()
+    ax.set_ylim(cur_lo - 1.0, cur_hi)
+
     # OOS calibration (iter 26) showed pre-game logit has zero predictive
     # signal. Surface that directly here so the chart can't be over-read.
     ax.text(
         0.98,
-        0.04,
+        0.02,
         "Out-of-sample AUC = 0.498 (random).\nPre-game factors don't predict wins.\n→ For real signal see Picks and LP.",
         transform=ax.transAxes,
         ha="right",

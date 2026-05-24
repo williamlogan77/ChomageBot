@@ -281,6 +281,12 @@ MORE_CHART_DEFS = [
         "🩹",
         "Champion WR by Riot patch (vs iter 57's quarter proxy)",
     ),
+    (
+        "52_kda_dominance",
+        "KDA dominance",
+        "🥊",
+        "Within shared games, who out-KDAs whom? Pair-wise % dominance.",
+    ),
 ]
 
 

@@ -11363,6 +11363,270 @@ def plot_session_stamina(df: pd.DataFrame, player: str | None = None) -> plt.Fig
     return fig
 
 
+# --- 52. KDA dominance within shared games --------------------------------
+
+
+def compute_kda_dominance_pairs(df: pd.DataFrame, min_games: int = 5) -> pd.DataFrame:
+    """Pairwise KDA dominance across same-team shared games.
+
+    For every (person_i, person_j) with i < j alphabetically:
+      - ``n`` = shared same-team games
+      - ``i_wins`` = games where person_i's KDA strictly exceeded person_j's
+      - ``p_i_dominant`` = i_wins / n
+      - ``ci_lo`` / ``ci_hi`` = Wilson 95% CI on ``p_i_dominant``
+      - ``mean_diff`` = mean of ``kda_i - kda_j`` over the shared games
+      - ``pvalue`` = two-sided normal approximation to a binomial test of
+        H0: p = 0.5. scipy isn't in the project, so the same erfc trick the
+        ``chi2_pvalue`` helper uses elsewhere does the job here.
+
+    Same-team detection mirrors :func:`compute_duos`: join on
+    ``(match_id, win)`` and keep ``person_x < person_y`` so each unordered
+    pair appears once. Rows with NaN KDA are dropped before the self-join
+    so missing kills/assists/deaths can't silently get counted as "i lost".
+    """
+    if df.empty:
+        return pd.DataFrame(
+            columns=[
+                "a",
+                "b",
+                "n",
+                "i_wins",
+                "p_i_dominant",
+                "ci_lo",
+                "ci_hi",
+                "mean_diff",
+                "pvalue",
+            ]
+        )
+
+    m = (
+        df[["match_id", "win", "person", "kda"]]
+        .dropna(subset=["kda"])
+        .drop_duplicates(subset=["match_id", "person"])
+    )
+    pairs = m.merge(m, on=["match_id", "win"], suffixes=("_x", "_y"))
+    pairs = pairs[pairs["person_x"] < pairs["person_y"]].copy()
+    if pairs.empty:
+        return pd.DataFrame(
+            columns=[
+                "a",
+                "b",
+                "n",
+                "i_wins",
+                "p_i_dominant",
+                "ci_lo",
+                "ci_hi",
+                "mean_diff",
+                "pvalue",
+            ]
+        )
+    pairs["i_wins"] = (pairs["kda_x"] > pairs["kda_y"]).astype(int)
+    pairs["diff"] = pairs["kda_x"] - pairs["kda_y"]
+
+    agg = (
+        pairs.groupby(["person_x", "person_y"])
+        .agg(n=("i_wins", "size"), i_wins=("i_wins", "sum"), mean_diff=("diff", "mean"))
+        .reset_index()
+        .rename(columns={"person_x": "a", "person_y": "b"})
+    )
+    agg = agg[agg["n"] >= min_games].copy()
+    if agg.empty:
+        return agg.assign(p_i_dominant=[], ci_lo=[], ci_hi=[], pvalue=[])
+
+    agg["p_i_dominant"] = agg["i_wins"] / agg["n"]
+    ci_pairs = [wilson_ci(int(w), int(n)) for w, n in zip(agg["i_wins"], agg["n"], strict=False)]
+    agg["ci_lo"] = [lo for lo, _ in ci_pairs]
+    agg["ci_hi"] = [hi for _, hi in ci_pairs]
+
+    # Two-sided binomial p-value under H0 p=0.5 via normal approximation —
+    # consistent with chi2_pvalue's "no scipy" approach. At n>=5 with p=0.5
+    # this is plenty accurate for the "is this real?" callout.
+    def _p(k: int, n: int) -> float:
+        if n <= 0:
+            return 1.0
+        z = abs(k - n / 2.0) / math.sqrt(n / 4.0)
+        return math.erfc(z / math.sqrt(2.0))
+
+    agg["pvalue"] = [_p(int(w), int(n)) for w, n in zip(agg["i_wins"], agg["n"], strict=False)]
+    return agg.sort_values(["n", "p_i_dominant"], ascending=[False, False]).reset_index(drop=True)
+
+
+def plot_kda_dominance(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Within shared same-team games, who out-KDAs whom?
+
+    Aggregate: a symmetric heatmap — cell (i, j) shows the % of shared
+    games where row i's KDA beat col j's. Only the upper triangle is filled
+    because (i, j) and (j, i) are mirror images (p_ij = 1 - p_ji).
+    Diagonal and below-threshold cells are greyed.
+
+    Per-person: a horizontal bar of the focal player's dominance vs each
+    qualifying teammate, with Wilson 95% CI whiskers and a reference line
+    at 50%.
+    """
+    pairs = compute_kda_dominance_pairs(df, min_games=5)
+
+    if not _is_aggregate(player):
+        focal = _resolve_person(df, player)
+        display_name = _display_label(player) or "this player"
+        if not focal or pairs.empty:
+            return _empty_figure("Not enough shared-game data with other tracked players")
+        own = pairs[(pairs["a"] == focal) | (pairs["b"] == focal)].copy()
+        if own.empty:
+            return _empty_figure("Not enough shared-game data with other tracked players")
+        # Re-orient so the focal player is always "i".
+        own["teammate"] = np.where(own["a"] == focal, own["b"], own["a"])
+        own["p_dominant"] = np.where(
+            own["a"] == focal, own["p_i_dominant"], 1 - own["p_i_dominant"]
+        )
+        # Mirror the Wilson CI when the focal player is on the "b" side.
+        own["lo"] = np.where(own["a"] == focal, own["ci_lo"], 1 - own["ci_hi"])
+        own["hi"] = np.where(own["a"] == focal, own["ci_hi"], 1 - own["ci_lo"])
+        own["focal_wins"] = np.where(own["a"] == focal, own["i_wins"], own["n"] - own["i_wins"])
+
+        if len(own) < 5:
+            return _empty_figure("Not enough shared-game data with other tracked players")
+
+        own = own.sort_values("p_dominant", ascending=True).reset_index(drop=True)
+        ys = np.arange(len(own))
+        ps = own["p_dominant"].to_numpy()
+        los = own["lo"].to_numpy()
+        his = own["hi"].to_numpy()
+        ns = own["n"].to_numpy()
+
+        fig, ax = plt.subplots(figsize=(11, max(4.0, 0.45 * len(own) + 2.0)))
+        colours = [PALETTE["win"] if p >= 0.5 else PALETTE["loss"] for p in ps]
+        ax.barh(ys, ps, color=colours, height=0.7)
+        ax.errorbar(
+            ps,
+            ys,
+            xerr=[ps - los, his - ps],
+            **WHISKER_STYLE,
+        )
+        ax.axvline(0.5, color=PALETTE["muted"], linestyle="--", linewidth=1.0, label="even (50%)")
+        ax.set_yticks(ys)
+        ax.set_yticklabels(own["teammate"].tolist())
+        ax.set_xlim(0.0, 1.0)
+        ax.set_xlabel("Share of shared games where your KDA > teammate's")
+        ax.set_title(_title("KDA dominance", player))
+        _subtitle(
+            ax,
+            "Fraction of shared games where your KDA > teammate's. Wilson 95% CIs.",
+        )
+        ax.legend(loc="lower right")
+        _polish_ax(ax)
+        for yi, (p, n, mate) in enumerate(zip(ps, ns, own["teammate"].tolist(), strict=False)):
+            ax.annotate(
+                f"{p:.0%}  vs {mate}  (n={int(n)})",
+                xy=(p, yi),
+                xytext=(6, 0),
+                textcoords="offset points",
+                va="center",
+                fontsize=9,
+                color=PALETTE["text"],
+            )
+        # Replace the default title with the spec's per-person header
+        # (overrides _title's "KDA dominance · <name>" with a clearer form).
+        ax.set_title(f"KDA dominance - {display_name}")
+        fig.tight_layout()
+        return fig
+
+    # --- Aggregate heatmap -------------------------------------------------
+    if pairs.empty or len(pairs) < 3:
+        return _empty_figure("Need >=3 (player, player) pairs with >=5 shared games")
+
+    players = sorted(set(pairs["a"]) | set(pairs["b"]))
+    n_players = len(players)
+    idx = {name: i for i, name in enumerate(players)}
+
+    p_grid = np.full((n_players, n_players), np.nan)
+    n_grid = np.zeros((n_players, n_players), dtype=int)
+    for _, row in pairs.iterrows():
+        i = idx[row["a"]]
+        j = idx[row["b"]]
+        # Upper triangle from the alphabetical pair: row a, col b.
+        p_grid[i, j] = float(row["p_i_dominant"])
+        n_grid[i, j] = int(row["n"])
+        # Mirror so the lower triangle reads as "row's dominance over col".
+        p_grid[j, i] = 1.0 - float(row["p_i_dominant"])
+        n_grid[j, i] = int(row["n"])
+
+    # Render only the upper triangle as instructed; mask the rest as NaN.
+    show = np.full_like(p_grid, np.nan)
+    for i in range(n_players):
+        for j in range(n_players):
+            if j > i and not np.isnan(p_grid[i, j]):
+                show[i, j] = p_grid[i, j]
+
+    import matplotlib as mpl
+
+    cmap = mpl.colormaps.get_cmap("RdYlGn").copy()
+    cmap.set_bad(color="#dcdcdc")
+    norm = mpl.colors.Normalize(vmin=0.0, vmax=1.0)
+
+    fig, (ax, cax) = plt.subplots(
+        1,
+        2,
+        figsize=(1.2 * n_players + 4.5, 0.85 * n_players + 2.5),
+        gridspec_kw={"width_ratios": [22, 1]},
+    )
+    im = ax.imshow(show, cmap=cmap, norm=norm, aspect="equal")
+
+    ax.set_xticks(np.arange(n_players))
+    ax.set_xticklabels(players, rotation=35, ha="right")
+    ax.set_yticks(np.arange(n_players))
+    ax.set_yticklabels(players)
+
+    for i in range(n_players):
+        for j in range(n_players):
+            if i == j:
+                ax.text(j, i, "-", ha="center", va="center", color=PALETTE["muted"], fontsize=11)
+                continue
+            if j <= i:
+                # Lower triangle implied by the upper; leave blank.
+                ax.text(j, i, "", ha="center", va="center")
+                continue
+            n = n_grid[i, j]
+            p = p_grid[i, j]
+            if n < 5 or np.isnan(p):
+                ax.text(j, i, "-", ha="center", va="center", color=PALETTE["muted"], fontsize=11)
+                continue
+            # Near-50 cells land in the yellow zone of RdYlGn where dark text
+            # reads; extremes darken and want white.
+            txt_colour = PALETTE["text"] if abs(p - 0.5) < 0.12 else "white"
+            ax.text(
+                j,
+                i,
+                f"{p:.0%}\nn={int(n)}",
+                ha="center",
+                va="center",
+                fontsize=9,
+                color=txt_colour,
+            )
+
+    ax.set_xticks(np.arange(n_players + 1) - 0.5, minor=True)
+    ax.set_yticks(np.arange(n_players + 1) - 0.5, minor=True)
+    ax.grid(which="minor", color="white", linewidth=2)
+    ax.tick_params(which="minor", length=0)
+    ax.tick_params(which="major", length=0)
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+
+    ax.set_title("KDA dominance - who carries when paired?")
+    _subtitle(
+        ax,
+        "Per-pair % of shared games where row's KDA > col's KDA. "
+        "Cells with <5 shared games shown grey.",
+    )
+
+    cbar = fig.colorbar(im, cax=cax)
+    cbar.set_label("Row dominates column (%)")
+    cbar.set_ticks([0.0, 0.25, 0.5, 0.75, 1.0])
+    cbar.ax.set_yticklabels(["0%", "25%", "50%", "75%", "100%"])
+
+    fig.tight_layout()
+    return fig
+
+
 # --- registry --------------------------------------------------------------
 
 #: All aggregate plot functions, in the order the runner script + notebook
@@ -11419,4 +11683,5 @@ ALL_PLOTS = [
     ("49_recent_form", plot_recent_form),
     ("50_session_stamina", plot_session_stamina),
     ("51_patch_meta_shifts", plot_patch_meta_shifts),
+    ("52_kda_dominance", plot_kda_dominance),
 ]

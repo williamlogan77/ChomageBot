@@ -5144,6 +5144,185 @@ def summary_table(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values("games", ascending=False).reset_index(drop=True)
 
 
+def plot_match_highlights(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Six record-holding individual matches as a card grid.
+
+    Per-player view: the player's own highlights (best KDA win, most
+    kills, worst loss, longest match, shortest win, most recent ranked).
+    Aggregate view: the same six categories taken across every tracked
+    person, with the owning player named in each sublabel.
+
+    The grid layout mirrors ``plot_stats_summary`` and ``plot_actions_card``
+    (3x2 cards) so the dashboard tile style stays consistent.
+    """
+    d = _filter_player(df, player)
+    if d.empty:
+        return _empty_figure("No games yet.")
+
+    is_agg = _is_aggregate(player)
+
+    def _fmt_date(ts) -> str:
+        return pd.Timestamp(ts).strftime("%Y-%m-%d")
+
+    def _fmt_duration(secs) -> str:
+        mins, rem = divmod(int(secs), 60)
+        return f"{mins}:{rem:02d}"
+
+    def _outcome(win) -> str:
+        return "W" if int(win) == 1 else "L"
+
+    def _owner(row) -> str:
+        # Aggregate sublabels name the owning person so ownership is
+        # obvious without reading the chart title.
+        return f"  ·  {row['person']}" if is_agg else ""
+
+    wins = d[d["win"] == 1]
+    losses = d[d["win"] == 0]
+
+    # --- Tile 1: best KDA win ------------------------------------------------
+    if not wins.empty:
+        row = wins.loc[wins["kda"].idxmax()]
+        kda1_value = f"KDA {row['kills']}/{row['deaths']}/{row['assists']}"
+        kda1_sub = f"{row['champion']}  ·  {_fmt_date(row['game_start'])}{_owner(row)}"
+        kda1_accent = PALETTE["win"]
+        kda1_color = PALETTE["win"]
+    else:
+        kda1_value = "—"
+        kda1_sub = "no wins yet"
+        kda1_accent = PALETTE["neutral"]
+        kda1_color = PALETTE["muted"]
+
+    # --- Tile 2: most kills --------------------------------------------------
+    row = d.loc[d["kills"].idxmax()]
+    kills_value = f"{int(row['kills'])} kills"
+    kills_sub = (
+        f"{row['champion']}  ·  {_fmt_date(row['game_start'])}  ·  "
+        f"{_outcome(row['win'])}{_owner(row)}"
+    )
+    kills_accent = PALETTE["primary"]
+    kills_color = PALETTE["primary"]
+
+    # --- Tile 3: worst game (most deaths in a loss) --------------------------
+    if not losses.empty:
+        row = losses.loc[losses["deaths"].idxmax()]
+        worst_value = f"{int(row['deaths'])} deaths"
+        worst_sub = f"{row['champion']}  ·  {_fmt_date(row['game_start'])}{_owner(row)}"
+        worst_accent = PALETTE["loss"]
+        worst_color = PALETTE["loss"]
+    else:
+        worst_value = "—"
+        worst_sub = "no losses yet"
+        worst_accent = PALETTE["neutral"]
+        worst_color = PALETTE["muted"]
+
+    # --- Tile 4: longest match -----------------------------------------------
+    row = d.loc[d["duration_sec"].idxmax()]
+    long_value = _fmt_duration(row["duration_sec"])
+    long_sub = (
+        f"{row['champion']}  ·  {_fmt_date(row['game_start'])}  ·  "
+        f"{_outcome(row['win'])}{_owner(row)}"
+    )
+    long_accent = PALETTE["accent_teal"]
+    long_color = PALETTE["accent_teal"]
+
+    # --- Tile 5: shortest WIN ------------------------------------------------
+    if not wins.empty:
+        row = wins.loc[wins["duration_sec"].idxmin()]
+        short_value = _fmt_duration(row["duration_sec"])
+        short_sub = f"{row['champion']}  ·  {_fmt_date(row['game_start'])}{_owner(row)}"
+        short_accent = PALETTE["accent_orange"]
+        short_color = PALETTE["accent_orange"]
+    else:
+        short_value = "—"
+        short_sub = "no wins yet"
+        short_accent = PALETTE["neutral"]
+        short_color = PALETTE["muted"]
+
+    # --- Tile 6: most recent ranked -----------------------------------------
+    # match_stats is ranked-only by design, so the newest row is the
+    # latest ranked match without further filtering.
+    row = d.loc[d["game_start"].idxmax()]
+    recent_value = str(row["champion"])
+    recent_sub = (
+        f"KDA {row['kills']}/{row['deaths']}/{row['assists']}  ·  "
+        f"{_fmt_date(row['game_start'])}  ·  {_outcome(row['win'])}{_owner(row)}"
+    )
+    recent_accent = PALETTE["neutral"]
+    recent_color = PALETTE["text"]
+
+    # --- Render --------------------------------------------------------------
+    fig = plt.figure(figsize=(13, 6.6))
+    ax = fig.add_subplot(111)
+    ax.set_axis_off()
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+
+    title_who = _display_label(player) or "all players"
+    fig.suptitle(f"Match highlights — {title_who}", fontsize=18, fontweight="bold", y=0.965)
+    if is_agg:
+        n_people = df["person"].nunique()
+        sub_text = (
+            f"Record-holding matches across {n_people} tracked people. "
+            "Each card names the owning player."
+        )
+    else:
+        sub_text = "Record-holding individual matches for this player."
+    fig.text(
+        0.5,
+        0.905,
+        sub_text,
+        ha="center",
+        fontsize=10,
+        color=PALETTE["muted"],
+        style="italic",
+    )
+
+    margin_x, margin_y = 0.035, 0.04
+    gap_x, gap_y = 0.022, 0.035
+    n_cols, n_rows = 3, 2
+    grid_top = 0.86
+    grid_bottom = margin_y
+    card_w = (1 - 2 * margin_x - (n_cols - 1) * gap_x) / n_cols
+    card_h = (grid_top - grid_bottom - (n_rows - 1) * gap_y) / n_rows
+
+    def cell(col: int, row_i: int) -> tuple[float, float]:
+        x = margin_x + col * (card_w + gap_x)
+        y = grid_top - card_h - row_i * (card_h + gap_y)
+        return x, y
+
+    def tile(col, row_i, label_text, value, sublabel, accent, value_color):
+        x, y = cell(col, row_i)
+        _draw_card(ax, x, y, card_w, card_h, accent=accent)
+        _card_text(
+            ax,
+            x,
+            y,
+            card_w,
+            card_h,
+            label=label_text,
+            value=value,
+            sublabel=sublabel,
+            value_color=value_color,
+        )
+
+    tile(0, 0, "Best KDA win", kda1_value, kda1_sub, kda1_accent, kda1_color)
+    tile(1, 0, "Most kills", kills_value, kills_sub, kills_accent, kills_color)
+    tile(2, 0, "Worst game", worst_value, worst_sub, worst_accent, worst_color)
+    tile(0, 1, "Longest match", long_value, long_sub, long_accent, long_color)
+    tile(1, 1, "Shortest win", short_value, short_sub, short_accent, short_color)
+    tile(
+        2,
+        1,
+        "Most recent ranked",
+        recent_value,
+        recent_sub,
+        recent_accent,
+        recent_color,
+    )
+
+    return fig
+
+
 # --- registry --------------------------------------------------------------
 
 #: All aggregate plot functions, in the order the runner script + notebook
@@ -5174,4 +5353,5 @@ ALL_PLOTS = [
     ("23_actions_card", plot_actions_card),
     ("24_per_player_predictability", plot_per_player_predictability),
     ("25_tier_winrate", plot_tier_winrate),
+    ("26_match_highlights", plot_match_highlights),
 ]

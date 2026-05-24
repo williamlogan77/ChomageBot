@@ -7057,10 +7057,17 @@ def plot_stat_sheet(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
             if not higher_better:
                 pct = 100.0 - pct
             pct_int = int(round(pct))
+            # English ordinal suffix: 11/12/13 are special "th"; otherwise
+            # 1/2/3 take st/nd/rd. Keeps "22nd / 33rd / 53rd" from reading
+            # as "22th / 33th / 53th".
+            if 10 <= (pct_int % 100) <= 20:
+                ord_suffix = "th"
+            else:
+                ord_suffix = {1: "st", 2: "nd", 3: "rd"}.get(pct_int % 10, "th")
             ax.text(
                 0.5,
                 0.92,
-                f"You: {_stat_sheet_format(col, focal_value)} ({pct_int}th pct)",
+                f"You: {_stat_sheet_format(col, focal_value)} ({pct_int}{ord_suffix} pct)",
                 transform=ax.transAxes,
                 ha="center",
                 va="top",
@@ -7281,6 +7288,10 @@ def plot_game_pace(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
         alpha=0.55,
         label=f"Losses (n={len(losses)})",
     )
+    # Anchor the avg-line labels to the TOP of the axes so they sit above
+    # the histogram bars instead of crashing into them. Stagger win vs loss
+    # vertically when their averages are close together so the two labels
+    # don't overlap each other.
     if math.isfinite(avg_win):
         ax_top.axvline(
             avg_win,
@@ -7290,13 +7301,13 @@ def plot_game_pace(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
         )
         ax_top.annotate(
             f"win avg {avg_win:.1f}",
-            xy=(avg_win, ax_top.get_ylim()[1] if False else 0),
-            xytext=(4, 4),
+            xy=(avg_win, 1.0),
+            xytext=(4, -4),
             textcoords="offset points",
             xycoords=("data", "axes fraction"),
             fontsize=9,
             color=PALETTE["win"],
-            va="bottom",
+            va="top",
         )
     if math.isfinite(avg_loss):
         ax_top.axvline(
@@ -7305,17 +7316,15 @@ def plot_game_pace(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
             linewidth=1.6,
             linestyle=(0, (5, 4)),
         )
-        # Stagger the loss annotation vertically so the two means don't
-        # overlap when win/loss averages are close together.
         ax_top.annotate(
             f"loss avg {avg_loss:.1f}",
-            xy=(avg_loss, 0),
-            xytext=(4, 18),
+            xy=(avg_loss, 1.0),
+            xytext=(4, -18),
             textcoords="offset points",
             xycoords=("data", "axes fraction"),
             fontsize=9,
             color=PALETTE["loss"],
-            va="bottom",
+            va="top",
         )
     ax_top.set_xlabel("Game duration (min)")
     ax_top.set_ylabel("Games")
@@ -8468,7 +8477,7 @@ def plot_dow_hour_heatmap(df: pd.DataFrame, player: str | None = None) -> plt.Fi
                     color=PALETTE["muted"],
                 )
 
-    cbar = fig.colorbar(im, ax=ax, label="Δ vs baseline (pp)", shrink=0.85, pad=0.03)
+    cbar = fig.colorbar(im, ax=ax, label="Delta vs baseline (pp)", shrink=0.85, pad=0.03)
     cbar.outline.set_visible(False)
     cbar.ax.axhline(0.0, color=PALETTE["muted"], linewidth=0.8, alpha=0.6)
 
@@ -10468,7 +10477,16 @@ def plot_insights_card(df: pd.DataFrame, player: str | None = None) -> plt.Figur
         color=PALETTE["muted"],
         family="monospace",
     )
-    pct_label = f"{pct_int}th pct" if pct_int is not None else "n/a"
+    if pct_int is None:
+        pct_label = "n/a"
+    else:
+        # English ordinal suffix: 11/12/13 are special "th"; otherwise
+        # 1/2/3 take st/nd/rd. Keeps "22nd / 33rd" from reading as "22th".
+        if 10 <= (pct_int % 100) <= 20:
+            _ord = "th"
+        else:
+            _ord = {1: "st", 2: "nd", 3: "rd"}.get(pct_int % 10, "th")
+        pct_label = f"{pct_int}{_ord} pct"
     ax_head.text(
         0.65,
         0.38,

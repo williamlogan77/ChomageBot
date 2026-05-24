@@ -78,7 +78,7 @@ CHART_DEFS = [
     ("Activity", "📅", analysis.plot_activity_over_time, "Activity over time"),
     ("Rank", "🏅", analysis.plot_rank_trajectory, "Rank trajectory (with WR overlay)"),
     ("LP", "💰", analysis.plot_lp_economics, "LP economics — gain per win vs loss per loss"),
-    ("Cumulative WR", "📊", analysis.plot_cumulative_winrate, "Cumulative win rate"),
+    ("Actions", "📋", analysis.plot_actions_card, "Prescriptive insights per player"),
     ("Progression", "📈", analysis.plot_player_progression, "Lifetime progression"),
     ("KDA", "⚔️", analysis.plot_kda_vs_outcome, "KDA vs outcome"),
     ("Duration", "⏱️", analysis.plot_duration_vs_outcome, "Game duration vs outcome"),
@@ -132,7 +132,7 @@ def _build_panel_embed() -> discord.Embed:
             "🆚 **Compare** — every player on every metric, side by side\n"
             "🧠 **Logit** — multivariate logistic regression of win drivers\n"
             "📅 **Activity** — games / month + WR by month\n"
-            "📊 **Cumulative WR** · 📈 **Progression** (% of career)\n"
+            "📋 **Actions** · 📈 **Progression** (% of career)\n"
             "⚔️ **KDA** · ⏱️ **Duration** · 🏆 **Champs W/L** (Wilson CI) · 🎯 **Champ curves**\n"
             "🕐 **Hour** · 🗓️ **Day** · 🔥 **Heatmap**  (χ² p-values on temporal effects)\n"
             "😤 **Tilt** · ⏰ **Gap** since previous game\n"

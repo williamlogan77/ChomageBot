@@ -686,6 +686,7 @@ def load_matches(db_path: Path = DEFAULT_DB) -> pd.DataFrame:
                 ms.deaths,
                 ms.assists,
                 ms.duration_sec,
+                ms.patch_version,
                 lp.league_username AS riot_account,
                 lp.discord_user_id,
                 COALESCE(
@@ -10126,6 +10127,191 @@ def plot_champion_meta_shifts(df: pd.DataFrame, player: str | None = None) -> pl
     return fig
 
 
+# --- 51. Patch meta shifts — sibling of 47, real patches via Match-V5 ------
+
+
+def _short_patch(s: str | None) -> str | None:
+    """Collapse Riot's ``gameVersion`` ("14.18.612.4234") to its patch ("14.18").
+
+    Hotfixes within a patch share the first two segments — bucketing on
+    those folds the hotfix dot-revisions together. Returns None for
+    empty / malformed input so callers can dropna() before bucketing.
+    """
+    if not s:
+        return None
+    parts = str(s).split(".")
+    if len(parts) < 2:
+        return None
+    major, minor = parts[0].strip(), parts[1].strip()
+    if not (major.isdigit() and minor.isdigit()):
+        return None
+    return f"{major}.{minor}"
+
+
+def plot_patch_meta_shifts(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Detect meta / patch shifts: per-champion WR variation across real Riot patches.
+
+    Sibling of ``plot_champion_meta_shifts`` (iter 57), which segments by
+    calendar quarter as a noisy proxy. This one buckets by the actual
+    patch derived from Match-V5's ``gameVersion``, so hotfixes and balance
+    cadence line up with the bumps in WR. Rows with NULL ``patch_version``
+    (pre-backfill) are dropped — the subtitle reports the count.
+    """
+    if not _is_aggregate(player):
+        return _empty_figure("Aggregate view only - pick 'All'")
+
+    backfill_hint = (
+        "Need >=5 champions with >=4 patches of >=15 games each. "
+        "Run scripts/backfill_patch_version.py first?"
+    )
+
+    if df.empty or "patch_version" not in df.columns:
+        return _empty_figure(backfill_hint)
+
+    work = df[["champion", "win", "patch_version"]].copy()
+    n_null = int(work["patch_version"].isna().sum())
+    work = work.dropna(subset=["patch_version", "champion"])
+    work["patch_short"] = work["patch_version"].map(_short_patch)
+    work = work.dropna(subset=["patch_short"])
+    if work.empty:
+        return _empty_figure(backfill_hint)
+
+    grouped = (
+        work.groupby(["champion", "patch_short"])["win"].agg(games="size", wins="sum").reset_index()
+    )
+    grouped["wins"] = grouped["wins"].astype(int)
+    grouped["games"] = grouped["games"].astype(int)
+
+    champ_totals = grouped.groupby("champion")["games"].sum()
+    eligible_champs = champ_totals[champ_totals >= 80].index.tolist()
+    if not eligible_champs:
+        return _empty_figure(backfill_hint)
+
+    qualified_rows = grouped[grouped["champion"].isin(eligible_champs) & (grouped["games"] >= 15)]
+    patches_per_champ = qualified_rows.groupby("champion")["patch_short"].nunique()
+    keep_champs = patches_per_champ[patches_per_champ >= 4].index.tolist()
+    if len(keep_champs) < 5:
+        return _empty_figure(backfill_hint)
+
+    stats: list[dict] = []
+    for champ in keep_champs:
+        sub = qualified_rows[qualified_rows["champion"] == champ]
+        wins = sub["wins"].to_numpy()
+        games = sub["games"].to_numpy()
+        _chi2, _dof, p_raw = chi2_homogeneity(wins, games)
+        wrs = wins / games
+        stats.append(
+            {
+                "champion": champ,
+                "p_raw": p_raw,
+                "range_pp": float(wrs.max() - wrs.min()),
+                "n_patches": int(len(games)),
+                "n_games": int(games.sum()),
+            }
+        )
+
+    stats_df = pd.DataFrame(stats)
+    stats_df["p_adj"] = bh_adjust(stats_df["p_raw"].tolist())
+    stats_df = stats_df.sort_values(["p_raw", "range_pp"], ascending=[True, False]).reset_index(
+        drop=True
+    )
+
+    top = stats_df.head(20).copy()
+
+    # Numeric sort by (major, minor) so "9.24" lands before "10.1".
+    all_patches = sorted(
+        work["patch_short"].unique().tolist(),
+        key=lambda p: tuple(int(x) for x in p.split(".")),
+    )
+
+    wr_matrix = np.full((len(top), len(all_patches)), np.nan, dtype=float)
+    n_matrix = np.zeros((len(top), len(all_patches)), dtype=int)
+    lookup = grouped.set_index(["champion", "patch_short"])
+    for row_i, champ in enumerate(top["champion"].tolist()):
+        for col_j, p in enumerate(all_patches):
+            if (champ, p) in lookup.index:
+                rec = lookup.loc[(champ, p)]
+                games = int(rec["games"])
+                if games >= 15:
+                    wr_matrix[row_i, col_j] = int(rec["wins"]) / games
+                    n_matrix[row_i, col_j] = games
+
+    fig = plt.figure(figsize=(12, 9))
+    gs = fig.add_gridspec(1, 2, width_ratios=[3.0, 1.0], wspace=0.05)
+    ax = fig.add_subplot(gs[0, 0])
+    ax_side = fig.add_subplot(gs[0, 1])
+
+    cmap = plt.get_cmap("RdYlGn").copy()
+    cmap.set_bad(color="#f3f4f6")
+    im = ax.imshow(wr_matrix, aspect="auto", cmap=cmap, vmin=0.4, vmax=0.6)
+
+    ax.set_xticks(range(len(all_patches)))
+    ax.set_xticklabels(all_patches, rotation=45, ha="right", color=PALETTE["text"])
+    ax.set_yticks(range(len(top)))
+    ax.set_yticklabels(top["champion"].tolist(), color=PALETTE["text"])
+    ax.set_xlabel("Patch")
+    ax.set_title(_title("Patch champion WR - meta shift detection", None))
+    _subtitle(
+        ax,
+        "Top 20 by chi-square significance. BH-FDR adjusted q-values. "
+        f"* = q < 0.10. {n_null:,} games with unknown patch excluded.",
+    )
+    ax.grid(False)
+    for spine in ax.spines.values():
+        spine.set_color(PALETTE["spine"])
+
+    for i in range(wr_matrix.shape[0]):
+        for j in range(wr_matrix.shape[1]):
+            wr = wr_matrix[i, j]
+            n = n_matrix[i, j]
+            if np.isnan(wr):
+                continue
+            txt_color = "white" if (wr <= 0.43 or wr >= 0.57) else PALETTE["text"]
+            ax.text(
+                j,
+                i,
+                f"{wr:.0%}\nn={n}",
+                ha="center",
+                va="center",
+                fontsize=7.5,
+                color=txt_color,
+            )
+
+    cbar = fig.colorbar(im, ax=ax, label="WR", shrink=0.6, pad=0.02)
+    cbar.outline.set_visible(False)
+
+    ax_side.set_xlim(0, 1)
+    ax_side.set_ylim(-0.5, len(top) - 0.5)
+    ax_side.invert_yaxis()
+    ax_side.set_axis_off()
+    ax_side.text(
+        0.0,
+        -1.0,
+        "raw p   /   BH q   /   range",
+        ha="left",
+        va="bottom",
+        fontsize=9,
+        color=PALETTE["muted"],
+        style="italic",
+        transform=ax_side.transData,
+    )
+    for i, (_, row) in enumerate(top.iterrows()):
+        flag = " *" if row["p_adj"] < 0.10 else "  "
+        ax_side.text(
+            0.0,
+            i,
+            f"p={row['p_raw']:.3f}  q={row['p_adj']:.3f}  range={row['range_pp']*100:.1f}pp{flag}",
+            ha="left",
+            va="center",
+            fontsize=8.5,
+            color=PALETTE["text"],
+            family="monospace",
+        )
+
+    fig.subplots_adjust(left=0.10, right=0.97, top=0.92, bottom=0.10)
+    return fig
+
+
 # --- 48. Insights card - TL;DR for one person ------------------------------
 
 _INSIGHTS_MIN_GAMES = 50
@@ -11232,4 +11418,5 @@ ALL_PLOTS = [
     ("48_insights_card", plot_insights_card),
     ("49_recent_form", plot_recent_form),
     ("50_session_stamina", plot_session_stamina),
+    ("51_patch_meta_shifts", plot_patch_meta_shifts),
 ]

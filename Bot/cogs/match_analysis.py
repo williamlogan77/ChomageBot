@@ -76,6 +76,7 @@ async def _load_matches_cached(db_path: str) -> pd.DataFrame:
         _df_cache[db_path] = (now, df)
         return df
 
+
 # The panel lives in exactly this channel — /match_stats_panel always
 # targets it, regardless of where the slash command was invoked.
 PANEL_CHANNEL_ID = 1507729687529652234
@@ -272,6 +273,12 @@ MORE_CHART_DEFS = [
         "Session stamina",
         "🏃",
         "WR by total session length — does the marathon penalty exist?",
+    ),
+    (
+        "51_patch_meta_shifts",
+        "Patch meta shifts",
+        "🩹",
+        "Champion WR by Riot patch (vs iter 57's quarter proxy)",
     ),
 ]
 

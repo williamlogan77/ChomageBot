@@ -81,6 +81,11 @@ def _table_exists(con: sqlite3.Connection, name: str) -> bool:
     )
 
 
+def _column_exists(con: sqlite3.Connection, table: str, column: str) -> bool:
+    rows = con.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(r[1] == column for r in rows)
+
+
 def _fmt_count(n: int) -> str:
     return f"{n:,}"
 
@@ -98,7 +103,7 @@ def check_match_stats(con: sqlite3.Connection, r: Report) -> None:
             "table presence",
             "missing",
             "ERROR",
-            "match_stats not in DB; skipping checks 1-11",
+            "match_stats not in DB; skipping checks 1-14",
         )
         return
 
@@ -287,6 +292,60 @@ def check_match_stats(con: sqlite3.Connection, r: Report) -> None:
     if dup_rows:
         r.samples([f"match_id={m} puuid={_trunc_puuid(p)} count={c}" for m, p, c in dup_rows])
 
+    # 12. patch_version column presence
+    has_patch_col = _column_exists(con, "match_stats", "patch_version")
+    r.emit(
+        "patch_version column",
+        "present" if has_patch_col else "absent",
+        "OK" if has_patch_col else "WARN",
+        "" if has_patch_col else "run scripts/migrate_add_patch_version.py",
+    )
+
+    # 13/14. Only meaningful if the column exists. Otherwise the queries would
+    # raise OperationalError — skip them cleanly.
+    if not has_patch_col:
+        return
+
+    # 13. patch_version null fraction
+    total_pv, non_null_pv = con.execute(
+        "SELECT COUNT(*), COUNT(patch_version) FROM match_stats"
+    ).fetchone()
+    null_pv = total_pv - non_null_pv
+    if total_pv == 0:
+        null_frac = 0.0
+        status = "OK"
+        detail = "no rows"
+    else:
+        null_frac = null_pv / total_pv
+        if null_pv == 0:
+            status = "OK"
+            detail = ""
+        elif null_pv == total_pv:
+            status = "ERROR"
+            detail = "migration ran but backfill never did"
+        else:
+            status = "WARN"
+            detail = "run scripts/backfill_patch_version.py"
+    r.emit(
+        "patch_version null frac",
+        f"{null_pv}/{total_pv} ({null_frac:.1%})",
+        status,
+        detail,
+    )
+
+    # 14. Most-common patch versions (informational sanity check).
+    top_versions = con.execute(
+        "SELECT patch_version, COUNT(*) FROM match_stats "
+        "WHERE patch_version IS NOT NULL GROUP BY 1 ORDER BY 2 DESC LIMIT 5"
+    ).fetchall()
+    r.emit(
+        "top patch versions",
+        f"{len(top_versions)} buckets",
+        "OK" if top_versions else "WARN",
+        "" if top_versions else "column exists but no non-null rows",
+    )
+    r.samples([f"patch_version={v} count={_fmt_count(c)}" for v, c in top_versions])
+
 
 def check_league_history(con: sqlite3.Connection, r: Report) -> None:
     r.section("league_history")
@@ -294,13 +353,13 @@ def check_league_history(con: sqlite3.Connection, r: Report) -> None:
         r.emit("table presence", "missing", "ERROR", "league_history not in DB")
         return
 
-    # 12. Totals
+    # 15. Totals
     total = con.execute("SELECT COUNT(*) FROM league_history").fetchone()[0]
     distinct_puuid = con.execute("SELECT COUNT(DISTINCT puuid) FROM league_history").fetchone()[0]
     r.emit("total rows", _fmt_count(total), "OK")
     r.emit("distinct puuids", _fmt_count(distinct_puuid), "OK")
 
-    # 13. Future-dated rows
+    # 16. Future-dated rows
     now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
     fut_n = con.execute(
         "SELECT COUNT(*) FROM league_history WHERE timestamp > ?", (now,)
@@ -324,7 +383,7 @@ def check_league_history(con: sqlite3.Connection, r: Report) -> None:
             ]
         )
 
-    # 14. Tri-state NULL invariant for (lp, tier, division)
+    # 17. Tri-state NULL invariant for (lp, tier, division)
     # All three should be present together or all absent. XOR any pair.
     mixed = con.execute(
         "SELECT COUNT(*) FROM league_history WHERE "
@@ -346,7 +405,7 @@ def check_league_history(con: sqlite3.Connection, r: Report) -> None:
             [f"{t} puuid={_trunc_puuid(p)} lp={lp} tier={ti} div={d}" for t, p, lp, ti, d in rows]
         )
 
-    # 15. Orphan puuids
+    # 18. Orphan puuids
     orphan_n = con.execute(
         "SELECT COUNT(*) FROM league_history "
         "WHERE puuid NOT IN (SELECT puuid FROM league_players WHERE puuid IS NOT NULL)"
@@ -358,7 +417,7 @@ def check_league_history(con: sqlite3.Connection, r: Report) -> None:
         "history for untracked accounts" if orphan_n else "",
     )
 
-    # 16. Per-puuid history span
+    # 19. Per-puuid history span
     spans = con.execute(
         "SELECT puuid, MIN(timestamp), MAX(timestamp), COUNT(*) "
         "FROM league_history GROUP BY puuid ORDER BY COUNT(*) DESC"
@@ -380,7 +439,7 @@ def check_league_history(con: sqlite3.Connection, r: Report) -> None:
             ]
         )
 
-    # 17. Longest day-gap per puuid (top 5). SQLite has no native datediff; pull
+    # 20. Longest day-gap per puuid (top 5). SQLite has no native datediff; pull
     # rows ordered and compute deltas in Python — clearer than a CTE here.
     per_puuid_ts = defaultdict(list)
     for puuid, ts in con.execute(
@@ -411,7 +470,7 @@ def check_league_history(con: sqlite3.Connection, r: Report) -> None:
         [f"puuid={_trunc_puuid(p)} gap={g:.1f}d from={s} to={e}" for p, g, s, e in gap_records[:5]]
     )
 
-    # 18. Invalid tier values
+    # 21. Invalid tier values
     bad_tier = con.execute(
         f"SELECT COUNT(*) FROM league_history "
         f"WHERE tier IS NOT NULL "
@@ -432,7 +491,7 @@ def check_league_history(con: sqlite3.Connection, r: Report) -> None:
         ).fetchall()
         r.samples([f"tier={t!r}" for (t,) in rows])
 
-    # 19. Invalid LP for non-apex tiers (Master+ uncapped).
+    # 22. Invalid LP for non-apex tiers (Master+ uncapped).
     placeholders = ",".join(["?"] * len(APEX_TIERS))
     bad_lp = con.execute(
         f"SELECT COUNT(*) FROM league_history "
@@ -462,7 +521,7 @@ def check_league_players(con: sqlite3.Connection, r: Report) -> None:
         r.emit("table presence", "missing", "ERROR", "league_players not in DB")
         return
 
-    # 20. Totals
+    # 23. Totals
     total = con.execute("SELECT COUNT(*) FROM league_players").fetchone()[0]
     distinct_users = con.execute(
         "SELECT COUNT(DISTINCT discord_user_id) FROM league_players"
@@ -470,7 +529,7 @@ def check_league_players(con: sqlite3.Connection, r: Report) -> None:
     r.emit("total rows", _fmt_count(total), "OK")
     r.emit("distinct discord_user_id", _fmt_count(distinct_users), "OK")
 
-    # 21. NULL / empty puuid
+    # 24. NULL / empty puuid
     null_puuid = con.execute(
         "SELECT COUNT(*) FROM league_players WHERE puuid IS NULL OR puuid = ''"
     ).fetchone()[0]
@@ -480,7 +539,7 @@ def check_league_players(con: sqlite3.Connection, r: Report) -> None:
         "OK" if null_puuid == 0 else "ERROR",
     )
 
-    # 22. Accounts-per-user distribution (informational, not a violation).
+    # 25. Accounts-per-user distribution (informational, not a violation).
     per_user = con.execute(
         "SELECT discord_user_id, COUNT(*) FROM league_players GROUP BY discord_user_id"
     ).fetchall()
@@ -494,7 +553,7 @@ def check_league_players(con: sqlite3.Connection, r: Report) -> None:
         "informational; multi-account is normal",
     )
 
-    # 23. Orphan discord_user_id (league_players row without a matching users row).
+    # 26. Orphan discord_user_id (league_players row without a matching users row).
     # Schema doesn't enforce FK so this can drift legitimately; WARN, not ERROR.
     if _table_exists(con, "users"):
         orphan_n = con.execute(

@@ -10653,6 +10653,152 @@ def _insights_golden_hour_panel(ax, sub: pd.DataFrame) -> None:
     )
 
 
+def _insights_recent_form_panel(ax, df: pd.DataFrame, sub: pd.DataFrame) -> None:
+    """30-day WR vs lifetime WR, with color-coded delta."""
+    title = "RECENT FORM"
+    header_color = PALETTE["accent_teal"]
+
+    # Anchor recency to the latest game in the full df, matching plot_recent_form.
+    game_start_all = pd.to_datetime(df["game_start"])
+    now = game_start_all.max()
+    if pd.isna(now):
+        _insights_insufficient(ax, title, header_color)
+        return
+
+    sub_ts = pd.to_datetime(sub["game_start"])
+    recent_mask = sub_ts >= (now - pd.Timedelta(days=30))
+    n_30 = int(recent_mask.sum())
+    if n_30 < 8:
+        _insights_panel_off(ax)
+        _insights_panel_header(ax, title, header_color)
+        ax.text(
+            0.5,
+            0.45,
+            f"INSUFFICIENT\n30D DATA (n={n_30})",
+            ha="center",
+            va="center",
+            fontsize=11,
+            color=PALETTE["muted"],
+            family="monospace",
+        )
+        return
+
+    wr_30 = float(sub.loc[recent_mask, "win"].mean())
+    wr_life = float(sub["win"].mean())
+    delta_pp = (wr_30 - wr_life) * 100.0
+
+    if delta_pp > 1.0:
+        accent = PALETTE["win"]
+    elif delta_pp < -1.0:
+        accent = PALETTE["loss"]
+    else:
+        accent = PALETTE["neutral"]
+
+    _insights_panel_off(ax)
+    _insights_panel_header(ax, title, header_color)
+    ax.text(
+        0.5,
+        0.62,
+        f"{delta_pp:+.1f} pp",
+        ha="center",
+        va="center",
+        fontsize=22,
+        fontweight="bold",
+        color=accent,
+    )
+    ax.text(
+        0.5,
+        0.36,
+        f"30d {wr_30:.0%}  (n={n_30})",
+        ha="center",
+        va="center",
+        fontsize=10,
+        color=PALETTE["text"],
+        family="monospace",
+    )
+    ax.text(
+        0.5,
+        0.20,
+        f"lifetime {wr_life:.0%}",
+        ha="center",
+        va="center",
+        fontsize=10,
+        color=PALETTE["muted"],
+        family="monospace",
+    )
+
+
+def _insights_hot_champ_panel(ax, sub: pd.DataFrame) -> None:
+    """P(same champ | prev win) vs P(same | prev loss)."""
+    title = "HOT-CHAMP BEHAVIOR"
+    header_color = PALETTE["accent_orange"]
+
+    d = sub.sort_values("game_start").reset_index(drop=True)
+    d = d.assign(
+        prev_champion=d["champion"].shift(1),
+        prev_win=d["win"].shift(1),
+    )
+    d = d.dropna(subset=["prev_win", "prev_champion"])
+    if d.empty:
+        _insights_insufficient(ax, title, header_color)
+        return
+    d = d.copy()
+    d["prev_win"] = d["prev_win"].astype(int)
+    d["same_champion"] = (d["champion"] == d["prev_champion"]).astype(int)
+
+    wins = d[d["prev_win"] == 1]
+    losses = d[d["prev_win"] == 0]
+    n_w, n_l = len(wins), len(losses)
+    if n_w < 30 or n_l < 30:
+        _insights_insufficient(ax, title, header_color)
+        return
+
+    p_win = float(wins["same_champion"].mean())
+    p_loss = float(losses["same_champion"].mean())
+    delta = p_win - p_loss
+    delta_pp = delta * 100.0
+
+    if delta_pp > 15.0:
+        accent = PALETTE["primary"]
+    elif delta_pp < 0.0:
+        accent = PALETTE["loss"]
+    else:
+        accent = PALETTE["neutral"]
+
+    _insights_panel_off(ax)
+    _insights_panel_header(ax, title, header_color)
+    ax.text(
+        0.5,
+        0.62,
+        f"{delta_pp:+.1f} pp",
+        ha="center",
+        va="center",
+        fontsize=22,
+        fontweight="bold",
+        color=accent,
+    )
+    ax.text(
+        0.5,
+        0.36,
+        f"ride|win {p_win:.0%}  (n={n_w})",
+        ha="center",
+        va="center",
+        fontsize=10,
+        color=PALETTE["text"],
+        family="monospace",
+    )
+    ax.text(
+        0.5,
+        0.20,
+        f"comfort|loss {p_loss:.0%}  (n={n_l})",
+        ha="center",
+        va="center",
+        fontsize=10,
+        color=PALETTE["muted"],
+        family="monospace",
+    )
+
+
 def plot_insights_card(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
     """TL;DR insights card - one chart that consolidates the most actionable
     findings for a single player into a 7-panel info-graphic.
@@ -10690,9 +10836,10 @@ def plot_insights_card(df: pd.DataFrame, player: str | None = None) -> plt.Figur
         # Shouldn't happen given the >=50 gate, but degrade gracefully.
         pct_int = None
 
-    fig = plt.figure(figsize=(14, 9))
-    # Three rows: short banner+headline, behaviour panels, recommendation panels.
-    gs = fig.add_gridspec(3, 3, height_ratios=[1.0, 1.4, 1.6], hspace=0.30, wspace=0.18)
+    fig = plt.figure(figsize=(14, 11))
+    # Four rows: banner+headline, behaviour panels, recommendation panels,
+    # recency + hot-champ strip.
+    gs = fig.add_gridspec(4, 3, height_ratios=[1.0, 1.4, 1.6, 1.0], hspace=0.35, wspace=0.18)
 
     # Row 1 spans all three columns — banner + big WR + games count.
     ax_head = fig.add_subplot(gs[0, :])
@@ -10799,6 +10946,14 @@ def plot_insights_card(df: pd.DataFrame, player: str | None = None) -> plt.Figur
     _insights_swap_panel(ax_buy, sub, side="buy")
     _insights_swap_panel(ax_sell, sub, side="sell")
     _insights_golden_hour_panel(ax_gold, sub)
+
+    # Row 4: recent form + hot-champ behaviour. Two cells across 3 cols via
+    # a subgridspec — parent stays 3-wide for rows 1-3.
+    sub_row4 = gs[3, :].subgridspec(1, 2, wspace=0.18)
+    ax_form = fig.add_subplot(sub_row4[0, 0])
+    ax_hot = fig.add_subplot(sub_row4[0, 1])
+    _insights_recent_form_panel(ax_form, df, sub)
+    _insights_hot_champ_panel(ax_hot, sub)
 
     fig.subplots_adjust(left=0.03, right=0.97, top=0.96, bottom=0.04)
     return fig

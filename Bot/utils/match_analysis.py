@@ -5756,6 +5756,91 @@ def plot_playstyle_clusters(df: pd.DataFrame, player: str | None = None) -> plt.
     return fig
 
 
+def plot_champion_freshness(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Per-champion "how long since I last played this?" for a focal player.
+
+    Champion mastery decays. The bot is full of players who insist they
+    "still know" a pick they haven't touched in 4 months — this chart
+    surfaces that gap explicitly. Bars are coloured by warmth bucket so
+    a glance reads "what's warm, what's medium, what's rusty".
+
+    ``today`` is anchored on the latest game in the dataframe (not
+    wall-clock), so reruns against a frozen snapshot produce identical
+    output regardless of when the chart is rendered.
+    """
+    if _is_aggregate(player):
+        return _empty_figure("Champion freshness is per-person. Pick a player from the dropdown.")
+
+    d = _filter_player(df, player)
+    if d.empty:
+        return _empty_figure("No games to analyse")
+
+    today = df["game_start"].max()
+    champ_stats = d.groupby("champion").agg(
+        games_total=("win", "size"),
+        last_played=("game_start", "max"),
+    )
+    champ_stats = champ_stats[champ_stats["games_total"] >= 5]
+    if champ_stats.empty:
+        return _empty_figure("No champions with >=5 games")
+
+    champ_stats["days_since"] = (today - champ_stats["last_played"]).dt.days.astype(int)
+
+    # Keep the 20 most-played, then sort so freshest is at the top of the
+    # horizontal chart (small days_since at top → ascending sort + invert_yaxis).
+    champ_stats = champ_stats.sort_values("games_total", ascending=False).head(20)
+    champ_stats = champ_stats.sort_values("days_since", ascending=True)
+
+    def warmth_colour(days: int) -> str:
+        if days <= 30:
+            return PALETTE["win"]
+        if days <= 90:
+            return PALETTE["accent_orange"]
+        return PALETTE["loss"]
+
+    colours = [warmth_colour(int(d)) for d in champ_stats["days_since"]]
+
+    fig_h = max(4.6, len(champ_stats) * 0.42)
+    fig, ax = plt.subplots(figsize=(13, fig_h))
+    y = np.arange(len(champ_stats))
+    ax.barh(y, champ_stats["days_since"], color=colours, height=0.7)
+    ax.set_yticks(y)
+    ax.set_yticklabels(champ_stats.index)
+    ax.invert_yaxis()
+    ax.set_xlabel(f"Days since last played (snapshot: {today.date().isoformat()})")
+    ax.set_title(_title("Champion freshness — days since last played", player))
+    _subtitle(
+        ax,
+        "Green = played in last 30 days (warm). "
+        "Orange = 30-90 days. Red = >90 days (rusty). "
+        "Top 20 most-played champions (min 5 games).",
+    )
+    _polish_ax(ax)
+
+    max_days = float(champ_stats["days_since"].max())
+    # Pad right so the n=NN tail of the annotation doesn't run off the axes.
+    ax.set_xlim(0, max(30.0, max_days) * 1.25)
+
+    for yi, (_, r) in enumerate(champ_stats.iterrows()):
+        days = int(r["days_since"])
+        n = int(r["games_total"])
+        last = r["last_played"].date().isoformat()
+        label = f"{days}d ago  ·  n={n}  ·  last: {last}"
+        ax.annotate(
+            label,
+            xy=(r["days_since"], yi),
+            xytext=(6, 0),
+            textcoords="offset points",
+            va="center",
+            ha="left",
+            fontsize=9,
+            color=PALETTE["text"],
+        )
+
+    fig.tight_layout()
+    return fig
+
+
 # --- registry --------------------------------------------------------------
 
 #: All aggregate plot functions, in the order the runner script + notebook
@@ -5789,4 +5874,5 @@ ALL_PLOTS = [
     ("26_match_highlights", plot_match_highlights),
     ("27_recent_sessions", plot_recent_sessions),
     ("28_playstyle_clusters", plot_playstyle_clusters),
+    ("29_champion_freshness", plot_champion_freshness),
 ]

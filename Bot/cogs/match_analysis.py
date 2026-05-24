@@ -176,6 +176,12 @@ MORE_CHART_DEFS = [
         "🔁",
         "Do players ride hot champs (after win) or comfort-pick (after loss)?",
     ),
+    (
+        "43_ride_payoff",
+        "Ride payoff",
+        "💰",
+        "Does riding hot champs actually win? Per-cohort WR test.",
+    ),
 ]
 
 

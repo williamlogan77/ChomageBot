@@ -8777,6 +8777,414 @@ def _plot_same_champ_per_person(row: pd.Series, label: str) -> plt.Figure:
     return fig
 
 
+# --- 43. Ride payoff (does riding hot champs actually pay off?) ------------
+
+_RIDE_MIN_GAMES = 100
+_RIDE_MIN_COHORT = 10
+_RIDE_BOOT = 2000
+
+
+def _ride_per_player_cohorts(df: pd.DataFrame) -> pd.DataFrame:
+    """For each game with a previous game on record, label it into one of
+    four cohorts (prev_outcome x same_champion) and aggregate WR per
+    person per cohort. Returns one row per (person, cohort) with wins/n.
+    """
+    d = df.sort_values(["person", "game_start"]).reset_index(drop=True)
+    d = d.assign(
+        prev_champion=d.groupby("person")["champion"].shift(1),
+        prev_win=d.groupby("person")["win"].shift(1),
+    )
+    d = d.dropna(subset=["prev_win"]).copy()
+    d["prev_win"] = d["prev_win"].astype(int)
+    d["same_champion"] = (d["champion"] == d["prev_champion"]).astype(int)
+    # Cohort letter: A=prev_win+same, B=prev_win+diff, C=prev_loss+same,
+    # D=prev_loss+diff. Stored as a categorical for stable ordering.
+    cohort = np.where(
+        d["prev_win"] == 1,
+        np.where(d["same_champion"] == 1, "A", "B"),
+        np.where(d["same_champion"] == 1, "C", "D"),
+    )
+    d["cohort"] = cohort
+
+    grouped = (
+        d.groupby(["person", "cohort"], observed=True)["win"]
+        .agg(["sum", "count"])
+        .rename(columns={"sum": "wins", "count": "n"})
+        .reset_index()
+    )
+    grouped["wr"] = grouped["wins"] / grouped["n"]
+    # Also carry overall total games per person so the caller can apply the
+    # >=100 games threshold without re-grouping.
+    totals = d.groupby("person").size().rename("total_games").reset_index()
+    grouped = grouped.merge(totals, on="person", how="left")
+    return grouped
+
+
+def _ride_cohort_matrix(cohorts: pd.DataFrame) -> pd.DataFrame:
+    """Pivot per-(person, cohort) rows into one row per person with columns
+    wr_A, wr_B, wr_C, wr_D, n_A, n_B, n_C, n_D, total_games. Missing cohort
+    cells become NaN in the WR columns and 0 in the n columns.
+    """
+    wr = cohorts.pivot(index="person", columns="cohort", values="wr")
+    n = cohorts.pivot(index="person", columns="cohort", values="n").fillna(0).astype(int)
+    for letter in ("A", "B", "C", "D"):
+        if letter not in wr.columns:
+            wr[letter] = np.nan
+        if letter not in n.columns:
+            n[letter] = 0
+    wr = wr[["A", "B", "C", "D"]].rename(columns=lambda c: f"wr_{c}")
+    n = n[["A", "B", "C", "D"]].rename(columns=lambda c: f"n_{c}")
+    totals = cohorts.groupby("person")["total_games"].first()
+    out = wr.join(n).join(totals.rename("total_games"))
+    return out.reset_index()
+
+
+def _paired_bootstrap_wr_diff(
+    wr_lhs: np.ndarray,
+    wr_rhs: np.ndarray,
+    n_boot: int = _RIDE_BOOT,
+    seed: int = 20260524,
+) -> tuple[float, float, float]:
+    """Paired bootstrap (resample players with replacement) for the macro
+    mean of per-player WR differences ``wr_lhs - wr_rhs``. Both arrays must
+    be aligned per player and contain no NaNs (caller filters).
+    """
+    n = len(wr_lhs)
+    if n == 0:
+        return (float("nan"), float("nan"), float("nan"))
+    diffs_obs = wr_lhs - wr_rhs
+    rng = np.random.default_rng(seed)
+    boot = np.empty(n_boot)
+    for i in range(n_boot):
+        idx = rng.integers(0, n, size=n)
+        boot[i] = diffs_obs[idx].mean()
+    return (
+        float(diffs_obs.mean()),
+        float(np.percentile(boot, 2.5)),
+        float(np.percentile(boot, 97.5)),
+    )
+
+
+def plot_ride_payoff(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Does riding a hot champion actually pay off?
+
+    Iter 52 showed players ride the same champion ~18pp more after a win.
+    This chart tests whether that behaviour is rewarded: are the WRs
+    higher when you ride hot (cohort A) vs switch off after a win
+    (cohort B), and higher when you comfort-pick after a loss (cohort C)
+    vs try something else (cohort D)?
+
+    Aggregate view: macro mean WR per cohort across players with >=10
+    games in the cohort, with paired-bootstrap 95% CIs on the two
+    differences A-B and C-D.
+
+    Per-person view: that player's WR in each cohort with Wilson 95% CIs
+    and the same two differences.
+    """
+    cohorts = _ride_per_player_cohorts(df)
+
+    if _is_aggregate(player):
+        return _plot_ride_payoff_aggregate(df, cohorts)
+
+    label = _display_label(player) or "this player"
+    person = _resolve_person(df, player)
+    if person is None:
+        return _empty_figure(f"No games for {label}")
+    matrix = _ride_cohort_matrix(cohorts)
+    row = matrix[matrix["person"] == person]
+    if row.empty:
+        return _empty_figure(f"No games for {label}")
+    total = int(row["total_games"].iloc[0])
+    if total < _RIDE_MIN_GAMES:
+        return _empty_figure(f"Need >=100 games ({total} games)")
+    return _plot_ride_payoff_per_person(row.iloc[0], df, person, label)
+
+
+def _plot_ride_payoff_aggregate(df: pd.DataFrame, cohorts: pd.DataFrame) -> plt.Figure:
+    matrix = _ride_cohort_matrix(cohorts)
+    qualifying = matrix[matrix["total_games"] >= _RIDE_MIN_GAMES].copy()
+    if len(qualifying) < 3:
+        return _empty_figure("Need >=3 players with >=100 games")
+
+    # Per-cohort macro means: per-player WR with NaN where n < min_cohort,
+    # then nanmean across players. Pooled n = sum of n in qualifying cells.
+    macro: dict[str, float] = {}
+    pooled_n: dict[str, int] = {}
+    cohort_wr_by_player: dict[str, np.ndarray] = {}
+    for letter in ("A", "B", "C", "D"):
+        wr_col = qualifying[f"wr_{letter}"].astype(float)
+        n_col = qualifying[f"n_{letter}"].astype(int)
+        mask = n_col >= _RIDE_MIN_COHORT
+        wr_valid = wr_col.where(mask)
+        cohort_wr_by_player[letter] = wr_valid.to_numpy()
+        macro[letter] = float(np.nanmean(wr_valid)) if mask.any() else float("nan")
+        pooled_n[letter] = int(n_col[mask].sum())
+
+    # Paired bootstraps: filter independently for the two diffs.
+    def _paired_for(left: str, right: str) -> tuple[float, float, float, int]:
+        left_n = qualifying[f"n_{left}"].astype(int)
+        right_n = qualifying[f"n_{right}"].astype(int)
+        keep = (left_n >= _RIDE_MIN_COHORT) & (right_n >= _RIDE_MIN_COHORT)
+        if keep.sum() < 3:
+            return (float("nan"), float("nan"), float("nan"), int(keep.sum()))
+        lhs = qualifying.loc[keep, f"wr_{left}"].to_numpy(dtype=float)
+        rhs = qualifying.loc[keep, f"wr_{right}"].to_numpy(dtype=float)
+        mean, lo, hi = _paired_bootstrap_wr_diff(lhs, rhs)
+        return (mean, lo, hi, int(keep.sum()))
+
+    ride_mean, ride_lo, ride_hi, ride_n_players = _paired_for("A", "B")
+    comfort_mean, comfort_lo, comfort_hi, comfort_n_players = _paired_for("C", "D")
+
+    # Reference line: overall WR across the qualifying non-first games
+    # (the games actually entering the cohorts).
+    total_n = sum(pooled_n.values())
+    total_wins = 0
+    for letter in ("A", "B", "C", "D"):
+        wr_col = qualifying[f"wr_{letter}"].astype(float)
+        n_col = qualifying[f"n_{letter}"].astype(int)
+        mask = n_col >= _RIDE_MIN_COHORT
+        total_wins += float((wr_col.where(mask) * n_col.where(mask)).sum(skipna=True))
+    overall_wr = total_wins / total_n if total_n > 0 else float("nan")
+
+    title = "Does riding hot champs pay off?"
+    subtitle = (
+        "WR conditional on prev outcome x same-champion. Iter 52 showed players ride "
+        "hot ~18pp more after a win - does the payoff justify it? "
+        f"Ride (A-B) {ride_mean:+.1%} [95% CI {ride_lo:+.1%}, {ride_hi:+.1%}], "
+        f"Comfort (C-D) {comfort_mean:+.1%} [95% CI {comfort_lo:+.1%}, {comfort_hi:+.1%}]."
+    )
+
+    fig = _ride_payoff_figure(
+        macro_a=macro["A"],
+        macro_b=macro["B"],
+        macro_c=macro["C"],
+        macro_d=macro["D"],
+        n_a=pooled_n["A"],
+        n_b=pooled_n["B"],
+        n_c=pooled_n["C"],
+        n_d=pooled_n["D"],
+        ci_a=None,
+        ci_b=None,
+        ci_c=None,
+        ci_d=None,
+        overall_wr=overall_wr,
+        title=title,
+        subtitle=subtitle,
+    )
+    return fig
+
+
+def _plot_ride_payoff_per_person(
+    row: pd.Series, df: pd.DataFrame, person: str, label: str
+) -> plt.Figure:
+    n_a = int(row["n_A"])
+    n_b = int(row["n_B"])
+    n_c = int(row["n_C"])
+    n_d = int(row["n_D"])
+    wr_a = float(row["wr_A"]) if n_a > 0 else float("nan")
+    wr_b = float(row["wr_B"]) if n_b > 0 else float("nan")
+    wr_c = float(row["wr_C"]) if n_c > 0 else float("nan")
+    wr_d = float(row["wr_D"]) if n_d > 0 else float("nan")
+
+    def _ci(wr: float, n: int) -> tuple[float, float] | None:
+        if n <= 0 or math.isnan(wr):
+            return None
+        wins = int(round(wr * n))
+        return wilson_ci(wins, n)
+
+    ci_a = _ci(wr_a, n_a)
+    ci_b = _ci(wr_b, n_b)
+    ci_c = _ci(wr_c, n_c)
+    ci_d = _ci(wr_d, n_d)
+
+    # Overall WR for this person across the non-first games used.
+    overall_wr = (
+        row["wr_A"] * n_a + row["wr_B"] * n_b + row["wr_C"] * n_c + row["wr_D"] * n_d
+    ) / max(1, n_a + n_b + n_c + n_d)
+
+    # Ride / comfort point estimates as differences of two binomial WRs.
+    ride_diff = (wr_a - wr_b) if (n_a > 0 and n_b > 0) else float("nan")
+    comfort_diff = (wr_c - wr_d) if (n_c > 0 and n_d > 0) else float("nan")
+
+    def _diff_ci(wr_l: float, n_l: int, wr_r: float, n_r: int) -> tuple[float, float] | None:
+        if n_l <= 0 or n_r <= 0 or math.isnan(wr_l) or math.isnan(wr_r):
+            return None
+        # Standard error of difference of two independent proportions.
+        var = wr_l * (1 - wr_l) / n_l + wr_r * (1 - wr_r) / n_r
+        if var <= 0:
+            return (wr_l - wr_r, wr_l - wr_r)
+        se = math.sqrt(var)
+        margin = 1.96 * se
+        return (wr_l - wr_r - margin, wr_l - wr_r + margin)
+
+    ride_ci = _diff_ci(wr_a, n_a, wr_b, n_b)
+    comfort_ci = _diff_ci(wr_c, n_c, wr_d, n_d)
+
+    def _fmt_diff(value: float, ci: tuple[float, float] | None) -> str:
+        if math.isnan(value) or ci is None:
+            return "insufficient data"
+        return f"{value:+.1%} [95% CI {ci[0]:+.1%}, {ci[1]:+.1%}]"
+
+    title = f"Riding vs switching - {label}"
+    subtitle = (
+        f"WR conditional on prev outcome x same-champion. "
+        f"Ride (A-B) {_fmt_diff(ride_diff, ride_ci)}, "
+        f"Comfort (C-D) {_fmt_diff(comfort_diff, comfort_ci)}."
+    )
+
+    fig = _ride_payoff_figure(
+        macro_a=wr_a,
+        macro_b=wr_b,
+        macro_c=wr_c,
+        macro_d=wr_d,
+        n_a=n_a,
+        n_b=n_b,
+        n_c=n_c,
+        n_d=n_d,
+        ci_a=ci_a,
+        ci_b=ci_b,
+        ci_c=ci_c,
+        ci_d=ci_d,
+        overall_wr=overall_wr,
+        title=title,
+        subtitle=subtitle,
+    )
+    return fig
+
+
+def _ride_payoff_figure(
+    *,
+    macro_a: float,
+    macro_b: float,
+    macro_c: float,
+    macro_d: float,
+    n_a: int,
+    n_b: int,
+    n_c: int,
+    n_d: int,
+    ci_a: tuple[float, float] | None,
+    ci_b: tuple[float, float] | None,
+    ci_c: tuple[float, float] | None,
+    ci_d: tuple[float, float] | None,
+    overall_wr: float,
+    title: str,
+    subtitle: str,
+) -> plt.Figure:
+    """Shared 2-panel renderer. Left panel = after WIN (cohorts A, B);
+    right panel = after LOSS (cohorts C, D). Pass Wilson CIs to draw
+    whiskers (per-person), or None to skip them (aggregate macro means).
+    """
+    fig, axes = plt.subplots(1, 2, figsize=(10, 6), sharey=True)
+
+    panels = [
+        (
+            axes[0],
+            "After WIN",
+            (macro_a, macro_b),
+            (n_a, n_b),
+            (ci_a, ci_b),
+            (PALETTE["win"], PALETTE["accent_orange"]),
+            ("Same champ\n(ride hot)", "Diff champ\n(switch off)"),
+        ),
+        (
+            axes[1],
+            "After LOSS",
+            (macro_c, macro_d),
+            (n_c, n_d),
+            (ci_c, ci_d),
+            (PALETTE["accent_teal"], PALETTE["loss"]),
+            ("Same champ\n(comfort)", "Diff champ\n(escape cold)"),
+        ),
+    ]
+
+    ymax_cap = 0.0
+    for ax, panel_title, wrs, ns, cis, colours, xlabs in panels:
+        x = np.arange(2)
+        bar_values = np.array([0.0 if math.isnan(v) else v for v in wrs])
+        ax.bar(x, bar_values, color=colours, width=0.55, zorder=2)
+        # Whiskers when CIs are provided (per-person view).
+        if any(ci is not None for ci in cis):
+            err_lo = []
+            err_hi = []
+            for wr, ci in zip(wrs, cis, strict=True):
+                if ci is None or math.isnan(wr):
+                    err_lo.append(0.0)
+                    err_hi.append(0.0)
+                else:
+                    err_lo.append(wr - ci[0])
+                    err_hi.append(ci[1] - wr)
+            ax.errorbar(x, bar_values, yerr=[err_lo, err_hi], **WHISKER_STYLE, zorder=3)
+            for ci in cis:
+                if ci is not None:
+                    ymax_cap = max(ymax_cap, ci[1])
+        for v in wrs:
+            if not math.isnan(v):
+                ymax_cap = max(ymax_cap, v)
+
+        for xi, wr, n in zip(x, wrs, ns, strict=True):
+            if math.isnan(wr) or n == 0:
+                ax.text(
+                    xi,
+                    0.02,
+                    "n/a",
+                    ha="center",
+                    va="bottom",
+                    fontsize=10,
+                    color=PALETTE["muted"],
+                )
+                continue
+            ax.text(
+                xi,
+                wr + 0.02,
+                f"{wr:.0%}\nn={n}",
+                ha="center",
+                va="bottom",
+                fontsize=10,
+                color=PALETTE["text"],
+            )
+
+        if not math.isnan(overall_wr):
+            ax.axhline(
+                overall_wr,
+                color=PALETTE["muted"],
+                linewidth=0.8,
+                linestyle=(0, (4, 4)),
+                alpha=0.6,
+                label=f"Overall WR ({overall_wr:.0%})",
+            )
+        ax.set_xticks(x)
+        ax.set_xticklabels(xlabs)
+        ax.set_title(panel_title)
+        ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
+        _polish_ax(ax)
+
+    axes[0].set_ylabel("Win rate")
+    ymax = max(0.75, ymax_cap + 0.18)
+    axes[0].set_ylim(0, ymax)
+    axes[0].legend(loc="upper right", frameon=False, fontsize=9)
+
+    fig.suptitle(title)
+    # Use _subtitle on left axes so subtitle sits under the suptitle area;
+    # but suptitle + per-axes subtitle would collide. Simpler: place the
+    # subtitle as a single figure-level text below the suptitle.
+    # Clear axes titles first so _subtitle on ax[0] doesn't pad the small
+    # panel title. We've already drawn panel titles, so place the caption
+    # at the figure level.
+    fig.text(
+        0.5,
+        0.93,
+        subtitle,
+        ha="center",
+        va="top",
+        fontsize=9.5,
+        color=PALETTE["muted"],
+        style="italic",
+        wrap=True,
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.88))
+    return fig
+
+
 # --- registry --------------------------------------------------------------
 
 #: All aggregate plot functions, in the order the runner script + notebook
@@ -8824,4 +9232,5 @@ ALL_PLOTS = [
     ("40_champion_rust", plot_champion_rust),
     ("41_dow_hour_heatmap", plot_dow_hour_heatmap),
     ("42_same_champ_behavior", plot_same_champ_behavior),
+    ("43_ride_payoff", plot_ride_payoff),
 ]

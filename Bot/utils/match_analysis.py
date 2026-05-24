@@ -6909,6 +6909,216 @@ def plot_improvement_slope(df: pd.DataFrame, player: str | None = None) -> plt.F
     return fig
 
 
+# --- 35. Per-player stat sheet ---------------------------------------------
+
+_STAT_SHEET_MIN_GAMES = 50
+
+# Metric definitions: (label, column in per-person frame, higher_is_better).
+# higher_is_better drives the percentile inversion for "deaths/game" so the
+# annotation always reads "high percentile = good".
+_STAT_SHEET_METRICS: list[tuple[str, str, bool]] = [
+    ("Win rate", "wr", True),
+    ("KDA", "kda", True),
+    ("Kills / game", "kpg", True),
+    ("Deaths / game", "dpg", False),
+    ("Assists / game", "apg", True),
+    ("Avg game duration (min)", "dur_min", True),
+]
+
+
+def _stat_sheet_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """One row per person with the six stat-sheet metrics.
+
+    KDA is computed per-game (the existing ``df["kda"]`` column already
+    floors deaths at 1) then averaged — matches the rest of the codebase's
+    "per-game KDA, then mean" convention.
+    """
+    grp = df.groupby("person", observed=True)
+    out = grp.agg(
+        games=("match_id", "size"),
+        wr=("win", "mean"),
+        kda=("kda", "mean"),
+        kpg=("kills", "mean"),
+        dpg=("deaths", "mean"),
+        apg=("assists", "mean"),
+        dur_min=("duration_min", "mean"),
+    )
+    return out[out["games"] >= _STAT_SHEET_MIN_GAMES].reset_index()
+
+
+def _stat_sheet_format(metric_col: str, value: float) -> str:
+    """Format a metric value the same way it appears on each subplot."""
+    if metric_col == "wr":
+        return f"{value:.0%}"
+    return f"{value:.1f}"
+
+
+def plot_stat_sheet(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Per-player "stat sheet" — where each player ranks across the group.
+
+    Aggregate: 2x3 grid of horizontal strip plots, one per metric, with a
+    dot per qualifying player, a median rule, and labels on the lowest
+    and highest values.
+
+    Per-person: same grid with the focal player's dot highlighted and a
+    "You: VALUE (PCT pct)" annotation in each subplot. Percentiles are
+    inverted for Deaths/game so "low = good" reads as a high score.
+    """
+    frame = _stat_sheet_frame(df)
+
+    if _is_aggregate(player):
+        if len(frame) < 3:
+            return _empty_figure("Need >=3 players with >=50 games")
+        focal = None
+        focal_row = None
+    else:
+        person = _resolve_person(df, player)
+        n_games = int((df["person"] == person).sum()) if person is not None else 0
+        if person is None or person not in set(frame["person"]):
+            return _empty_figure(f"Need >=50 games for stat sheet ({n_games} games)")
+        focal = person
+        focal_row = frame[frame["person"] == person].iloc[0]
+
+    fig, axes = plt.subplots(2, 3, figsize=(12, 7))
+    flat_axes = axes.flatten()
+
+    for ax, (label, col, higher_better) in zip(flat_axes, _STAT_SHEET_METRICS, strict=False):
+        values = frame[col].to_numpy(dtype=float)
+        names = frame["person"].tolist()
+        median = float(np.median(values))
+
+        if focal is None:
+            # Aggregate: every dot in the primary colour at moderate alpha.
+            ax.scatter(
+                values,
+                np.zeros_like(values),
+                s=70,
+                color=PALETTE["primary"],
+                alpha=0.75,
+                edgecolors="white",
+                linewidths=0.8,
+                zorder=3,
+            )
+            # Label outermost low/high so the spread is readable at a glance.
+            lo_idx = int(np.argmin(values))
+            hi_idx = int(np.argmax(values))
+            ax.annotate(
+                names[hi_idx],
+                xy=(values[hi_idx], 0),
+                xytext=(0, 9),
+                textcoords="offset points",
+                ha="center",
+                va="bottom",
+                fontsize=8,
+                color=PALETTE["text"],
+            )
+            if hi_idx != lo_idx:
+                ax.annotate(
+                    names[lo_idx],
+                    xy=(values[lo_idx], 0),
+                    xytext=(0, -10),
+                    textcoords="offset points",
+                    ha="center",
+                    va="top",
+                    fontsize=8,
+                    color=PALETTE["text"],
+                )
+        else:
+            # Per-person: focal in primary, others desaturated grey.
+            is_focal = frame["person"].to_numpy() == focal
+            ax.scatter(
+                values[~is_focal],
+                np.zeros(int((~is_focal).sum())),
+                s=55,
+                color=PALETTE["neutral"],
+                alpha=0.55,
+                edgecolors="white",
+                linewidths=0.6,
+                zorder=2,
+            )
+            ax.scatter(
+                values[is_focal],
+                np.zeros(int(is_focal.sum())),
+                s=120,
+                color=PALETTE["primary"],
+                edgecolors="white",
+                linewidths=1.2,
+                zorder=4,
+            )
+
+            focal_value = float(focal_row[col])
+            # Average-rank percentile: lowest value -> 0, highest -> 100.
+            ranks = pd.Series(values).rank(method="average")
+            n = len(values)
+            if n > 1:
+                pct = (ranks.iloc[int(np.where(is_focal)[0][0])] - 1) / (n - 1) * 100.0
+            else:
+                pct = 50.0
+            if not higher_better:
+                pct = 100.0 - pct
+            pct_int = int(round(pct))
+            ax.text(
+                0.5,
+                0.92,
+                f"You: {_stat_sheet_format(col, focal_value)} ({pct_int}th pct)",
+                transform=ax.transAxes,
+                ha="center",
+                va="top",
+                fontsize=9,
+                color=PALETTE["text"],
+                bbox={
+                    "facecolor": "white",
+                    "edgecolor": PALETTE["spine"],
+                    "boxstyle": "round,pad=0.3",
+                    "alpha": 0.9,
+                },
+            )
+
+        # Median vertical, matched to the dashed muted style used elsewhere.
+        ax.axvline(
+            median,
+            color=PALETTE["muted"],
+            linewidth=0.9,
+            linestyle=(0, (4, 4)),
+            alpha=0.7,
+            zorder=1,
+        )
+
+        ax.set_yticks([])
+        ax.set_ylim(-0.6, 0.6)
+        # Pad horizontal range so the outermost labels don't clip.
+        v_min, v_max = float(np.min(values)), float(np.max(values))
+        span = v_max - v_min if v_max > v_min else max(abs(v_max), 1.0)
+        pad = span * 0.15 if span > 0 else 0.5
+        ax.set_xlim(v_min - pad, v_max + pad)
+        if col == "wr":
+            ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _pos: f"{v:.0%}"))
+        ax.set_title(label, fontsize=11, pad=6)
+        _polish_ax(ax)
+
+    if focal is None:
+        suptitle = "Player stat sheet - friend group distributions"
+        subtitle = "Each dot is one player. Median marked. Outliers labelled."
+    else:
+        display_name = _display_label(player) or focal
+        suptitle = f"Stat sheet - {display_name}"
+        subtitle = "Your position on each metric vs the friend group. Higher percentile = better."
+
+    fig.suptitle(suptitle, fontsize=16, fontweight="bold", y=0.99)
+    fig.text(
+        0.5,
+        0.945,
+        subtitle,
+        ha="center",
+        va="top",
+        fontsize=10,
+        color=PALETTE["muted"],
+        style="italic",
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.92))
+    return fig
+
+
 # --- registry --------------------------------------------------------------
 
 #: All aggregate plot functions, in the order the runner script + notebook
@@ -6948,4 +7158,5 @@ ALL_PLOTS = [
     ("32_tilt_by_gap", plot_tilt_by_gap),
     ("33_session_position_wr", plot_session_position_wr),
     ("34_improvement_slope", plot_improvement_slope),
+    ("35_stat_sheet", plot_stat_sheet),
 ]

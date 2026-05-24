@@ -287,6 +287,12 @@ MORE_CHART_DEFS = [
         "🥊",
         "Within shared games, who out-KDAs whom? Pair-wise % dominance.",
     ),
+    (
+        "53_rank_recovery",
+        "Rank recovery",
+        "📐",
+        "Time to climb back after a tier demotion",
+    ),
 ]
 
 

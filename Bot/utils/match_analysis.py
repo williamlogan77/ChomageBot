@@ -11627,6 +11627,282 @@ def plot_kda_dominance(df: pd.DataFrame, player: str | None = None) -> plt.Figur
     return fig
 
 
+# --- 53. Rank recovery ------------------------------------------------------
+
+
+def _compute_demotion_events(ranks: pd.DataFrame) -> pd.DataFrame:
+    """All tier-demotion events across players with recovery time (days).
+
+    For each person, collapse consecutive rows at the same tier into a single
+    "tier group" (start_ts = first snapshot of the group) so intra-tier LP
+    noise can't fire a transition. Then walk group-to-group: every drop in
+    ``tier_rank`` is one demotion event with original tier T. Recovery_ts is
+    the start of the next group whose ``tier_rank`` >= rank(T). Cascading
+    drops (T -> T-1 -> T-2) create two separate events — each tracks its own
+    original tier.
+    """
+    rank_of = {tier: i for i, tier in enumerate(TIER_ORDER)}
+    events: list[dict] = []
+    for person, g in ranks.sort_values(["person", "timestamp"]).groupby("person", sort=False):
+        if len(g) < 5:
+            continue
+        # Collapse consecutive same-tier rows into groups. ``shift != ``
+        # cumsum gives a fresh group id every time the tier changes.
+        tiers = g["tier"].to_numpy()
+        change = np.concatenate(([True], tiers[1:] != tiers[:-1]))
+        group_id = np.cumsum(change) - 1
+        first_idx = []
+        last_idx = []
+        for gid in range(group_id.max() + 1):
+            mask = group_id == gid
+            idxs = np.where(mask)[0]
+            first_idx.append(idxs[0])
+            last_idx.append(idxs[-1])
+        group_tiers = [tiers[i] for i in first_idx]
+        group_starts = g["timestamp"].to_numpy()[first_idx]
+        # Skip any tier we don't recognise (defensive — shouldn't happen
+        # because load_rank_history filters NULLs upstream).
+        group_ranks = [rank_of.get(t, -1) for t in group_tiers]
+
+        for i in range(len(group_tiers) - 1):
+            prev_rank = group_ranks[i]
+            next_rank = group_ranks[i + 1]
+            if prev_rank < 0 or next_rank < 0:
+                continue
+            if next_rank >= prev_rank:
+                continue
+            # Demotion: original tier is the one we dropped FROM.
+            demoted_at = group_starts[i + 1]
+            recovered_at = None
+            for j in range(i + 2, len(group_tiers)):
+                if group_ranks[j] >= prev_rank:
+                    recovered_at = group_starts[j]
+                    break
+            recovery_days = None
+            if recovered_at is not None:
+                recovery_days = (
+                    pd.Timestamp(recovered_at) - pd.Timestamp(demoted_at)
+                ).total_seconds() / 86400
+            events.append(
+                {
+                    "person": person,
+                    "from_tier": group_tiers[i],
+                    "to_tier": group_tiers[i + 1],
+                    "demoted_at": pd.Timestamp(demoted_at),
+                    "recovered_at": pd.Timestamp(recovered_at)
+                    if recovered_at is not None
+                    else pd.NaT,
+                    "recovery_days": recovery_days,
+                    "ongoing": recovered_at is None,
+                }
+            )
+    if not events:
+        return pd.DataFrame(
+            columns=[
+                "person",
+                "from_tier",
+                "to_tier",
+                "demoted_at",
+                "recovered_at",
+                "recovery_days",
+                "ongoing",
+            ]
+        )
+    return pd.DataFrame(events)
+
+
+def plot_rank_recovery(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Time to climb back after a tier demotion.
+
+    Aggregate: histogram of recovery_days across every qualifying demotion
+    event in the friend group, with median + IQR annotated and an ongoing
+    count called out. Per-person: a card showing the player's longest
+    recovery, their most recent demotion, and a step-line of their tier
+    over time with demotion markers.
+    """
+    try:
+        ranks = load_rank_history(DEFAULT_DB)
+    except Exception as exc:
+        return _empty_figure(f"Could not load rank history: {exc!r}")
+    if ranks.empty:
+        return _empty_figure("No rank history available")
+
+    events = _compute_demotion_events(ranks)
+
+    if _is_aggregate(player):
+        recovered = events[~events["ongoing"]]
+        if len(recovered) < 3:
+            return _empty_figure("Need >=3 demotion events across the friend group")
+
+        days = recovered["recovery_days"].to_numpy(dtype=float)
+        median = float(np.median(days))
+        q1 = float(np.percentile(days, 25))
+        q3 = float(np.percentile(days, 75))
+        ongoing_n = int(events["ongoing"].sum())
+
+        fig, ax = plt.subplots(figsize=(11, 4.8))
+        # Recovery times span ~6 orders of magnitude (minutes to >1 year):
+        # log-spaced bins keep both the boundary-bounce mass at the low end
+        # and the multi-month grinds at the high end legible.
+        floor = max(days.min(), 1 / 1440)  # 1 minute floor for log scale
+        days_clip = np.clip(days, floor, None)
+        bins = np.logspace(np.log10(floor), np.log10(days_clip.max()), 20)
+        ax.hist(days_clip, bins=bins, color=PALETTE["primary"], alpha=0.85, edgecolor="white")
+        ax.axvline(
+            median, color=PALETTE["accent_orange"], linewidth=1.6, label=f"Median {median:.2f}d"
+        )
+        ax.axvspan(
+            max(q1, floor),
+            q3,
+            color=PALETTE["accent_orange"],
+            alpha=0.12,
+            label=f"IQR {q1:.2f}-{q3:.2f}d",
+        )
+        ax.set_xscale("log")
+        ax.set_xlabel("Days to recover original tier  (log scale)")
+        ax.set_ylabel("Demotion events")
+        ax.set_title("Tier recovery time - days to climb back after a demotion")
+        ongoing_note = f"  {ongoing_n} demotion(s) never recovered (excluded)." if ongoing_n else ""
+        _subtitle(
+            ax,
+            f"Histogram of recovery times across all qualifying demotion events. "
+            f"n={len(days)} recovered, median + IQR shown.{ongoing_note}",
+        )
+        ax.legend(loc="upper right")
+        _polish_ax(ax)
+        fig.tight_layout()
+        return fig
+
+    # --- Per-person card ----------------------------------------------------
+    focal = _resolve_person(df, player) if isinstance(df, pd.DataFrame) and not df.empty else None
+    if not focal:
+        # Fall back to the bare label so we can still render when df is empty
+        # (the aggregate validation loop passes a hydrated df, but defensive).
+        label = _display_label(player)
+        focal = label
+    name = _display_label(player) or "this player"
+    person_ranks = ranks[ranks["person"] == focal].sort_values("timestamp").reset_index(drop=True)
+    if len(person_ranks) < 5:
+        return _empty_figure(f"Need more rank-history data for {name}")
+
+    person_events = (
+        events[events["person"] == focal].sort_values("demoted_at").reset_index(drop=True)
+    )
+    if person_events.empty:
+        return _empty_figure(f"No tier demotions detected for {name}")
+
+    recovered = person_events[~person_events["ongoing"]]
+    ongoing = person_events[person_events["ongoing"]]
+    n_total = len(person_events)
+    n_recovered = len(recovered)
+    n_ongoing = len(ongoing)
+    median_days = float(recovered["recovery_days"].median()) if n_recovered else float("nan")
+
+    if n_recovered:
+        longest = recovered.loc[recovered["recovery_days"].idxmax()]
+        longest_text = (
+            f"Longest: {longest['from_tier'].title()} -> {longest['to_tier'].title()}  "
+            f"({longest['recovery_days']:.1f}d, climbed back {longest['recovered_at'].strftime('%Y-%m-%d')})"
+        )
+    else:
+        longest_text = "Longest: no completed recoveries yet."
+
+    most_recent = person_events.iloc[-1]
+    if most_recent["ongoing"]:
+        days_so_far = (
+            pd.Timestamp.now(tz=most_recent["demoted_at"].tz) - most_recent["demoted_at"]
+        ).total_seconds() / 86400
+        recent_text = (
+            f"Most recent: {most_recent['from_tier'].title()} -> {most_recent['to_tier'].title()}  "
+            f"({most_recent['demoted_at'].strftime('%Y-%m-%d')}, ongoing - {days_so_far:.1f}d so far)"
+        )
+    else:
+        recent_text = (
+            f"Most recent: {most_recent['from_tier'].title()} -> {most_recent['to_tier'].title()}  "
+            f"({most_recent['demoted_at'].strftime('%Y-%m-%d')}, recovered in {most_recent['recovery_days']:.1f}d)"
+        )
+
+    fig = plt.figure(figsize=(12, 6.4), constrained_layout=True)
+    gs = fig.add_gridspec(3, 1, height_ratios=[0.6, 0.6, 3.0], hspace=0.25)
+    ax_top = fig.add_subplot(gs[0, 0])
+    ax_mid = fig.add_subplot(gs[1, 0])
+    ax_bot = fig.add_subplot(gs[2, 0])
+
+    for ax, text in ((ax_top, longest_text), (ax_mid, recent_text)):
+        ax.set_axis_off()
+        ax.text(
+            0.02,
+            0.5,
+            text,
+            ha="left",
+            va="center",
+            color=PALETTE["text"],
+            fontsize=12,
+        )
+
+    # Timeline: rank_score step plot + demotion markers.
+    person_ranks["inter_h"] = person_ranks["timestamp"].diff().dt.total_seconds() / 3600
+    rank_plot = person_ranks["rank_score"].where(
+        ~(person_ranks["inter_h"] > RANK_GAP_HOURS), np.nan
+    )
+    ax_bot.plot(
+        person_ranks["timestamp"],
+        rank_plot,
+        color=PALETTE["primary"],
+        linewidth=1.6,
+    )
+    # All demotion markers as light hairlines; loud highlights for the
+    # longest + most-recent so the text callouts have visible anchors.
+    for _, ev in person_events.iterrows():
+        ax_bot.axvline(
+            ev["demoted_at"],
+            color=PALETTE["muted"],
+            linewidth=0.6,
+            alpha=0.25,
+            linestyle="-",
+        )
+    if n_recovered:
+        ax_bot.axvline(
+            longest["demoted_at"],
+            color=PALETTE["accent_orange"],
+            linewidth=1.6,
+            alpha=0.9,
+            linestyle="--",
+            label="longest",
+        )
+    recent_colour = PALETTE["loss"] if most_recent["ongoing"] else PALETTE["accent_teal"]
+    ax_bot.axvline(
+        most_recent["demoted_at"],
+        color=recent_colour,
+        linewidth=1.6,
+        alpha=0.9,
+        linestyle="--",
+        label="most recent",
+    )
+    ax_bot.legend(loc="lower right", fontsize=9)
+    _rank_axis(ax_bot)
+    ax_bot.set_xlabel("Date")
+    ax_bot.set_ylabel("Rank")
+    _polish_ax(ax_bot)
+
+    median_part = (
+        f"Median recovery: {median_days:.1f} days."
+        if n_recovered
+        else "No completed recoveries yet."
+    )
+    fig.suptitle(f"Rank recovery - {name}", fontsize=14, fontweight="bold")
+    ax_top.set_title(
+        f"You've had {n_total} tier demotions. {n_recovered} recovered, "
+        f"{n_ongoing} ongoing. {median_part}",
+        fontsize=10,
+        color=PALETTE["muted"],
+        loc="left",
+        pad=2,
+        fontweight="normal",
+    )
+    return fig
+
+
 # --- registry --------------------------------------------------------------
 
 #: All aggregate plot functions, in the order the runner script + notebook
@@ -11684,4 +11960,5 @@ ALL_PLOTS = [
     ("50_session_stamina", plot_session_stamina),
     ("51_patch_meta_shifts", plot_patch_meta_shifts),
     ("52_kda_dominance", plot_kda_dominance),
+    ("53_rank_recovery", plot_rank_recovery),
 ]

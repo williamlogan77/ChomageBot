@@ -777,6 +777,25 @@ class MatchAnalysis(commands.Cog):
             ephemeral=True,
         )
 
+    @app_commands.command(
+        name="refresh_db_cache",
+        description="Clear the 5-minute chart-data cache (admin only)",
+    )
+    @app_commands.guild_only()
+    @app_commands.default_permissions(manage_guild=True)
+    async def refresh_db_cache(self, interaction: discord.Interaction) -> None:
+        """Force the next chart render to re-read match_stats from disk
+        instead of using the in-memory cache. Useful after running a backfill
+        or migration so the bot's view is immediately fresh.
+        """
+        n_entries = len(_df_cache)
+        _df_cache.clear()
+        log.info(f"DF cache cleared by {interaction.user} ({n_entries} entries)")
+        await interaction.response.send_message(
+            f"Chart-data cache cleared ({n_entries} entries). Next chart click reloads from DB.",
+            ephemeral=True,
+        )
+
     async def _post_panel(self, channel: discord.abc.Messageable) -> tuple[discord.Message, object]:
         """Load matches, build the view, post the panel. Shared by the
         admin slash command and the sticky-pin loop. Updates

@@ -1656,6 +1656,116 @@ class MatchAnalysis(commands.Cog):
         )
         await interaction.followup.send(embed=embed)
 
+    @app_commands.command(
+        name="champ",
+        description="Group-wide stats for a single champion",
+    )
+    @app_commands.guild_only()
+    @app_commands.describe(
+        name="Champion name (Riot internal name, e.g. 'Khazix', 'MissFortune')"
+    )
+    async def champ(self, interaction: discord.Interaction, name: str) -> None:
+        await interaction.response.defer(ephemeral=False)
+
+        try:
+            df = await _load_matches_cached(self.bot.db_path)
+        except Exception as exc:
+            self.bot.logging.error(f"/champ data load failed: {exc!r}")
+            await interaction.followup.send(f"Failed to load match data: {exc!r}", ephemeral=True)
+            return
+
+        if df.empty:
+            await interaction.followup.send(
+                "No match data yet — run /backfill_all first.", ephemeral=True
+            )
+            return
+
+        sel = df[df["champion"].str.lower() == name.lower()]
+        if sel.empty:
+            all_champs = df["champion"].unique()
+            close = [c for c in all_champs if name.lower() in c.lower()][:5]
+            suggest = f"\nDid you mean: {', '.join(close)}" if close else ""
+            await interaction.followup.send(
+                f"No data for champion `{name}`.{suggest}", ephemeral=True
+            )
+            return
+
+        champ_name = str(sel["champion"].iloc[0])
+        total_picks = len(sel)
+        wins = int(sel["win"].sum())
+        raw_wr = wins / total_picks
+        group_baseline = float(df["win"].mean())
+        shrunk_wr = analysis.bayesian_shrunk_wr(
+            wins, total_picks, baseline_wr=group_baseline, prior_strength=50
+        )
+
+        # Top player on this champ (shrunken WR per player, n>=5). Group
+        # baseline used as the prior so a 5/5 player doesn't outrank a
+        # 30/50 player on noise alone.
+        per_player = sel.groupby("person").agg(n=("win", "size"), wins=("win", "sum")).reset_index()
+        per_player = per_player[per_player["n"] >= 5]
+        if len(per_player):
+            per_player["raw_wr"] = per_player["wins"] / per_player["n"]
+            per_player["shrunk_wr"] = per_player.apply(
+                lambda r: analysis.bayesian_shrunk_wr(
+                    int(r["wins"]),
+                    int(r["n"]),
+                    baseline_wr=group_baseline,
+                    prior_strength=30,
+                ),
+                axis=1,
+            )
+            per_player = per_player.sort_values("shrunk_wr", ascending=False)
+            top = per_player.iloc[0]
+            top_player_line = (
+                f"**{top['person']}** — {top['raw_wr']:.0%} on {int(top['n'])} games "
+                f"(shrunk {top['shrunk_wr']:.0%})"
+            )
+        else:
+            top_player_line = "No player has ≥5 games on this champion"
+
+        now = df["game_start"].max()
+        last_30d = sel[sel["game_start"] >= now - pd.Timedelta(days=30)]
+        last_90d = sel[sel["game_start"] >= now - pd.Timedelta(days=90)]
+
+        embed = discord.Embed(
+            title=f"🏹 {champ_name}",
+            color=discord.Color(int(analysis.PALETTE["primary"].lstrip("#"), 16)),
+        )
+        embed.add_field(
+            name="Group totals",
+            value=(
+                f"{total_picks} picks · raw {raw_wr:.0%} · shrunk {shrunk_wr:.0%} "
+                f"(group baseline {group_baseline:.0%})"
+            ),
+            inline=False,
+        )
+        embed.add_field(name="Top player", value=top_player_line, inline=False)
+        embed.add_field(
+            name="Recent",
+            value=f"Last 30d: {len(last_30d)} picks · Last 90d: {len(last_90d)} picks",
+            inline=False,
+        )
+
+        # Banner picks: players with >100 games on this champ. Only show
+        # the field when at least one qualifies — no "none" noise.
+        banner_rows = sel.groupby("person").size().reset_index(name="n")
+        banner_rows = banner_rows[banner_rows["n"] > 100].sort_values("n", ascending=False)
+        if not banner_rows.empty:
+            banner_lines = []
+            for _, br in banner_rows.iterrows():
+                p_wins = int(sel[sel["person"] == br["person"]]["win"].sum())
+                p_wr = p_wins / int(br["n"])
+                banner_lines.append(f"**{br['person']}** — {int(br['n'])} games ({p_wr:.0%})")
+            embed.add_field(name="🚩 Banner picks", value="\n".join(banner_lines), inline=False)
+
+        role = analysis.CHAMPION_ROLES.get(champ_name, "?")
+        embed.set_footer(
+            text=f"Role: {role} · Played by {sel['person'].nunique()} different people"
+        )
+
+        await interaction.followup.send(embed=embed)
+
     async def open_explorer(
         self, interaction: discord.Interaction, chart_idx: int, person: str | None
     ) -> None:

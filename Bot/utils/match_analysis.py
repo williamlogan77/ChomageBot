@@ -12742,6 +12742,258 @@ def _plot_longest_streaks_per_person(row: pd.Series, label: str) -> plt.Figure:
     return fig
 
 
+# --- 56. Mahalanobis multivariate outliers ---------------------------------
+
+_MAHALANOBIS_FEATURES = ("kills", "deaths", "assists", "duration_min")
+_MAHALANOBIS_MIN_GAMES = 50
+# chi-square 0.95 quantile at df=4 — the d^2 threshold above which a game is
+# "outlier" at p<0.05 under the multivariate-normal null. Hardcoded so the
+# subtitle doesn't depend on inverting Wilson-Hilferty.
+_MAHALANOBIS_CHI2_95_DF4 = 9.488
+
+
+def plot_mahalanobis_outliers(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Top 5 most-anomalous games per player via Mahalanobis distance.
+
+    For each player's (kills, deaths, assists, duration_min) feature matrix,
+    compute d^2 = (x - mu)^T Sigma^-1 (x - mu) for every game against the
+    player's own centroid + covariance. Top 5 by d^2 are their career
+    outliers. Methodologically distinct from single-stat record holders
+    (26_match_highlights) -- this is multidimensional.
+    """
+    if _is_aggregate(player):
+        return _empty_figure("Per-person only - pick a player to find their outlier games")
+
+    label = _display_label(player) or "this player"
+    d = _filter_player(df, player).copy()
+    n = len(d)
+    if n < _MAHALANOBIS_MIN_GAMES:
+        return _empty_figure(f"Need >={_MAHALANOBIS_MIN_GAMES} games for outlier analysis ({n})")
+
+    X = d[list(_MAHALANOBIS_FEATURES)].to_numpy(dtype=float)
+    mu = X.mean(axis=0)
+    # Small ridge on the covariance for numerical stability when a feature
+    # is near-constant (e.g. a player who never dies). pinv handles the
+    # rest if the ridge isn't enough.
+    cov = np.cov(X, rowvar=False) + 1e-6 * np.eye(X.shape[1])
+    if not np.all(np.isfinite(cov)):
+        return _empty_figure("Insufficient variance in your stats for outlier detection")
+    try:
+        cov_inv = np.linalg.pinv(cov)
+    except np.linalg.LinAlgError:
+        return _empty_figure("Insufficient variance in your stats for outlier detection")
+
+    diff = X - mu
+    d2 = np.einsum("ij,jk,ik->i", diff, cov_inv, diff)
+    if not np.all(np.isfinite(d2)) or float(np.std(d2)) <= 0:
+        return _empty_figure("Insufficient variance in your stats for outlier detection")
+
+    # Per-feature z-scores let us pick the dominant driver of each game's
+    # anomaly so the headline can name the one feature that pushed d^2 up.
+    feat_std = X.std(axis=0)
+    feat_std_safe = np.where(feat_std > 0, feat_std, 1.0)
+    z_per_feat = diff / feat_std_safe
+
+    order = np.argsort(d2)[::-1]
+    top_idx = order[:5]
+
+    # Standardise for the PCA scatter only -- Mahalanobis is scale-invariant
+    # already, but raw PCA on K/D/A/duration would let duration dominate PC1.
+    X_z = diff / feat_std_safe
+    pca_pts, _components, _var_ratio = pca_2d(X_z)
+
+    # Build the outlier-game summaries up front so layout code stays clean.
+    feat_display = {
+        "kills": "kills",
+        "deaths": "deaths",
+        "assists": "assists",
+        "duration_min": "game length",
+    }
+    rows: list[dict] = []
+    for rank, i in enumerate(top_idx, start=1):
+        rec = d.iloc[i]
+        d2_val = float(d2[i])
+        p_val = chi2_pvalue(d2_val, df=len(_MAHALANOBIS_FEATURES))
+        z = z_per_feat[i]
+        driver = int(np.argmax(np.abs(z)))
+        feat_name = _MAHALANOBIS_FEATURES[driver]
+        z_val = float(z[driver])
+        direction = "high" if z_val > 0 else "low"
+        raw_val = rec[feat_name]
+        if feat_name == "duration_min":
+            value_str = f"{raw_val:.0f}m"
+        else:
+            value_str = f"{int(raw_val)}"
+        date_str = pd.Timestamp(rec["game_start"]).strftime("%Y-%m-%d")
+        headline = (
+            f"Career-{direction} {feat_display[feat_name]} ({value_str}) "
+            f"on {rec['champion']}, {date_str}"
+        )
+        rows.append(
+            {
+                "rank": rank,
+                "idx": int(i),
+                "date": date_str,
+                "champion": str(rec["champion"]),
+                "outcome": "W" if int(rec["win"]) == 1 else "L",
+                "kills": int(rec["kills"]),
+                "deaths": int(rec["deaths"]),
+                "assists": int(rec["assists"]),
+                "duration": float(rec["duration_min"]),
+                "d2": d2_val,
+                "p": p_val,
+                "headline": headline,
+            }
+        )
+
+    # --- Render: top scatter + bottom table ---------------------------------
+    fig = plt.figure(figsize=(12, 9.4))
+    gs = fig.add_gridspec(
+        2,
+        1,
+        height_ratios=[1.1, 1.0],
+        left=0.08,
+        right=0.96,
+        top=0.83,
+        bottom=0.04,
+        hspace=0.42,
+    )
+
+    ax_scatter = fig.add_subplot(gs[0])
+    ax_scatter.scatter(
+        pca_pts[:, 0],
+        pca_pts[:, 1],
+        s=14,
+        color=PALETTE["neutral"],
+        alpha=0.55,
+        zorder=2,
+    )
+    ax_scatter.scatter(
+        pca_pts[top_idx, 0],
+        pca_pts[top_idx, 1],
+        s=80,
+        color=PALETTE["loss"],
+        edgecolor="white",
+        linewidth=1.2,
+        zorder=4,
+    )
+    for rank_idx, i in enumerate(top_idx, start=1):
+        ax_scatter.annotate(
+            f"#{rank_idx}",
+            (pca_pts[i, 0], pca_pts[i, 1]),
+            xytext=(7, 5),
+            textcoords="offset points",
+            fontsize=10,
+            color=PALETTE["loss"],
+            fontweight="bold",
+        )
+    ax_scatter.set_xlabel("PC1 (standardised K/D/A/duration)")
+    ax_scatter.set_ylabel("PC2")
+    _polish_ax(ax_scatter)
+    ax_scatter.grid(True, alpha=0.25, color=PALETTE["grid"])
+
+    ax_table = fig.add_subplot(gs[1])
+    ax_table.set_axis_off()
+    ax_table.set_xlim(0, 1)
+    ax_table.set_ylim(0, 1)
+
+    # Column header + rows. Five outlier rows + a header band, evenly spaced.
+    headers = ["#", "Date", "Champion", "W/L", "K/D/A", "Dur", "d^2", "p-value"]
+    col_x = [0.015, 0.06, 0.17, 0.32, 0.40, 0.53, 0.62, 0.71]
+    ax_table.text(
+        0.0,
+        1.02,
+        "Outlier games",
+        fontsize=12,
+        fontweight="bold",
+        color=PALETTE["text"],
+        va="top",
+    )
+    header_y = 0.88
+    for x, h in zip(col_x, headers, strict=True):
+        ax_table.text(
+            x,
+            header_y,
+            h,
+            fontsize=10,
+            fontweight="bold",
+            color=PALETTE["muted"],
+            va="center",
+        )
+    ax_table.axhline(
+        header_y - 0.04,
+        color=PALETTE["spine"],
+        linewidth=0.8,
+        xmin=0.0,
+        xmax=0.985,
+    )
+
+    row_top = header_y - 0.10
+    row_step = 0.165
+    for i, r in enumerate(rows):
+        y = row_top - i * row_step
+        kda_str = f"{r['kills']}/{r['deaths']}/{r['assists']}"
+        dur_str = f"{r['duration']:.0f}m"
+        d2_str = f"{r['d2']:.1f}"
+        if r["p"] < 0.001:
+            p_str = "<0.001"
+        elif r["p"] < 0.01:
+            p_str = f"{r['p']:.3f}"
+        else:
+            p_str = f"{r['p']:.2f}"
+        outcome_color = PALETTE["win"] if r["outcome"] == "W" else PALETTE["loss"]
+        cells = [
+            (col_x[0], f"#{r['rank']}", PALETTE["loss"], "bold"),
+            (col_x[1], r["date"], PALETTE["text"], "normal"),
+            (col_x[2], r["champion"], PALETTE["text"], "normal"),
+            (col_x[3], r["outcome"], outcome_color, "bold"),
+            (col_x[4], kda_str, PALETTE["text"], "normal"),
+            (col_x[5], dur_str, PALETTE["text"], "normal"),
+            (col_x[6], d2_str, PALETTE["text"], "normal"),
+            (col_x[7], p_str, PALETTE["text"], "normal"),
+        ]
+        for x, text, color, weight in cells:
+            ax_table.text(
+                x,
+                y,
+                text,
+                fontsize=10,
+                color=color,
+                fontweight=weight,
+                va="center",
+            )
+        # Headline below the row, indented under the date column.
+        ax_table.text(
+            col_x[1],
+            y - 0.055,
+            r["headline"],
+            fontsize=9,
+            color=PALETTE["muted"],
+            style="italic",
+            va="center",
+        )
+
+    fig.suptitle(
+        f"Career-defining outlier games - {label}",
+        fontsize=15,
+        fontweight="bold",
+        y=0.97,
+    )
+    fig.text(
+        0.5,
+        0.92,
+        "Multivariate Mahalanobis distance on (K, D, A, duration). "
+        f"Top 5 most-anomalous games from {n} total. "
+        f"d^2 > {_MAHALANOBIS_CHI2_95_DF4:.1f} = p < 0.05 under multivariate-normal null.",
+        ha="center",
+        va="center",
+        fontsize=10,
+        color=PALETTE["muted"],
+        style="italic",
+    )
+    return fig
+
+
 # --- registry --------------------------------------------------------------
 
 #: All aggregate plot functions, in the order the runner script + notebook
@@ -12802,4 +13054,5 @@ ALL_PLOTS = [
     ("53_rank_recovery", plot_rank_recovery),
     ("54_last_game_of_day", plot_last_game_of_day),
     ("55_longest_streaks", plot_longest_streaks),
+    ("56_mahalanobis_outliers", plot_mahalanobis_outliers),
 ]

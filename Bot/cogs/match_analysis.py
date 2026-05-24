@@ -305,6 +305,12 @@ MORE_CHART_DEFS = [
         "⛓️",
         "Longest historical win/loss streaks vs coin-flip expectation",
     ),
+    (
+        "56_mahalanobis_outliers",
+        "Career outliers",
+        "🚨",
+        "Most anomalous games via multivariate Mahalanobis distance",
+    ),
 ]
 
 

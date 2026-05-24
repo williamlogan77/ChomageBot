@@ -701,12 +701,12 @@ def _build_me_todo_embed(df: pd.DataFrame, sub: pd.DataFrame, person_name: str) 
         if abs(diff) >= 1.5 and p_pace < 0.10:
             if diff < 0:
                 bullets.append(
-                    f"You're an early-game stomper (wins {diff:.1f}min shorter "
+                    f"You're an early-game stomper (wins {abs(diff):.1f}min shorter "
                     f"than losses, p={p_pace:.3f}). Push tempo."
                 )
             else:
                 bullets.append(
-                    f"You're a late scaler (wins {diff:+.1f}min longer than "
+                    f"You're a late scaler (wins {diff:.1f}min longer than "
                     f"losses, p={p_pace:.3f}). Play for scaling comps."
                 )
 

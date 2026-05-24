@@ -200,6 +200,12 @@ MORE_CHART_DEFS = [
         "🎭",
         "Smurf/alt detection - does each Riot account have the same WR?",
     ),
+    (
+        "47_champion_meta_shifts",
+        "Meta shifts",
+        "🌊",
+        "Quarterly champion WR changes — patch / meta detection (chi-square + BH-FDR)",
+    ),
 ]
 
 

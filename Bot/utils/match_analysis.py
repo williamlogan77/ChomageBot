@@ -9841,6 +9841,192 @@ def plot_per_account_breakdown(df: pd.DataFrame, player: str | None = None) -> p
     return fig
 
 
+# --- 47. Quarterly champion meta shifts -----------------------------------
+
+
+def plot_champion_meta_shifts(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Detect meta / patch shifts: per-champion WR variation across calendar quarters.
+
+    Buckets games by ``YYYY-Qn`` from ``game_start``. For each champion with
+    enough data, runs a 2×k chi² of (wins, losses) by quarter. BH-FDR
+    adjusts q-values across all qualifying champions. Top 20 by significance
+    (raw p ascending, range_pp descending) are drawn as a quarterly WR
+    heatmap with a side-panel of stats.
+    """
+    if not _is_aggregate(player):
+        return _empty_figure("Aggregate view only - pick 'All'")
+
+    if df.empty or "game_start" not in df.columns:
+        return _empty_figure("No games to plot")
+
+    work = df[["champion", "win", "game_start"]].copy()
+    work["game_start"] = pd.to_datetime(work["game_start"])
+    work = work.dropna(subset=["game_start", "champion"])
+    if work.empty:
+        return _empty_figure("No games to plot")
+
+    # Vectorised "YYYY-Qn" so a 2024 Q3 game reads "2024-Q3" rather than
+    # pandas' default "2024Q3". Easier to scan as a column header.
+    quarters = (
+        work["game_start"].dt.year.astype(str) + "-Q" + work["game_start"].dt.quarter.astype(str)
+    )
+    work["quarter"] = quarters
+
+    # Per (champion, quarter) totals — single groupby, then filter downstream.
+    grouped = (
+        work.groupby(["champion", "quarter"])["win"].agg(games="size", wins="sum").reset_index()
+    )
+    grouped["wins"] = grouped["wins"].astype(int)
+    grouped["games"] = grouped["games"].astype(int)
+
+    # ≥80 games total per champion across the whole window.
+    champ_totals = grouped.groupby("champion")["games"].sum()
+    eligible_champs = champ_totals[champ_totals >= 80].index.tolist()
+    if not eligible_champs:
+        return _empty_figure("Need >=5 champions with sufficient quarterly data")
+
+    # ≥15 games per quarter, ≥4 such quarters per champion.
+    qualified_rows = grouped[grouped["champion"].isin(eligible_champs) & (grouped["games"] >= 15)]
+    quarters_per_champ = qualified_rows.groupby("champion")["quarter"].nunique()
+    keep_champs = quarters_per_champ[quarters_per_champ >= 4].index.tolist()
+    if len(keep_champs) < 5:
+        return _empty_figure("Need >=5 champions with sufficient quarterly data")
+
+    # Per-champion chi² across that champion's qualifying quarters (≥15 games each).
+    stats: list[dict] = []
+    for champ in keep_champs:
+        sub = qualified_rows[qualified_rows["champion"] == champ]
+        wins = sub["wins"].to_numpy()
+        games = sub["games"].to_numpy()
+        _chi2, _dof, p_raw = chi2_homogeneity(wins, games)
+        wrs = wins / games
+        stats.append(
+            {
+                "champion": champ,
+                "p_raw": p_raw,
+                "range_pp": float(wrs.max() - wrs.min()),
+                "n_quarters": int(len(games)),
+                "n_games": int(games.sum()),
+            }
+        )
+
+    stats_df = pd.DataFrame(stats)
+    stats_df["p_adj"] = bh_adjust(stats_df["p_raw"].tolist())
+    stats_df = stats_df.sort_values(["p_raw", "range_pp"], ascending=[True, False]).reset_index(
+        drop=True
+    )
+
+    top = stats_df.head(20).copy()
+
+    # Chronological column ordering — sort by (year, quarter-num).
+    all_quarters = sorted(
+        work["quarter"].unique().tolist(),
+        key=lambda q: (int(q.split("-Q")[0]), int(q.split("-Q")[1])),
+    )
+
+    # Build the WR / count matrices restricted to the top champions
+    # in the table's row order. Cells with <15 games blank out (NaN) so
+    # the diverging cmap doesn't mislead on sparse data.
+    wr_matrix = np.full((len(top), len(all_quarters)), np.nan, dtype=float)
+    n_matrix = np.zeros((len(top), len(all_quarters)), dtype=int)
+    lookup = grouped.set_index(["champion", "quarter"])
+    for row_i, champ in enumerate(top["champion"].tolist()):
+        for col_j, q in enumerate(all_quarters):
+            if (champ, q) in lookup.index:
+                rec = lookup.loc[(champ, q)]
+                games = int(rec["games"])
+                if games >= 15:
+                    wr_matrix[row_i, col_j] = int(rec["wins"]) / games
+                    n_matrix[row_i, col_j] = games
+
+    fig = plt.figure(figsize=(12, 9))
+    # Heatmap on the left (~74% width), side panel on the right.
+    gs = fig.add_gridspec(1, 2, width_ratios=[3.0, 1.0], wspace=0.05)
+    ax = fig.add_subplot(gs[0, 0])
+    ax_side = fig.add_subplot(gs[0, 1])
+
+    cmap = plt.get_cmap("RdYlGn").copy()
+    cmap.set_bad(color="#f3f4f6")
+    # Clip ±10pp from 0.5 — anything beyond is rare and would otherwise
+    # dominate the scale, washing out smaller-but-real shifts.
+    im = ax.imshow(wr_matrix, aspect="auto", cmap=cmap, vmin=0.4, vmax=0.6)
+
+    ax.set_xticks(range(len(all_quarters)))
+    ax.set_xticklabels(all_quarters, rotation=45, ha="right", color=PALETTE["text"])
+    ax.set_yticks(range(len(top)))
+    ax.set_yticklabels(top["champion"].tolist(), color=PALETTE["text"])
+    ax.set_xlabel("Quarter")
+    ax.set_title(_title("Quarterly champion WR - meta shift detection", None))
+    _subtitle(
+        ax,
+        "Top 20 champions by significance of cross-quarter WR variation. "
+        "BH-FDR adjusted q-values. * = q < 0.10.",
+    )
+    ax.grid(False)
+    for spine in ax.spines.values():
+        spine.set_color(PALETTE["spine"])
+
+    # Cell annotations — small font so 20×N stays legible inside (12, 9).
+    for i in range(wr_matrix.shape[0]):
+        for j in range(wr_matrix.shape[1]):
+            wr = wr_matrix[i, j]
+            n = n_matrix[i, j]
+            if np.isnan(wr):
+                continue
+            # Switch to white text on the deep red / deep green tails so
+            # annotations stay readable when the cell is fully saturated.
+            txt_color = "white" if (wr <= 0.43 or wr >= 0.57) else PALETTE["text"]
+            ax.text(
+                j,
+                i,
+                f"{wr:.0%}\nn={n}",
+                ha="center",
+                va="center",
+                fontsize=7.5,
+                color=txt_color,
+            )
+
+    cbar = fig.colorbar(im, ax=ax, label="WR", shrink=0.6, pad=0.02)
+    cbar.outline.set_visible(False)
+
+    # Side panel: per-row stats. y-axis matches the heatmap so each line
+    # of text lines up with its champion row.
+    ax_side.set_xlim(0, 1)
+    ax_side.set_ylim(-0.5, len(top) - 0.5)
+    ax_side.invert_yaxis()
+    ax_side.set_axis_off()
+    ax_side.text(
+        0.0,
+        -1.0,
+        "raw p   /   BH q   /   range",
+        ha="left",
+        va="bottom",
+        fontsize=9,
+        color=PALETTE["muted"],
+        style="italic",
+        transform=ax_side.transData,
+    )
+    for i, (_, row) in enumerate(top.iterrows()):
+        flag = " *" if row["p_adj"] < 0.10 else "  "
+        ax_side.text(
+            0.0,
+            i,
+            f"p={row['p_raw']:.3f}  q={row['p_adj']:.3f}  range={row['range_pp']*100:.1f}pp{flag}",
+            ha="left",
+            va="center",
+            fontsize=8.5,
+            color=PALETTE["text"],
+            family="monospace",
+        )
+
+    # imshow's default origin='upper' already puts matrix row 0 at the
+    # top of the axes — exactly the ranking we want, no inversion needed.
+    # tight_layout warns when an off-axis is in the gridspec, so use
+    # subplots_adjust manually — same effect, no warning.
+    fig.subplots_adjust(left=0.10, right=0.97, top=0.92, bottom=0.10)
+    return fig
+
+
 # --- registry --------------------------------------------------------------
 
 #: All aggregate plot functions, in the order the runner script + notebook
@@ -9892,4 +10078,5 @@ ALL_PLOTS = [
     ("44_win_autocorrelation", plot_win_autocorrelation),
     ("45_champ_swap_recs", plot_champ_swap_recs),
     ("46_per_account_breakdown", plot_per_account_breakdown),
+    ("47_champion_meta_shifts", plot_champion_meta_shifts),
 ]

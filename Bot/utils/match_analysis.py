@@ -7387,6 +7387,113 @@ def plot_game_pace(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
     return fig
 
 
+def plot_shrunk_champ_rankings(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Top champions ranked by Bayesian-shrunk WR.
+
+    Answers "is this 65% WR real or just sample-size noise?". Raw WRs on
+    thin samples get pulled toward a baseline (personal WR for per-person,
+    group WR for aggregate) by a Beta prior. The shrunken bar is what
+    matters; the raw bar shows the pre-shrinkage WR so the size of the
+    correction is visible.
+    """
+    if _is_aggregate(player):
+        baseline_wr = float(df["win"].mean())
+        min_games = 30
+        prior_n = 50.0
+        title = "Top champions in the friend group - shrunken WR"
+        subtitle = (
+            "Combined wins/games across all players. Bayesian shrinkage "
+            "(prior_n=50) pulls thin samples toward group baseline."
+        )
+        baseline_label = f"group baseline ({baseline_wr:.0%})"
+        g = df.groupby("champion")["win"].agg(["count", "sum"])
+        g = g.rename(columns={"count": "games", "sum": "wins"})
+        g = g[g["games"] >= min_games]
+        if g.empty:
+            return _empty_figure(f"No champion has enough games (>={min_games})")
+    else:
+        d = _filter_player(df, player)
+        if len(d) < 50:
+            return _empty_figure(f"Need >=50 games for shrunk rankings ({len(d)} games)")
+        baseline_wr = float(d["win"].mean())
+        min_games = 5
+        prior_n = 30.0
+        name = _display_label(player) or "this player"
+        title = f"Top champions by shrunken WR - {name}"
+        subtitle = (
+            "Bayesian shrinkage with personal-baseline prior (prior_n=30). "
+            "Raw bar shows pre-shrinkage WR - shrinkage pulls small samples "
+            "toward your baseline so you see real signal."
+        )
+        baseline_label = f"{name}'s baseline ({baseline_wr:.0%})"
+        g = d.groupby("champion")["win"].agg(["count", "sum"])
+        g = g.rename(columns={"count": "games", "sum": "wins"})
+        g = g[g["games"] >= min_games]
+        if g.empty:
+            return _empty_figure(f"No champion has enough games (>={min_games})")
+
+    g["raw_wr"] = g["wins"] / g["games"]
+    g["shrunk_wr"] = [
+        bayesian_shrunk_wr(int(w), int(n), baseline_wr, prior_n)
+        for w, n in zip(g["wins"], g["games"], strict=False)
+    ]
+    # Top 15 by shrunken WR. Reversed so highest-WR row plots at the top
+    # of the horizontal bar chart (barh y=0 is at the bottom).
+    top = g.sort_values("shrunk_wr", ascending=False).head(15)
+    top = top.iloc[::-1]
+
+    fig, ax = plt.subplots(figsize=(10, 8))
+    y = np.arange(len(top))
+
+    colours = []
+    for shrunk in top["shrunk_wr"]:
+        if shrunk > baseline_wr + 0.03:
+            colours.append(PALETTE["win"])
+        elif shrunk < baseline_wr - 0.03:
+            colours.append(PALETTE["loss"])
+        else:
+            colours.append(PALETTE["neutral"])
+
+    ax.barh(y, top["shrunk_wr"], color=colours, height=0.72, label="Shrunken WR")
+    # Raw WR as a small marker on the same row — shows the pre-shrinkage value.
+    ax.scatter(
+        top["raw_wr"],
+        y,
+        marker="|",
+        s=140,
+        color=PALETTE["text"],
+        linewidths=1.6,
+        zorder=3,
+        label="Raw WR",
+    )
+    ax.axvline(
+        baseline_wr,
+        color=PALETTE["muted"],
+        linestyle="--",
+        linewidth=1.0,
+        label=baseline_label,
+    )
+
+    ax.set_yticks(y)
+    ax.set_yticklabels(
+        [
+            f"{champ}  n={int(n)}  raw={raw:.0%} -> shrunk={shr:.0%}"
+            for champ, n, raw, shr in zip(
+                top.index, top["games"], top["raw_wr"], top["shrunk_wr"], strict=False
+            )
+        ]
+    )
+    ax.set_xlabel("Win rate")
+    ax.set_xlim(0, max(1.0, float(top["shrunk_wr"].max()) + 0.05))
+    ax.set_title(title)
+    _subtitle(ax, subtitle)
+    ax.legend(loc="lower right", framealpha=0.85, fontsize=9)
+    _polish_ax(ax)
+
+    fig.tight_layout()
+    return fig
+
+
 # --- registry --------------------------------------------------------------
 
 #: All aggregate plot functions, in the order the runner script + notebook
@@ -7428,4 +7535,5 @@ ALL_PLOTS = [
     ("34_improvement_slope", plot_improvement_slope),
     ("35_stat_sheet", plot_stat_sheet),
     ("36_game_pace", plot_game_pace),
+    ("37_shrunk_champ_rankings", plot_shrunk_champ_rankings),
 ]

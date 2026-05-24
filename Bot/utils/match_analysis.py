@@ -12058,6 +12058,355 @@ def plot_rank_recovery(df: pd.DataFrame, player: str | None = None) -> plt.Figur
     return fig
 
 
+# --- 54. Last game of day --------------------------------------------------
+
+_LAST_GAME_MIN_DAYS = 10
+_LAST_GAME_BOOT = 2000
+
+
+def _two_prop_z_p(x1: int, n1: int, x2: int, n2: int) -> float:
+    """Two-tailed two-proportion z-test p-value (pooled SE). NaN when undefined."""
+    if n1 <= 0 or n2 <= 0:
+        return float("nan")
+    p1 = x1 / n1
+    p2 = x2 / n2
+    p_pool = (x1 + x2) / (n1 + n2)
+    se = math.sqrt(p_pool * (1 - p_pool) * (1 / n1 + 1 / n2))
+    if se == 0:
+        return float("nan")
+    z = (p1 - p2) / se
+    return math.erfc(abs(z) / math.sqrt(2))
+
+
+def _last_game_of_day_per_player(df: pd.DataFrame) -> pd.DataFrame:
+    """Per-player aggregates over multi-game days.
+
+    For each (person, date) with >=2 games, the chronologically last game
+    contributes one trial to ``last_*`` and the remaining games contribute to
+    ``non_last_*``. Pools across all qualifying days per player.
+    """
+    if df.empty:
+        return pd.DataFrame(
+            columns=[
+                "person",
+                "n_days",
+                "last_wins",
+                "last_n",
+                "non_last_wins",
+                "non_last_n",
+                "last_wr",
+                "non_last_wr",
+            ]
+        )
+    # Stable chronological order so .tail(1) really gives the last game.
+    d = df.sort_values(["person", "game_start"]).copy()
+    sizes = d.groupby(["person", "date"]).size()
+    multi = sizes[sizes >= 2].index
+    if len(multi) == 0:
+        return pd.DataFrame(
+            columns=[
+                "person",
+                "n_days",
+                "last_wins",
+                "last_n",
+                "non_last_wins",
+                "non_last_n",
+                "last_wr",
+                "non_last_wr",
+            ]
+        )
+    multi_idx = pd.MultiIndex.from_tuples(multi.tolist(), names=["person", "date"])
+    keep = d.set_index(["person", "date"]).index.isin(multi_idx)
+    md = d[keep].copy()
+
+    # The last row within each (person, date) is the player's last game of
+    # that day. Everything else on multi-game days is "non-last".
+    last_rows = md.groupby(["person", "date"], sort=False).tail(1)
+    last_idx = last_rows.index
+    md["is_last"] = md.index.isin(last_idx)
+
+    last = md[md["is_last"]]
+    non_last = md[~md["is_last"]]
+
+    last_agg = last.groupby("person")["win"].agg(last_wins="sum", last_n="count")
+    non_last_agg = non_last.groupby("person")["win"].agg(non_last_wins="sum", non_last_n="count")
+    out = last_agg.join(non_last_agg, how="outer").fillna(0).astype(int).reset_index()
+    out["n_days"] = out["last_n"]  # one last-game per multi-game day
+    out["last_wr"] = np.where(out["last_n"] > 0, out["last_wins"] / out["last_n"], np.nan)
+    out["non_last_wr"] = np.where(
+        out["non_last_n"] > 0, out["non_last_wins"] / out["non_last_n"], np.nan
+    )
+    return out[
+        [
+            "person",
+            "n_days",
+            "last_wins",
+            "last_n",
+            "non_last_wins",
+            "non_last_n",
+            "last_wr",
+            "non_last_wr",
+        ]
+    ]
+
+
+def _last_game_bootstrap_diff(
+    last_wr: np.ndarray, non_last_wr: np.ndarray, n_boot: int = _LAST_GAME_BOOT
+) -> tuple[float, float, float]:
+    """Paired bootstrap (resample players) for macro mean of per-player diffs."""
+    n = len(last_wr)
+    if n == 0:
+        return (float("nan"), float("nan"), float("nan"))
+    diffs_obs = last_wr - non_last_wr
+    rng = np.random.default_rng(20260524)
+    boot = np.empty(n_boot)
+    for i in range(n_boot):
+        idx = rng.integers(0, n, size=n)
+        boot[i] = diffs_obs[idx].mean()
+    return (
+        float(diffs_obs.mean()),
+        float(np.percentile(boot, 2.5)),
+        float(np.percentile(boot, 97.5)),
+    )
+
+
+def plot_last_game_of_day(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """WR of the last game on multi-game days vs WR of non-last games.
+
+    Tests for "play until you win" (keep going on losses, stop on wins) and
+    its mirror "quit while ahead" (stop after a win) — both patterns inflate
+    the last-game WR by selection, so direction alone is not diagnostic.
+    """
+    per_player = _last_game_of_day_per_player(df)
+    qualifying = per_player[per_player["n_days"] >= _LAST_GAME_MIN_DAYS].copy()
+
+    if _is_aggregate(player):
+        if len(qualifying) < 3:
+            return _empty_figure("Need >=3 players with >=10 multi-game days")
+        return _plot_last_game_aggregate(qualifying)
+
+    label = _display_label(player) or "this player"
+    person = _resolve_person(df, player)
+    if person is None:
+        return _empty_figure(f"No games for {label}")
+    row = per_player[per_player["person"] == person]
+    if row.empty or int(row["n_days"].iloc[0]) < _LAST_GAME_MIN_DAYS:
+        n_days = int(row["n_days"].iloc[0]) if not row.empty else 0
+        return _empty_figure(f"Need >=10 multi-game days ({n_days} for {label})")
+    return _plot_last_game_per_person(row.iloc[0], label)
+
+
+def _plot_last_game_aggregate(qualifying: pd.DataFrame) -> plt.Figure:
+    qualifying = (
+        qualifying.assign(delta=qualifying["last_wr"] - qualifying["non_last_wr"])
+        .sort_values("delta", ascending=False)
+        .reset_index(drop=True)
+    )
+
+    last_wr = qualifying["last_wr"].to_numpy()
+    non_last_wr = qualifying["non_last_wr"].to_numpy()
+    deltas = last_wr - non_last_wr
+    mean_diff, ci_lo, ci_hi = _last_game_bootstrap_diff(last_wr, non_last_wr)
+    macro_last = float(last_wr.mean())
+    macro_non_last = float(non_last_wr.mean())
+
+    if ci_lo > 0:
+        verdict = "Δ > 0 (play-until-win OR quit-while-ahead)"
+    elif ci_hi < 0:
+        verdict = "Δ < 0 (last game underperforms)"
+    else:
+        verdict = "no detectable difference"
+
+    last_cis = [
+        wilson_ci(int(w), int(n))
+        for w, n in zip(qualifying["last_wins"], qualifying["last_n"], strict=False)
+    ]
+    non_last_cis = [
+        wilson_ci(int(w), int(n))
+        for w, n in zip(qualifying["non_last_wins"], qualifying["non_last_n"], strict=False)
+    ]
+    last_lo = np.array([c[0] for c in last_cis])
+    last_hi = np.array([c[1] for c in last_cis])
+    non_last_lo = np.array([c[0] for c in non_last_cis])
+    non_last_hi = np.array([c[1] for c in non_last_cis])
+
+    n = len(qualifying)
+    y_players = np.arange(n) + 1
+    y_macro = 0
+    bar_h = 0.36
+
+    fig, ax = plt.subplots(figsize=(11, max(5.0, 0.55 * n + 2.5)))
+    ax.barh(
+        y_players - bar_h / 2,
+        last_wr,
+        height=bar_h,
+        color=PALETTE["primary"],
+        label="Last game WR",
+        zorder=2,
+    )
+    ax.barh(
+        y_players + bar_h / 2,
+        non_last_wr,
+        height=bar_h,
+        color=PALETTE["accent_orange"],
+        label="Non-last WR",
+        zorder=2,
+    )
+    ax.errorbar(
+        last_wr,
+        y_players - bar_h / 2,
+        xerr=[last_wr - last_lo, last_hi - last_wr],
+        **WHISKER_STYLE,
+        zorder=3,
+    )
+    ax.errorbar(
+        non_last_wr,
+        y_players + bar_h / 2,
+        xerr=[non_last_wr - non_last_lo, non_last_hi - non_last_wr],
+        **WHISKER_STYLE,
+        zorder=3,
+    )
+    # Macro summary row.
+    ax.barh(y_macro - bar_h / 2, macro_last, height=bar_h, color=PALETTE["primary"], alpha=0.55)
+    ax.barh(
+        y_macro + bar_h / 2,
+        macro_non_last,
+        height=bar_h,
+        color=PALETTE["accent_orange"],
+        alpha=0.55,
+    )
+    ax.axvline(0.5, color=PALETTE["spine"], linewidth=0.8, alpha=0.6)
+
+    # Per-row delta annotation past the longer of the two whiskers.
+    rightmost = np.maximum(last_hi, non_last_hi)
+    for i, delta in enumerate(deltas):
+        ax.text(
+            rightmost[i] + 0.01,
+            y_players[i],
+            f"Δ {delta:+.1%}",
+            va="center",
+            ha="left",
+            fontsize=9,
+            color=PALETTE["text"],
+        )
+    ax.text(
+        max(macro_last, macro_non_last) + 0.01,
+        y_macro,
+        f"Δ {mean_diff:+.1%}",
+        va="center",
+        ha="left",
+        fontsize=9,
+        color=PALETTE["text"],
+        fontweight="bold",
+    )
+
+    yticks = [y_macro, *list(y_players)]
+    yticklabels = ["MACRO MEAN", *[str(p) for p in qualifying["person"].tolist()]]
+    ax.set_yticks(yticks)
+    ax.set_yticklabels(yticklabels)
+    ax.invert_yaxis()
+    ax.set_xlim(
+        0.0,
+        max(0.8, float(max(last_hi.max(), non_last_hi.max(), macro_last, macro_non_last)) + 0.18),
+    )
+    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
+    ax.set_xlabel("Win rate")
+    ax.legend(loc="lower right", frameon=False)
+
+    ax.set_title("Last game of multi-game days vs non-last")
+    _subtitle(
+        ax,
+        "Tests 'play until you win' (Delta > 0) vs 'quit ahead' (Delta also > 0, but "
+        f"from selection). Both produce positive Delta, so direction alone isn't "
+        f"diagnostic. Macro Delta = {mean_diff:+.1%} [95% CI {ci_lo:+.1%}, {ci_hi:+.1%}]; "
+        f"{verdict}.",
+    )
+    _polish_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
+def _plot_last_game_per_person(row: pd.Series, label: str) -> plt.Figure:
+    last_w = int(row["last_wins"])
+    last_n = int(row["last_n"])
+    non_last_w = int(row["non_last_wins"])
+    non_last_n = int(row["non_last_n"])
+    p_last = last_w / last_n if last_n > 0 else float("nan")
+    p_non_last = non_last_w / non_last_n if non_last_n > 0 else float("nan")
+    ci_last = wilson_ci(last_w, last_n) if last_n > 0 else (float("nan"), float("nan"))
+    ci_non_last = (
+        wilson_ci(non_last_w, non_last_n) if non_last_n > 0 else (float("nan"), float("nan"))
+    )
+
+    p_val = _two_prop_z_p(last_w, last_n, non_last_w, non_last_n)
+    if math.isnan(p_val):
+        p_text = "p=n/a"
+        interp = "insufficient data"
+    else:
+        p_text = f"p={p_val:.3f}"
+        if p_val < 0.05:
+            if (p_last - p_non_last) > 0:
+                interp = "last game over-performs (significant)"
+            else:
+                interp = "last game under-performs (significant)"
+        else:
+            interp = "no significant difference"
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    x = np.arange(2)
+    means = np.array(
+        [
+            p_last if not math.isnan(p_last) else 0.0,
+            p_non_last if not math.isnan(p_non_last) else 0.0,
+        ]
+    )
+    ax.bar(x, means, color=[PALETTE["primary"], PALETTE["accent_orange"]], width=0.55, zorder=2)
+    err_lo = np.array(
+        [
+            (p_last - ci_last[0]) if not math.isnan(p_last) else 0.0,
+            (p_non_last - ci_non_last[0]) if not math.isnan(p_non_last) else 0.0,
+        ]
+    )
+    err_hi = np.array(
+        [
+            (ci_last[1] - p_last) if not math.isnan(p_last) else 0.0,
+            (ci_non_last[1] - p_non_last) if not math.isnan(p_non_last) else 0.0,
+        ]
+    )
+    ax.errorbar(x, means, yerr=[err_lo, err_hi], **WHISKER_STYLE, zorder=3)
+    ax.axhline(0.5, color=PALETTE["spine"], linewidth=0.8, alpha=0.6)
+
+    label_ys = means + err_hi + 0.02
+    for i, (mean, n_, ly) in enumerate(zip(means, (last_n, non_last_n), label_ys, strict=True)):
+        ax.text(
+            i,
+            ly,
+            f"{mean:.0%}\nn={n_}",
+            ha="center",
+            va="bottom",
+            fontsize=10,
+            color=PALETTE["text"],
+        )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(["Last game of day", "Non-last games"])
+    ax.set_ylabel("Win rate on multi-game days")
+    ax.set_ylim(0, max(0.7, float(label_ys.max()) + 0.18))
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
+
+    delta = (p_last - p_non_last) if (last_n > 0 and non_last_n > 0) else float("nan")
+    ax.set_title(f"Last game of day - {label}")
+    _subtitle(
+        ax,
+        f"WR of chronologically last game on multi-game days vs WR of non-last games. "
+        f"Delta = {delta:+.1%}; two-proportion z-test {p_text} - {interp}. "
+        f"n_days={int(row['n_days'])}.",
+    )
+    _polish_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
 # --- registry --------------------------------------------------------------
 
 #: All aggregate plot functions, in the order the runner script + notebook
@@ -12116,4 +12465,5 @@ ALL_PLOTS = [
     ("51_patch_meta_shifts", plot_patch_meta_shifts),
     ("52_kda_dominance", plot_kda_dominance),
     ("53_rank_recovery", plot_rank_recovery),
+    ("54_last_game_of_day", plot_last_game_of_day),
 ]

@@ -293,6 +293,12 @@ MORE_CHART_DEFS = [
         "📐",
         "Time to climb back after a tier demotion",
     ),
+    (
+        "54_last_game_of_day",
+        "Last game of day",
+        "🌙",
+        "WR of last game on multi-game days — play-until-win or quit-while-ahead?",
+    ),
 ]
 
 

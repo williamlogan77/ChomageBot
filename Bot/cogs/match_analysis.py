@@ -27,9 +27,11 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import time
 
 import discord
 import matplotlib
+import pandas as pd
 
 matplotlib.use("Agg")  # headless render — no display backend needed
 import matplotlib.pyplot as plt
@@ -40,6 +42,39 @@ from utils import match_analysis as analysis
 log = logging.getLogger(__name__)
 
 PNG_DPI = 110
+
+# 5-minute TTL cache around analysis.load_matches. Every chart click used
+# to do a full SQLite read (~6500 rows into pandas) — the cache collapses
+# bursts of clicks within the TTL down to a single read.
+_DF_CACHE_TTL_SECONDS = 300
+_df_cache: dict[str, tuple[float, pd.DataFrame]] = {}
+_df_cache_lock = asyncio.Lock()
+
+
+async def _load_matches_cached(db_path: str) -> pd.DataFrame:
+    """5-minute TTL cache around ``analysis.load_matches``.
+
+    Lock-around-read-and-write is intentional: under a thundering-herd of
+    simultaneous chart clicks (e.g. after a sticky-pin repost) we want
+    one reader to land and the others to wait for the result rather than
+    all doing parallel SQLite reads.
+
+    The cache holds the DataFrame by reference — callers MUST NOT mutate
+    it. Current plot helpers only slice (no in-place ops), so this is
+    safe today; any future mutation site must ``df.copy()`` first.
+    """
+    async with _df_cache_lock:
+        entry = _df_cache.get(db_path)
+        now = time.monotonic()
+        if entry is not None:
+            cached_at, df = entry
+            if now - cached_at < _DF_CACHE_TTL_SECONDS:
+                log.info(f"DF cache hit, age={now - cached_at:.1f}s")
+                return df
+        log.info("DF cache miss, loading…")
+        df = await asyncio.to_thread(analysis.load_matches, db_path)
+        _df_cache[db_path] = (now, df)
+        return df
 
 # The panel lives in exactly this channel — /match_stats_panel always
 # targets it, regardless of where the slash command was invoked.
@@ -728,7 +763,7 @@ class MatchAnalysis(commands.Cog):
         Returns ``(message, df)``. Raises ``discord.Forbidden`` if the
         bot lacks send permission; other exceptions propagate.
         """
-        df = await asyncio.to_thread(analysis.load_matches, self.bot.db_path)
+        df = await _load_matches_cached(self.bot.db_path)
         view = MatchStatsPanel(df=df if not df.empty else None)
         msg = await channel.send(
             embed=_build_panel_embed(),
@@ -917,7 +952,7 @@ class MatchAnalysis(commands.Cog):
         await interaction.response.defer(ephemeral=False)
 
         try:
-            df = await asyncio.to_thread(analysis.load_matches, self.bot.db_path)
+            df = await _load_matches_cached(self.bot.db_path)
         except Exception as exc:
             self.bot.logging.error(f"/me data load failed: {exc!r}")
             await interaction.followup.send(f"Failed to load match data: {exc!r}", ephemeral=True)
@@ -971,7 +1006,7 @@ class MatchAnalysis(commands.Cog):
         to the original clicker via interaction_check."""
         await interaction.response.defer()
         try:
-            df = await asyncio.to_thread(analysis.load_matches, self.bot.db_path)
+            df = await _load_matches_cached(self.bot.db_path)
         except Exception as exc:
             self.bot.logging.error(f"match_stats data load failed: {exc!r}")
             await interaction.followup.send(f"Failed to load match data: {exc!r}", ephemeral=True)

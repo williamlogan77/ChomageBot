@@ -141,6 +141,35 @@ MORE_CHART_DEFS = [
     ("39_champion_mastery", "Mastery curve", "🎓", "WR by play-count bucket on each champion"),
     ("40_champion_rust", "Champion rust", "🪦", "WR by days since last played that champion"),
     ("41_dow_hour_heatmap", "DOW × hour heatmap", "🔥", "WR by day-of-week × time-of-day"),
+    ("04_feature_impact", "Feature impact", "🧪", "Pre-game factor WR shifts with BH-FDR q-values"),
+    ("08_cumulative_winrate", "Cumulative WR", "📉", "Lifetime WR + rolling-20 hot/cold streaks"),
+    (
+        "22_model_calibration",
+        "Calibration plot",
+        "🎯",
+        "Out-of-sample logit AUC + reliability curve",
+    ),
+    ("24_per_player_predictability", "Predictability", "🔮", "Per-player out-of-sample logit AUC"),
+    ("25_tier_winrate", "Tier WR", "🏔️", "WR per tier when game was played (Wilson CIs)"),
+    ("26_match_highlights", "Match highlights", "🌟", "Six record-holding matches as a card grid"),
+    (
+        "27_recent_sessions",
+        "Recent sessions",
+        "📜",
+        "Newest 10 sessions with W/L sequence (per-person)",
+    ),
+    (
+        "28_playstyle_clusters",
+        "Playstyle clusters",
+        "🧬",
+        "k-means + PCA archetypes across the friend group",
+    ),
+    (
+        "29_champion_freshness",
+        "Champion freshness",
+        "🌱",
+        "Days since last played per champion (per-person)",
+    ),
 ]
 
 

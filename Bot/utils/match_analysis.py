@@ -5323,6 +5323,139 @@ def plot_match_highlights(df: pd.DataFrame, player: str | None = None) -> plt.Fi
     return fig
 
 
+# --- 27. Recent sessions ----------------------------------------------------
+
+
+def plot_recent_sessions(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Per-person report card: newest 10 sessions in a list view.
+
+    Each row is one session — date, games played, win-rate, top champion
+    of the session, and the chronological W/L sequence drawn as small
+    colored squares. Aggregate ("all players") view is skipped because a
+    cross-person session list doesn't tell a coherent story.
+    """
+    from matplotlib.patches import Rectangle
+
+    if _is_aggregate(player):
+        return _empty_figure("Pick a player from the dropdown — sessions are per-person.")
+
+    d = _filter_player(df, player)
+    if d.empty or "session_id" not in d.columns:
+        return _empty_figure("No games yet.")
+
+    sessions = (
+        d.groupby("session_id")
+        .agg(
+            start_time=("game_start", "min"),
+            end_time=("game_start", "max"),
+            games=("win", "size"),
+            wins=("win", "sum"),
+            top_champ=("champion", lambda s: s.mode().iloc[0]),
+            top_champ_n=("champion", lambda s: s.value_counts().iloc[0]),
+        )
+        .reset_index()
+    )
+    sessions["wr"] = sessions["wins"] / sessions["games"]
+    total_sessions = len(sessions)
+    sessions = sessions.sort_values("start_time", ascending=False).head(10)
+
+    # Chronological W/L tape per session for the squares column.
+    sequences = {
+        sid: d[d["session_id"] == sid].sort_values("game_start")["win"].astype(int).tolist()
+        for sid in sessions["session_id"]
+    }
+
+    n = len(sessions)
+    fig, ax = plt.subplots(figsize=(13, max(4.5, 0.55 * n + 1.5)))
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, n)
+    ax.set_axis_off()
+
+    col_date = 0.03
+    col_games = 0.22
+    col_wr = 0.32
+    col_champ = 0.52
+    col_seq = 0.72
+
+    for i, (_, sess) in enumerate(sessions.iterrows()):
+        y = n - 1 - i + 0.5
+        ax.text(
+            col_date,
+            y,
+            pd.Timestamp(sess["start_time"]).strftime("%a %d %b, %H:%M"),
+            ha="left",
+            va="center",
+            fontsize=10,
+            color=PALETTE["text"],
+        )
+        ax.text(
+            col_games,
+            y,
+            f"{int(sess['games'])} games",
+            ha="left",
+            va="center",
+            fontsize=10,
+            color=PALETTE["muted"],
+        )
+        if sess["wr"] > 0.5:
+            wr_color = PALETTE["win"]
+        elif sess["wr"] < 0.5:
+            wr_color = PALETTE["loss"]
+        else:
+            wr_color = PALETTE["text"]
+        ax.text(
+            col_wr,
+            y,
+            f"{sess['wr']:.0%} WR",
+            ha="left",
+            va="center",
+            fontsize=11,
+            fontweight="bold",
+            color=wr_color,
+        )
+        ax.text(
+            col_champ,
+            y,
+            f"{sess['top_champ']} x{int(sess['top_champ_n'])}",
+            ha="left",
+            va="center",
+            fontsize=10,
+            color=PALETTE["text"],
+        )
+        seq = sequences[sess["session_id"]]
+        sq_w = min(0.022, (1 - col_seq - 0.02) / max(1, len(seq)))
+        for j, won in enumerate(seq):
+            rect = Rectangle(
+                (col_seq + j * sq_w * 1.15, y - 0.15),
+                sq_w,
+                0.3,
+                facecolor=PALETTE["win"] if won == 1 else PALETTE["loss"],
+                edgecolor="white",
+                linewidth=0.4,
+            )
+            ax.add_patch(rect)
+        if i < n - 1:
+            ax.axhline(y - 0.5, color=PALETTE["spine"], linewidth=0.6, alpha=0.6)
+
+    fig.suptitle(
+        _title("Recent sessions", player),
+        fontsize=16,
+        fontweight="bold",
+        y=0.97,
+    )
+    fig.text(
+        0.5,
+        0.93,
+        f"Newest {n} sessions of {total_sessions} total.",
+        ha="center",
+        fontsize=10,
+        color=PALETTE["muted"],
+        style="italic",
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    return fig
+
+
 # --- registry --------------------------------------------------------------
 
 #: All aggregate plot functions, in the order the runner script + notebook
@@ -5354,4 +5487,5 @@ ALL_PLOTS = [
     ("24_per_player_predictability", plot_per_player_predictability),
     ("25_tier_winrate", plot_tier_winrate),
     ("26_match_highlights", plot_match_highlights),
+    ("27_recent_sessions", plot_recent_sessions),
 ]

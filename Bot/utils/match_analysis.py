@@ -6510,6 +6510,174 @@ def plot_tilt_by_gap(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
     return fig
 
 
+# --- 33. Win rate by position within a play session -----------------------
+
+# Position labels for the X axis. Pool everything >=7 into "7+" so a long
+# tail of marathon-session positions (8th, 9th, 10th game...) doesn't
+# explode the chart with small-n buckets.
+_SESSION_POS_CAP = 7
+_SESSION_POS_LABELS = ["1", "2", "3", "4", "5", "6", "7+"]
+# Per-person cell needs at least this many games to contribute to a
+# bucket. Two thresholds because aggregate also needs enough contributors.
+_SESSION_POS_MIN_PER_PERSON = 10
+_SESSION_POS_MIN_PEOPLE = 3
+# Per-person mode keeps a position if it has at least this many games.
+_SESSION_POS_MIN_PER_BUCKET = 8
+
+
+def plot_session_position_wr(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """WR by game-position-within-session. Tests the warm-up hypothesis
+    (WR climbs from game 1 to 2) against the stamina-decay hypothesis
+    (WR drops as the session grinds on).
+
+    Sessions come from ``load_matches`` (gap-threshold split). Aggregate
+    mode macro-averages per-person WRs and bootstraps a 95% CI across
+    people. Per-person mode uses Wilson 95% CI on the binomial.
+    """
+    d_all = _filter_player(df, player)
+    if d_all.empty or "session_game_idx" not in d_all.columns:
+        return _empty_figure("No games to plot")
+
+    d = d_all.copy()
+    # session_game_idx is already 1-indexed; clip to the cap to pool the
+    # long tail into "7+". This also makes "sessions of length 1
+    # contribute only to position 1" automatic — they only ever produce a
+    # single row with idx=1.
+    d["pos"] = d["session_game_idx"].clip(upper=_SESSION_POS_CAP).astype(int)
+    d = d.dropna(subset=["win", "pos"])
+    if d.empty:
+        return _empty_figure("Not enough session data to plot")
+
+    is_aggregate_mode = _is_aggregate(player)
+    rng = np.random.default_rng(41)
+    n_boot = 2000
+
+    rows: list[dict] = []
+    if is_aggregate_mode:
+        # Per-person WR per position, drop sparse cells, then macro-average
+        # and bootstrap across the surviving per-person WRs.
+        per_person = (
+            d.groupby(["pos", "person"], observed=True)
+            .agg(games=("win", "size"), wins=("win", "sum"))
+            .reset_index()
+        )
+        per_person = per_person[per_person["games"] >= _SESSION_POS_MIN_PER_PERSON]
+        per_person["wr"] = per_person["wins"] / per_person["games"]
+
+        for pos in range(1, _SESSION_POS_CAP + 1):
+            cell = per_person[per_person["pos"] == pos]
+            if len(cell) < _SESSION_POS_MIN_PEOPLE:
+                continue
+            wrs = cell["wr"].to_numpy()
+            boot = rng.choice(wrs, size=(n_boot, wrs.size), replace=True).mean(axis=1)
+            rows.append(
+                {
+                    "pos": pos,
+                    "wr": float(wrs.mean()),
+                    "n": int(cell["games"].sum()),
+                    "n_people": int(wrs.size),
+                    "ci_lo": float(np.quantile(boot, 0.025)),
+                    "ci_hi": float(np.quantile(boot, 0.975)),
+                }
+            )
+    else:
+        cell = (
+            d.groupby("pos", observed=True)
+            .agg(games=("win", "size"), wins=("win", "sum"))
+            .reset_index()
+        )
+        cell = cell[cell["games"] >= _SESSION_POS_MIN_PER_BUCKET]
+        for _, row in cell.iterrows():
+            lo, hi = wilson_ci(int(row["wins"]), int(row["games"]))
+            rows.append(
+                {
+                    "pos": int(row["pos"]),
+                    "wr": float(row["wins"]) / float(row["games"]),
+                    "n": int(row["games"]),
+                    "n_people": 1,
+                    "ci_lo": lo,
+                    "ci_hi": hi,
+                }
+            )
+
+    if not rows:
+        return _empty_figure("No session positions met the minimum sample threshold")
+
+    series = pd.DataFrame(rows).sort_values("pos").reset_index(drop=True)
+
+    # Baseline: macro-averaged overall WR for aggregate mode, player's
+    # overall WR otherwise.
+    if is_aggregate_mode:
+        per_person_overall = d.groupby("person")["win"].mean()
+        baseline_wr = float(per_person_overall.mean())
+        baseline_label = f"macro-average overall WR {baseline_wr:.0%}"
+    else:
+        baseline_wr = float(d["win"].mean())
+        baseline_label = f"overall WR {baseline_wr:.0%}"
+
+    fig, ax = plt.subplots(figsize=(10, 5.0))
+
+    xs = (series["pos"] - 1).to_numpy()
+    ys = series["wr"].to_numpy()
+    colour = PALETTE["primary"]
+
+    ax.plot(
+        xs,
+        ys,
+        color=colour,
+        marker="o",
+        markersize=7,
+        linewidth=2.2,
+    )
+    ax.fill_between(
+        xs,
+        series["ci_lo"].to_numpy(),
+        series["ci_hi"].to_numpy(),
+        color=colour,
+        alpha=0.18,
+        linewidth=0,
+    )
+
+    # n=... annotation above each marker; consistent placement since this
+    # is a single-series chart with no collision risk.
+    for xi, yi, ni in zip(xs, ys, series["n"].to_numpy(), strict=False):
+        ax.annotate(
+            f"n={int(ni)}",
+            xy=(xi, yi),
+            xytext=(0, 10),
+            textcoords="offset points",
+            ha="center",
+            va="bottom",
+            fontsize=8,
+            color=PALETTE["muted"],
+        )
+
+    _baseline(ax, y=baseline_wr, label=baseline_label)
+
+    ax.set_xticks(list(range(_SESSION_POS_CAP)))
+    ax.set_xticklabels(_SESSION_POS_LABELS)
+    ax.set_xlabel("Game position within session")
+    ax.set_ylabel("Win rate")
+    ax.set_ylim(0.0, 1.0)
+
+    subtitle = (
+        f"Each game's position within a play session (sessions split when gap >"
+        f"{SESSION_GAP_MIN}min). Tests whether you warm up or fatigue as you play longer."
+    )
+
+    if is_aggregate_mode:
+        ax.set_title("Session-position WR - warm-up or stamina decay?")
+    else:
+        name = _display_label(player) or ""
+        ax.set_title(f"Session-position WR - {name}")
+    _subtitle(ax, subtitle)
+
+    ax.legend(loc="lower right", fontsize=9)
+    _polish_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
 # --- registry --------------------------------------------------------------
 
 #: All aggregate plot functions, in the order the runner script + notebook
@@ -6547,4 +6715,5 @@ ALL_PLOTS = [
     ("30_role_winrate", plot_role_winrate),
     ("31_player_role_matrix", plot_player_role_matrix),
     ("32_tilt_by_gap", plot_tilt_by_gap),
+    ("33_session_position_wr", plot_session_position_wr),
 ]

@@ -99,6 +99,50 @@ CHART_DEFS = [
     ),
 ]
 
+# Charts only reachable via the explorer's "More ▾" select. Stems must
+# exist in ``analysis.ALL_PLOTS``. Order shown here is the order in the
+# dropdown.
+MORE_CHART_DEFS = [
+    ("21_duo_winrate", "Duos / H2H", "🤝", "Same-team partnerships + head-to-head"),
+    ("30_role_winrate", "Per-role WR", "🛡️", "WR per role (TOP/JG/MID/ADC/SUP) with Wilson CIs"),
+    (
+        "31_player_role_matrix",
+        "Role matrix",
+        "🧭",
+        "Player×role heatmap vs personal baseline (aggregate only)",
+    ),
+    ("32_tilt_by_gap", "Tilt analysis", "😤", "After-loss vs after-win WR by inter-game gap"),
+    (
+        "33_session_position_wr",
+        "Session position WR",
+        "🎮",
+        "WR by game-number within a play session",
+    ),
+    (
+        "34_improvement_slope",
+        "Improvement slope",
+        "📈",
+        "Logistic regression of WR on game-index per player",
+    ),
+    ("35_stat_sheet", "Stat sheet", "📊", "6-metric percentile rank vs friend group"),
+    ("36_game_pace", "Game pace", "⏱️", "Stomper vs scaler — duration of wins vs losses"),
+    (
+        "37_shrunk_champ_rankings",
+        "Shrunk champ rankings",
+        "🏆",
+        "Top 15 champs by Bayesian-shrunk WR",
+    ),
+    (
+        "38_champ_pool_concentration",
+        "Pool concentration",
+        "🎯",
+        "Shannon entropy, effective N, Pareto",
+    ),
+    ("39_champion_mastery", "Mastery curve", "🎓", "WR by play-count bucket on each champion"),
+    ("40_champion_rust", "Champion rust", "🪦", "WR by days since last played that champion"),
+    ("41_dow_hour_heatmap", "DOW × hour heatmap", "🔥", "WR by day-of-week × time-of-day"),
+]
+
 
 def _figure_to_file(fig, name: str = "chart.png") -> discord.File:
     buf = io.BytesIO()
@@ -230,10 +274,25 @@ class _ExplorerView(discord.ui.View):
         self.add_item(select)
         self._select = select
 
-        for idx, (label, emoji, _, _) in enumerate(CHART_DEFS):
+        # Reserve the final button slot (row 4, position 4) for the "More ▾"
+        # entry point — five rows × five components is Discord's hard cap,
+        # and the More-select must live in its own row inside the follow-up
+        # view. Drop the last CHART_DEFS button from this view; it (and the
+        # iter 38+ charts) are reachable via the More-select instead.
+        max_buttons = 19
+        for idx, (label, emoji, _, _) in enumerate(CHART_DEFS[:max_buttons]):
             button = discord.ui.Button(label=label, emoji=emoji, row=1 + (idx // 5))
             button.callback = self._make_chart_callback(idx)
             self.add_item(button)
+
+        more_button = discord.ui.Button(
+            label="More ▾",
+            emoji="➕",
+            row=1 + (max_buttons // 5),
+            style=discord.ButtonStyle.secondary,
+        )
+        more_button.callback = self._on_more_clicked
+        self.add_item(more_button)
         self._refresh_highlights()
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -265,16 +324,28 @@ class _ExplorerView(discord.ui.View):
 
     def _refresh_highlights(self) -> None:
         """Style the active chart's button primary so the user can see
-        which chart they're viewing."""
-        btn_count = 0
+        which chart they're viewing. The trailing "More ▾" button is
+        skipped — it isn't a chart, so it stays secondary."""
+        chart_btn_count = 0
         for child in self.children:
-            if isinstance(child, discord.ui.Button):
-                child.style = (
-                    discord.ButtonStyle.primary
-                    if btn_count == self.chart_idx
-                    else discord.ButtonStyle.secondary
-                )
-                btn_count += 1
+            if not isinstance(child, discord.ui.Button):
+                continue
+            if child.label == "More ▾":
+                continue
+            child.style = (
+                discord.ButtonStyle.primary
+                if chart_btn_count == self.chart_idx
+                else discord.ButtonStyle.secondary
+            )
+            chart_btn_count += 1
+
+    async def _on_more_clicked(self, interaction: discord.Interaction) -> None:
+        view = _MoreAnalyticsView(df=self.df, invoker_id=self.invoker_id, person=self.person)
+        await interaction.response.send_message(
+            "Pick another chart — it'll post in the channel.",
+            view=view,
+            ephemeral=True,
+        )
 
     async def _rerender(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer()
@@ -295,6 +366,81 @@ class _ExplorerView(discord.ui.View):
         embed.set_image(url="attachment://chart.png")
         file = _figure_to_file(fig)
         await interaction.edit_original_response(embed=embed, attachments=[file], view=self)
+
+
+# --- More-analytics select view (ephemeral) --------------------------------
+
+
+class _MoreAnalyticsView(discord.ui.View):
+    """Per-user ephemeral wrapper around a single Select listing every
+    chart that didn't fit on the main explorer's button grid. Picking an
+    option posts the chosen chart as a public follow-up so the channel
+    sees the result — the select itself stays ephemeral."""
+
+    def __init__(self, df, invoker_id: int, person: str | None):
+        super().__init__(timeout=EXPLORER_TIMEOUT_SECONDS)
+        self.df = df
+        self.invoker_id = invoker_id
+        self.person = person
+
+        plot_by_stem = dict(analysis.ALL_PLOTS)
+        options: list[discord.SelectOption] = []
+        self._option_meta: dict[str, tuple[str, str]] = {}
+        for stem, label, emoji, description in MORE_CHART_DEFS:
+            if stem not in plot_by_stem:
+                # Defensive: skip rather than crash the whole view if the
+                # analysis lib drops a chart. Log so we notice during dev.
+                log.warning(f"MORE_CHART_DEFS stem {stem!r} missing from ALL_PLOTS")
+                continue
+            options.append(
+                discord.SelectOption(
+                    label=label[:100],
+                    value=stem[:100],
+                    description=description[:100],
+                    emoji=emoji,
+                )
+            )
+            self._option_meta[stem] = (label, emoji)
+
+        select = discord.ui.Select(placeholder="More analytics ↓", options=options, row=0)
+        select.callback = self._on_select
+        self.add_item(select)
+        self._select = select
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.invoker_id:
+            await interaction.response.send_message(
+                "That menu belongs to someone else.", ephemeral=True
+            )
+            return False
+        return True
+
+    async def _on_select(self, interaction: discord.Interaction) -> None:
+        stem = self._select.values[0]
+        plot_by_stem = dict(analysis.ALL_PLOTS)
+        fn = plot_by_stem.get(stem)
+        if fn is None:
+            await interaction.response.send_message(
+                f"Chart `{stem}` not found in the analysis lib.", ephemeral=True
+            )
+            return
+        await interaction.response.defer()
+        try:
+            fig = await asyncio.to_thread(fn, self.df, self.person)
+        except Exception as exc:
+            log.error(f"more-chart {stem!r} render failed: {exc!r}")
+            await interaction.followup.send(f"Chart failed: {exc!r}", ephemeral=True)
+            return
+
+        label, emoji = self._option_meta.get(stem, (stem, "📊"))
+        who = analysis._display_label(self.person) or "all players"
+        embed = discord.Embed(title=f"{emoji} {label} — {who}")
+        embed.set_image(url="attachment://chart.png")
+        file = _figure_to_file(fig)
+        # Public follow-up — channel sees the chart even though the menu
+        # was ephemeral. Mirrors the panel's "click button → public chart"
+        # flow so onlookers can react.
+        await interaction.followup.send(embed=embed, file=file, ephemeral=False)
 
 
 # --- Persistent panel ------------------------------------------------------

@@ -6678,6 +6678,237 @@ def plot_session_position_wr(df: pd.DataFrame, player: str | None = None) -> plt
     return fig
 
 
+_IMPROVEMENT_MIN_GAMES = 200
+_IMPROVEMENT_ROLLING_WINDOW = 50
+
+
+def _fit_improvement_slope(wins: np.ndarray) -> dict | None:
+    """Logistic regression of win on game-index for one player.
+
+    Design is a single column ``i / 100`` so the slope coefficient is in
+    log-odds per 100 games. ``logistic_fit`` adds its own intercept, so
+    ``X`` is shape (n, 1). Returns None when the fit is degenerate
+    (all wins or all losses — no variance to explain).
+    """
+    n = wins.size
+    if n < _IMPROVEMENT_MIN_GAMES:
+        return None
+    if wins.sum() in (0, n):
+        return None
+
+    idx_scaled = (np.arange(n, dtype=float) / 100.0)[:, None]
+    beta, se, _ = logistic_fit(idx_scaled, wins.astype(float), l2=0.5)
+    beta_slope = float(beta[1])
+    se_slope = float(se[1]) if np.isfinite(se[1]) else float("nan")
+    p_bar = float(wins.mean())
+    # Local-derivative conversion: dP/di * 100 = beta * p(1-p) * 100,
+    # evaluated at the player's mean WR. Sign-preserving on the CI bounds
+    # because p(1-p) >= 0.
+    scale = p_bar * (1.0 - p_bar) * 100.0
+    slope_pp = beta_slope * scale
+    if np.isfinite(se_slope) and se_slope > 0:
+        beta_lo = beta_slope - 1.96 * se_slope
+        beta_hi = beta_slope + 1.96 * se_slope
+        ci_lo_pp = beta_lo * scale
+        ci_hi_pp = beta_hi * scale
+        p_value = wald_pvalue(beta_slope, se_slope)
+    else:
+        ci_lo_pp = float("nan")
+        ci_hi_pp = float("nan")
+        p_value = 1.0
+
+    return {
+        "n_games": int(n),
+        "mean_wr": p_bar,
+        "beta": beta_slope,
+        "se": se_slope,
+        "slope_pp": slope_pp,
+        "ci_lo_pp": ci_lo_pp,
+        "ci_hi_pp": ci_hi_pp,
+        "p_value": p_value,
+        "intercept": float(beta[0]),
+    }
+
+
+def plot_improvement_slope(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Per-player WR-over-time slope from a logistic fit on game-index.
+
+    Aggregate: horizontal bar chart of slopes (pp WR change per 100
+    games) with Wald 95% CI whiskers, one bar per person who has at
+    least 200 games. Sign-significant bars get win/loss colour, others
+    are neutral grey.
+
+    Per-person: 50-game rolling WR (solid) overlaid with the dashed
+    fitted-logistic predicted P(win) curve, annotated with slope and
+    Wald p-value.
+    """
+    if _is_aggregate(player):
+        results: list[dict] = []
+        for person, sub in df.groupby("person", observed=True):
+            wins = sub.sort_values("game_start")["win"].to_numpy(dtype=float)
+            fit = _fit_improvement_slope(wins)
+            if fit is None:
+                continue
+            fit["person"] = str(person)
+            results.append(fit)
+
+        if not results:
+            return _empty_figure(
+                f"No player has the {_IMPROVEMENT_MIN_GAMES}+ games needed for a slope estimate"
+            )
+
+        rows = pd.DataFrame(results).sort_values("slope_pp", ascending=True).reset_index(drop=True)
+        y = np.arange(len(rows))
+
+        colours: list[str] = []
+        for _, r in rows.iterrows():
+            lo, hi = r["ci_lo_pp"], r["ci_hi_pp"]
+            if np.isfinite(lo) and np.isfinite(hi) and lo > 0:
+                colours.append(PALETTE["win"])
+            elif np.isfinite(lo) and np.isfinite(hi) and hi < 0:
+                colours.append(PALETTE["loss"])
+            else:
+                colours.append(PALETTE["neutral"])
+
+        fig_h = max(4.6, len(rows) * 0.45)
+        fig, ax = plt.subplots(figsize=(13, fig_h))
+        ax.barh(y, rows["slope_pp"], color=colours, height=0.7)
+
+        # CI whiskers — only draw where the SE was finite.
+        finite_ci = rows[["ci_lo_pp", "ci_hi_pp"]].apply(
+            lambda r: np.isfinite(r["ci_lo_pp"]) and np.isfinite(r["ci_hi_pp"]), axis=1
+        )
+        if finite_ci.any():
+            xerr = np.vstack(
+                [
+                    (rows["slope_pp"] - rows["ci_lo_pp"]).to_numpy(),
+                    (rows["ci_hi_pp"] - rows["slope_pp"]).to_numpy(),
+                ]
+            )
+            xerr[:, ~finite_ci.to_numpy()] = 0.0
+            ax.errorbar(rows["slope_pp"], y, xerr=xerr, **WHISKER_STYLE)
+
+        ax.axvline(0, color=PALETTE["text"], linewidth=0.8, linestyle=(0, (4, 4)))
+        ax.set_yticks(y)
+        ax.set_yticklabels(rows["person"])
+        ax.set_xlabel("Slope (percentage points of WR per 100 games)")
+        ax.set_title("Improvement slope - pp WR change per 100 games")
+        _subtitle(
+            ax,
+            "Logistic regression of win on game-index, slope reported at each "
+            "player's mean WR. CI from Wald. Positive = trending up over dataset window.",
+        )
+        _polish_ax(ax)
+
+        max_abs = max(
+            8.0,
+            float(np.nanmax(np.abs(rows[["ci_lo_pp", "ci_hi_pp", "slope_pp"]].to_numpy()))) + 4.0,
+        )
+        ax.set_xlim(-max_abs, max_abs)
+
+        for yi, (_, r) in enumerate(rows.iterrows()):
+            label = f"{r['slope_pp']:+.1f}pp / 100g  (beta p={r['p_value']:.3f})"
+            sign_pad = 1 if r["slope_pp"] >= 0 else -1
+            anchor = r["ci_hi_pp"] if r["slope_pp"] >= 0 else r["ci_lo_pp"]
+            if not np.isfinite(anchor):
+                anchor = r["slope_pp"]
+            ax.annotate(
+                label,
+                xy=(anchor, yi),
+                xytext=(6 * sign_pad, 0),
+                textcoords="offset points",
+                va="center",
+                ha="left" if r["slope_pp"] >= 0 else "right",
+                fontsize=9,
+                color=PALETTE["text"],
+            )
+
+        fig.tight_layout()
+        return fig
+
+    # --- per-person trajectory ----------------------------------------------
+    person = _resolve_person(df, player)
+    if person is None:
+        return _empty_figure("No games to plot")
+    sub = df[df["person"] == person].sort_values("game_start").reset_index(drop=True)
+    n = len(sub)
+    if n < _IMPROVEMENT_MIN_GAMES:
+        return _empty_figure(
+            f"Need >={_IMPROVEMENT_MIN_GAMES} games for slope estimate ({n} games)"
+        )
+
+    wins = sub["win"].to_numpy(dtype=float)
+    fit = _fit_improvement_slope(wins)
+    if fit is None:
+        return _empty_figure(f"Cannot fit slope - degenerate outcomes ({n} games)")
+
+    idx = np.arange(n, dtype=float)
+    rolling = sub["win"].rolling(window=_IMPROVEMENT_ROLLING_WINDOW, min_periods=10).mean()
+
+    # Predicted P(win) at evenly-spaced indices for the dashed overlay.
+    smooth_idx = np.linspace(0.0, n - 1, num=min(400, n))
+    z = fit["intercept"] + fit["beta"] * (smooth_idx / 100.0)
+    z = np.clip(z, -30.0, 30.0)
+    fit_curve = 1.0 / (1.0 + np.exp(-z))
+
+    fig, ax = plt.subplots(figsize=(13, 4.6))
+    ax.plot(
+        idx,
+        rolling,
+        color=PALETTE["primary"],
+        linewidth=2.0,
+        label=f"Rolling {_IMPROVEMENT_ROLLING_WINDOW}-game WR",
+    )
+    ax.plot(
+        smooth_idx,
+        fit_curve,
+        color=PALETTE["accent_orange"],
+        linewidth=1.8,
+        linestyle=(0, (5, 4)),
+        label="Logistic fit",
+    )
+    _baseline(ax)
+    ax.set_ylim(0.0, 1.05)
+    ax.set_xlabel("Game index (0 = oldest)")
+    ax.set_ylabel("Win rate")
+    name = _display_label(player) or person
+    ax.set_title(f"Improvement trajectory - {name}")
+    if np.isfinite(fit["ci_lo_pp"]) and np.isfinite(fit["ci_hi_pp"]):
+        ci_txt = f" [95% CI {fit['ci_lo_pp']:+.1f}, {fit['ci_hi_pp']:+.1f}]"
+    else:
+        ci_txt = ""
+    _subtitle(
+        ax,
+        f"{_IMPROVEMENT_ROLLING_WINDOW}-game rolling WR (solid) vs logistic fit (dashed). "
+        f"Slope: {fit['slope_pp']:+.1f}pp / 100 games (p={fit['p_value']:.3f}).",
+    )
+
+    annotation = (
+        f"slope {fit['slope_pp']:+.1f}pp / 100g{ci_txt}\n"
+        f"beta p={fit['p_value']:.3f}  ·  n={n}  ·  mean WR {fit['mean_wr']:.0%}"
+    )
+    ax.text(
+        0.99,
+        0.02,
+        annotation,
+        transform=ax.transAxes,
+        ha="right",
+        va="bottom",
+        fontsize=9,
+        color=PALETTE["text"],
+        bbox={
+            "facecolor": "white",
+            "edgecolor": PALETTE["spine"],
+            "boxstyle": "round,pad=0.4",
+            "alpha": 0.9,
+        },
+    )
+    ax.legend(loc="upper left", fontsize=9)
+    _polish_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
 # --- registry --------------------------------------------------------------
 
 #: All aggregate plot functions, in the order the runner script + notebook
@@ -6716,4 +6947,5 @@ ALL_PLOTS = [
     ("31_player_role_matrix", plot_player_role_matrix),
     ("32_tilt_by_gap", plot_tilt_by_gap),
     ("33_session_position_wr", plot_session_position_wr),
+    ("34_improvement_slope", plot_improvement_slope),
 ]

@@ -10871,6 +10871,192 @@ def plot_recent_form(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
     return _plot_recent_form_person(df, player)
 
 
+# --- session stamina (marathon penalty) ------------------------------------
+
+_STAMINA_BIN_EDGES = [0.0, 1.0, 2.0, 3.0, 5.0, np.inf]
+_STAMINA_BIN_LABELS = ["<1h", "1-2h", "2-3h", "3-5h", "5+h"]
+_STAMINA_MIN_GAMES_PER_PERSON = 100
+_STAMINA_MIN_SESSIONS_AGGREGATE = 10
+_STAMINA_MIN_SESSIONS_PER_BUCKET = 5
+
+
+def _stamina_sessions_frame(d: pd.DataFrame) -> pd.DataFrame:
+    """Collapse match rows to one row per (person, session_id).
+
+    Filters out single-game "sessions" — a 1/1 or 0/1 WR isn't a
+    meaningful data point and would dominate the <1h bucket otherwise.
+    """
+    sessions = (
+        d.dropna(subset=["win", "session_id", "duration_sec"])
+        .groupby(["person", "session_id"], observed=True)
+        .agg(games=("win", "size"), wins=("win", "sum"), dur_sec=("duration_sec", "sum"))
+        .reset_index()
+    )
+    sessions = sessions[sessions["games"] >= 2].copy()
+    if sessions.empty:
+        return sessions
+    sessions["dur_h"] = sessions["dur_sec"] / 3600.0
+    sessions["wr"] = sessions["wins"] / sessions["games"]
+    sessions["bucket"] = pd.cut(
+        sessions["dur_h"],
+        bins=_STAMINA_BIN_EDGES,
+        labels=_STAMINA_BIN_LABELS,
+        right=False,
+        include_lowest=True,
+    )
+    return sessions
+
+
+def plot_session_stamina(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Marathon-penalty WR by total session duration.
+
+    Each (person, session) collapses to one data point: total play hours
+    in that sitting and the session's WR. Sessions are bucketed by length
+    (<1h, 1-2h, 2-3h, 3-5h, 5+h). Aggregate macro-averages session WRs
+    within each bucket (every session weighs the same regardless of game
+    count) and bootstraps a 95% CI. Per-person mode pools wins and games
+    within bucket and reports Wilson 95% CIs.
+    """
+    d = _filter_player(df, player)
+    if d.empty or "session_id" not in d.columns:
+        return _empty_figure("No games to plot")
+
+    is_aggregate_mode = _is_aggregate(player)
+
+    if not is_aggregate_mode:
+        n_games = int(len(d))
+        if n_games < _STAMINA_MIN_GAMES_PER_PERSON:
+            return _empty_figure(f"Need >=100 games ({n_games})")
+
+    sessions = _stamina_sessions_frame(d)
+    if sessions.empty:
+        return _empty_figure("Insufficient session data")
+
+    if is_aggregate_mode and len(sessions) < _STAMINA_MIN_SESSIONS_AGGREGATE:
+        return _empty_figure("Insufficient session data")
+
+    rng = np.random.default_rng(63)
+    n_boot = 2000
+
+    rows: list[dict] = []
+    if is_aggregate_mode:
+        for label in _STAMINA_BIN_LABELS:
+            cell = sessions[sessions["bucket"] == label]
+            if len(cell) < _STAMINA_MIN_SESSIONS_PER_BUCKET:
+                continue
+            wrs = cell["wr"].to_numpy()
+            boot = rng.choice(wrs, size=(n_boot, wrs.size), replace=True).mean(axis=1)
+            rows.append(
+                {
+                    "bucket": label,
+                    "wr": float(wrs.mean()),
+                    "n_sessions": int(len(cell)),
+                    "n_games": int(cell["games"].sum()),
+                    "ci_lo": float(np.quantile(boot, 0.025)),
+                    "ci_hi": float(np.quantile(boot, 0.975)),
+                }
+            )
+    else:
+        for label in _STAMINA_BIN_LABELS:
+            cell = sessions[sessions["bucket"] == label]
+            if len(cell) < _STAMINA_MIN_SESSIONS_PER_BUCKET:
+                continue
+            wins = int(cell["wins"].sum())
+            games = int(cell["games"].sum())
+            if games == 0:
+                continue
+            lo, hi = wilson_ci(wins, games)
+            rows.append(
+                {
+                    "bucket": label,
+                    "wr": wins / games,
+                    "n_sessions": int(len(cell)),
+                    "n_games": games,
+                    "ci_lo": lo,
+                    "ci_hi": hi,
+                }
+            )
+
+    if not rows:
+        return _empty_figure("No session-duration buckets met the minimum sample threshold")
+
+    series = pd.DataFrame(rows)
+    # Preserve fixed bucket order regardless of which buckets survived.
+    bucket_order = {b: i for i, b in enumerate(_STAMINA_BIN_LABELS)}
+    series["order"] = series["bucket"].map(bucket_order)
+    series = series.sort_values("order").reset_index(drop=True)
+
+    if is_aggregate_mode:
+        per_person_overall = d.groupby("person")["win"].mean()
+        baseline_wr = float(per_person_overall.mean())
+        baseline_label = f"macro-average overall WR {baseline_wr:.0%}"
+    else:
+        baseline_wr = float(d["win"].mean())
+        baseline_label = f"overall WR {baseline_wr:.0%}"
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    xs = np.arange(len(series))
+    ys = series["wr"].to_numpy()
+    colour = PALETTE["primary"]
+
+    ax.plot(xs, ys, color=colour, marker="o", markersize=7, linewidth=2.2)
+    ax.fill_between(
+        xs,
+        series["ci_lo"].to_numpy(),
+        series["ci_hi"].to_numpy(),
+        color=colour,
+        alpha=0.18,
+        linewidth=0,
+    )
+
+    for xi, yi, n_s, n_g in zip(
+        xs,
+        ys,
+        series["n_sessions"].to_numpy(),
+        series["n_games"].to_numpy(),
+        strict=False,
+    ):
+        ax.annotate(
+            f"n={int(n_s)} sessions, {int(n_g)} games",
+            xy=(xi, yi),
+            xytext=(0, 10),
+            textcoords="offset points",
+            ha="center",
+            va="bottom",
+            fontsize=8,
+            color=PALETTE["muted"],
+        )
+
+    _baseline(ax, y=baseline_wr, label=baseline_label)
+
+    ax.set_xticks(xs)
+    ax.set_xticklabels(series["bucket"].tolist())
+    ax.set_xlabel("Total session duration")
+    ax.set_ylabel("Win rate")
+    ax.set_ylim(0.0, 1.0)
+
+    if is_aggregate_mode:
+        ax.set_title("Marathon penalty - WR by session length")
+        subtitle = (
+            "Macro WR per session-duration bucket. Each session is one data point. "
+            f"Sessions defined by <{SESSION_GAP_MIN}min gap between games."
+        )
+    else:
+        name = _display_label(player) or ""
+        ax.set_title(f"Marathon penalty - {name}")
+        subtitle = (
+            f"Pooled WR per session-duration bucket for {name}. "
+            f"Sessions defined by <{SESSION_GAP_MIN}min gap between games."
+        )
+
+    _subtitle(ax, subtitle)
+    ax.legend(loc="lower right", fontsize=9)
+    _polish_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
 # --- registry --------------------------------------------------------------
 
 #: All aggregate plot functions, in the order the runner script + notebook
@@ -10925,4 +11111,5 @@ ALL_PLOTS = [
     ("47_champion_meta_shifts", plot_champion_meta_shifts),
     ("48_insights_card", plot_insights_card),
     ("49_recent_form", plot_recent_form),
+    ("50_session_stamina", plot_session_stamina),
 ]

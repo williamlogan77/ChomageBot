@@ -683,9 +683,7 @@ class MatchAnalysis(commands.Cog):
             ephemeral=True,
         )
 
-    async def _post_panel(
-        self, channel: discord.abc.Messageable
-    ) -> tuple[discord.Message, object]:
+    async def _post_panel(self, channel: discord.abc.Messageable) -> tuple[discord.Message, object]:
         """Load matches, build the view, post the panel. Shared by the
         admin slash command and the sticky-pin loop. Updates
         ``self._panel_message_id`` so the next sticky check knows which
@@ -805,6 +803,74 @@ class MatchAnalysis(commands.Cog):
         await asyncio.sleep(60)
         if not self.sticky_panel.is_running():
             self.sticky_panel.start()
+
+    @app_commands.command(
+        name="chart_index",
+        description="List all available match-analysis charts with descriptions",
+    )
+    @app_commands.guild_only()
+    async def chart_index(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+
+        # Reverse map fn → stem so panel buttons (which key by fn, not stem)
+        # can be cross-checked against ALL_PLOTS for orphan detection.
+        stem_by_fn = {fn: stem for stem, fn in analysis.ALL_PLOTS}
+
+        panel_lines: list[str] = []
+        seen_stems: set[str] = set()
+        for _label, emoji, fn, title in CHART_DEFS:
+            stem = stem_by_fn.get(fn)
+            if stem is None:
+                log.warning(f"CHART_DEFS entry {title!r} fn missing from ALL_PLOTS")
+                continue
+            seen_stems.add(stem)
+            panel_lines.append(f"{emoji} **{title}**")
+
+        plot_by_stem = dict(analysis.ALL_PLOTS)
+        more_lines: list[str] = []
+        for stem, label, emoji, description in MORE_CHART_DEFS:
+            if stem not in plot_by_stem:
+                log.warning(f"MORE_CHART_DEFS stem {stem!r} missing from ALL_PLOTS")
+                continue
+            seen_stems.add(stem)
+            more_lines.append(f"{emoji} **{label}** — {description}")
+
+        orphan_stems = [s for s, _ in analysis.ALL_PLOTS if s not in seen_stems]
+
+        panel_embed = discord.Embed(
+            title="📊 Panel buttons",
+            description=(
+                "Click any of these directly on the match-stats panel.\n\n" + "\n".join(panel_lines)
+            ),
+            color=discord.Color.blurple(),
+        )
+        panel_embed.set_footer(
+            text=(
+                "Tip: chart button → all-players view; dropdown → focus on one person. "
+                "Inside the chart you can pivot without leaving the message."
+            )
+        )
+
+        more_embed = discord.Embed(
+            title='🔬 More analytics (click "More ▾" in the explorer)',
+            description="\n".join(more_lines),
+            color=discord.Color.dark_teal(),
+        )
+
+        embeds = [panel_embed, more_embed]
+        if orphan_stems:
+            orphan_lines = [f"`{stem}`" for stem in orphan_stems]
+            orphan_embed = discord.Embed(
+                title="🔧 Other charts",
+                description=(
+                    "Not bound to any menu — reachable only via the notebook "
+                    "or batch runner in `notebooks/`.\n\n" + "\n".join(orphan_lines)
+                ),
+                color=discord.Color.greyple(),
+            )
+            embeds.append(orphan_embed)
+
+        await interaction.followup.send(embeds=embeds, ephemeral=True)
 
     @app_commands.command(
         name="me",

@@ -232,6 +232,12 @@ MORE_CHART_DEFS = [
         "🔥",
         "Last 30/60/90d WR vs lifetime — who's hot/cold?",
     ),
+    (
+        "50_session_stamina",
+        "Session stamina",
+        "🏃",
+        "WR by total session length — does the marathon penalty exist?",
+    ),
 ]
 
 
@@ -463,10 +469,19 @@ class _ExplorerView(discord.ui.View):
 
 
 class _MoreAnalyticsView(discord.ui.View):
-    """Per-user ephemeral wrapper around a single Select listing every
-    chart that didn't fit on the main explorer's button grid. Picking an
-    option posts the chosen chart as a public follow-up so the channel
-    sees the result — the select itself stays ephemeral."""
+    """Per-user ephemeral wrapper around the chart-overflow selects. Lists
+    every chart that didn't fit on the main explorer's button grid.
+    Picking an option posts the chosen chart as a public follow-up so the
+    channel sees the result — the select itself stays ephemeral.
+
+    Discord caps each ``discord.ui.Select`` at 25 options. When
+    MORE_CHART_DEFS grows past that, options are paginated across two
+    selects rather than silently truncated.
+    """
+
+    # Per-select cap. Discord allows 25; keep one slot in reserve so we
+    # don't accidentally tip over when adding emoji/description metadata.
+    _MAX_OPTIONS_PER_SELECT = 24
 
     def __init__(self, df, invoker_id: int, person: str | None):
         super().__init__(timeout=EXPLORER_TIMEOUT_SECONDS)
@@ -493,10 +508,29 @@ class _MoreAnalyticsView(discord.ui.View):
             )
             self._option_meta[stem] = (label, emoji)
 
-        select = discord.ui.Select(placeholder="More analytics ↓", options=options, row=0)
-        select.callback = self._on_select
-        self.add_item(select)
-        self._select = select
+        # Single-select layout preserved verbatim when we're under the
+        # Discord cap. Paginated layout kicks in only when we'd otherwise
+        # truncate.
+        self._selects: list[discord.ui.Select] = []
+        if len(options) <= self._MAX_OPTIONS_PER_SELECT:
+            select = discord.ui.Select(placeholder="More analytics ↓", options=options, row=0)
+            select.callback = self._on_select
+            self.add_item(select)
+            self._selects.append(select)
+        else:
+            # Balanced split — ceil(n/2) on page 1, remainder on page 2.
+            half = (len(options) + 1) // 2
+            chunks = [options[:half], options[half:]]
+            total = len(chunks)
+            for idx, chunk in enumerate(chunks):
+                select = discord.ui.Select(
+                    placeholder=f"More analytics ({idx + 1}/{total}) ↓",
+                    options=chunk,
+                    row=idx,
+                )
+                select.callback = self._on_select
+                self.add_item(select)
+                self._selects.append(select)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.invoker_id:
@@ -507,7 +541,9 @@ class _MoreAnalyticsView(discord.ui.View):
         return True
 
     async def _on_select(self, interaction: discord.Interaction) -> None:
-        stem = self._select.values[0]
+        # Multiple selects share this callback — resolve which one fired
+        # via the interaction's custom_id rather than capturing per-select.
+        stem = interaction.data["values"][0]
         plot_by_stem = dict(analysis.ALL_PLOTS)
         fn = plot_by_stem.get(stem)
         if fn is None:

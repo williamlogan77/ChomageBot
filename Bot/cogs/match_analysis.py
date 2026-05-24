@@ -1409,6 +1409,7 @@ class MatchAnalysis(commands.Cog):
                     "`/me_todo [user]` — Prescriptive bullet advice",
                     "`/champ <name>` — Group-wide stats for one champion",
                     "`/compare <a> <b>` — Side-by-side player comparison",
+                    "`/streak [user]` — Current active win/loss streak",
                     "`/leaderboard_week [days]` — Past-N-days WR ranking",
                     "`/chart_index` — This catalog",
                     "`/refresh_db_cache` — Force cache invalidation (admin)",
@@ -1610,6 +1611,49 @@ class MatchAnalysis(commands.Cog):
             return
 
         embed = _build_me_todo_embed(df, sub, person_name)
+        await interaction.followup.send(embed=embed)
+
+    @app_commands.command(name="streak", description="Show your current active win/loss streak")
+    @app_commands.guild_only()
+    @app_commands.describe(user="(optional) look up another player's current streak")
+    async def streak(
+        self,
+        interaction: discord.Interaction,
+        user: discord.User | None = None,
+    ) -> None:
+        target = user or interaction.user
+        await interaction.response.defer(ephemeral=False)
+
+        df = await _load_matches_cached(self.bot.db_path)
+        matched = df[df["discord_user_id"].astype(str) == str(target.id)]
+        if matched.empty:
+            await interaction.followup.send(
+                f"No League account linked for {target.mention}. Use /add_player.",
+                ephemeral=True,
+            )
+            return
+
+        person_name = str(matched["person"].iloc[0])
+        sub = matched.sort_values("game_start")
+        last_outcome = int(sub["win"].iloc[-1])
+        streak = 0
+        for w in reversed(sub["win"].values):
+            if int(w) == last_outcome:
+                streak += 1
+            else:
+                break
+
+        last_game = sub["game_start"].iloc[-1]
+        outcome_word = "win" if last_outcome == 1 else "loss"
+        emoji = "🔥" if last_outcome == 1 else "🥶"
+        streak_word = f"{streak}-game {outcome_word} streak"
+
+        embed = discord.Embed(
+            title=f"{emoji} {person_name}",
+            description=f"Currently on a **{streak_word}**.\nLast game: {last_game:%Y-%m-%d %H:%M}",
+            color=discord.Color.green() if last_outcome == 1 else discord.Color.red(),
+        )
+        embed.set_footer(text=f"{len(sub):,} total games · WR {sub['win'].mean():.0%}")
         await interaction.followup.send(embed=embed)
 
     @app_commands.command(

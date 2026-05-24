@@ -534,6 +534,223 @@ def _build_me_text_embed(df: pd.DataFrame, sub: pd.DataFrame, person_name: str) 
     return embed
 
 
+def _build_me_todo_embed(df: pd.DataFrame, sub: pd.DataFrame, person_name: str) -> discord.Embed:
+    """Prescriptive 3-5 bullet to-do list for /me_todo.
+
+    Bullets fire in priority order: drop-a-SELL, avoid-cold-cell,
+    lean-into-hot-cell, role-swap, comfort-pick-after-loss, recent-form,
+    pace-style. Each bullet has its own n-floor + magnitude gate. If
+    fewer than 3 valid actionable bullets, fall back to descriptive
+    stats so the user gets SOMETHING.
+    """
+    n_games = int(len(sub))
+    wr = float(sub["win"].mean())
+    bullets: list[str] = []
+
+    # Champion shrunken WR table — used by SELL and BUY bullets together.
+    # Computed once because the SELL bullet needs the top BUY for the
+    # "try {top_buy} instead" half of the template.
+    top_buy_name: str | None = None
+    top_buy_wr: float | None = None
+    sell_top = None
+    if n_games >= analysis._INSIGHTS_SWAP_MIN_GAMES:
+        baseline_wr = wr
+        prior_n = 30.0
+        champ = sub.groupby("champion")["win"].agg(["count", "sum"])
+        champ = champ.rename(columns={"count": "games", "sum": "wins"})
+        champ = champ[champ["games"] >= 3]
+        if not champ.empty:
+            champ["shrunk_wr"] = [
+                analysis.bayesian_shrunk_wr(int(w), int(n), baseline_wr, prior_n)
+                for w, n in zip(champ["wins"], champ["games"], strict=False)
+            ]
+            champ["play_freq"] = champ["games"] / n_games
+            champ["vs_baseline"] = champ["shrunk_wr"] - baseline_wr
+
+            buy = champ[(champ["shrunk_wr"] > baseline_wr + 0.02) & (champ["games"] >= 5)].copy()
+            if not buy.empty:
+                buy["score"] = buy["vs_baseline"] * (1.0 - buy["play_freq"])
+                buy = buy.sort_values("score", ascending=False)
+                top_buy_name = str(buy.index[0])
+                top_buy_wr = float(buy.iloc[0]["shrunk_wr"])
+
+            # Bullet 1 — SELL gate: tighter than _me_text (4pp + n>=20).
+            sell = champ[(champ["vs_baseline"] <= -0.04) & (champ["games"] >= 20)].copy()
+            if not sell.empty:
+                sell["score"] = (-sell["vs_baseline"]) * sell["play_freq"]
+                sell = sell.sort_values("score", ascending=False)
+                sell_top = sell.iloc[0]
+                sell_name = str(sell.index[0])
+                sell_wr = float(sell_top["shrunk_wr"])
+                sell_n = int(sell_top["games"])
+                sell_delta_pp = float(sell_top["vs_baseline"]) * 100.0
+                bullet = (
+                    f"Stop locking {sell_name} — {sell_wr:.0%} WR on {sell_n} games "
+                    f"({sell_delta_pp:+.1f}pp below your baseline)."
+                )
+                if top_buy_name is not None and top_buy_wr is not None:
+                    bullet += f" Try {top_buy_name} instead ({top_buy_wr:.0%})."
+                bullets.append(bullet)
+
+    # Bullets 2 + 3 — temporal cells. Same data prep as _me_text but with
+    # a 10pp delta gate on top of the n>=15 floor.
+    if not sub.empty:
+        gh = sub.copy()
+        gh["hour_bucket"] = gh["hour"].map(analysis._hour_bucket)
+        cells = (
+            gh.groupby(["dow", "hour_bucket"], observed=True)
+            .agg(games=("win", "size"), wins=("win", "sum"))
+            .reset_index()
+        )
+        cells = cells[cells["games"] >= analysis._INSIGHTS_CELL_MIN_GAMES]
+        if not cells.empty:
+            cells["wr"] = cells["wins"] / cells["games"]
+            cells["delta_pp"] = (cells["wr"] - wr) * 100.0
+
+            worst_cell = cells.sort_values("wr", ascending=True).iloc[0]
+            if worst_cell["delta_pp"] <= -10.0:
+                worst_day = analysis.DOW_LABELS[int(worst_cell["dow"])]
+                worst_part = str(worst_cell["hour_bucket"]).split(" ")[0]
+                bullets.append(
+                    f"Skip {worst_day} {worst_part} games — your WR there is "
+                    f"{worst_cell['wr']:.0%} on {int(worst_cell['games'])} games "
+                    f"({worst_cell['delta_pp']:+.1f}pp below baseline)."
+                )
+
+            best_cell = cells.sort_values("wr", ascending=False).iloc[0]
+            if best_cell["delta_pp"] >= 10.0:
+                best_day = analysis.DOW_LABELS[int(best_cell["dow"])]
+                best_part = str(best_cell["hour_bucket"]).split(" ")[0]
+                bullets.append(
+                    f"Queue {best_day} {best_part} — your WR there is "
+                    f"{best_cell['wr']:.0%} (+{best_cell['delta_pp']:.1f}pp above baseline)."
+                )
+
+    # Bullet 4 — role swap. Tighter n-floor than _me_text (n>=30 each)
+    # and a 5pp gap requirement.
+    role_d = sub[sub["role"].isin(analysis.ROLE_ORDER)]
+    if not role_d.empty:
+        role_agg = (
+            role_d.groupby("role").agg(games=("win", "size"), wins=("win", "sum")).reset_index()
+        )
+        role_agg = role_agg[role_agg["games"] >= 30]
+        if len(role_agg) >= 2:
+            role_agg["wr"] = role_agg["wins"] / role_agg["games"]
+            role_agg = role_agg.sort_values("wr", ascending=False)
+            best_role = role_agg.iloc[0]
+            worst_role = role_agg.iloc[-1]
+            gap_pp = (best_role["wr"] - worst_role["wr"]) * 100.0
+            if gap_pp >= 5.0:
+                bullets.append(
+                    f"Play more {best_role['role']} ({best_role['wr']:.0%} on "
+                    f"{int(best_role['games'])}), avoid {worst_role['role']} "
+                    f"({worst_role['wr']:.0%} on {int(worst_role['games'])})."
+                )
+
+    # Bullet 5 — comfort pick after loss. WR(stay) − WR(switch) given the
+    # previous game was a loss; fires when staying is +3pp or more.
+    hc = sub.sort_values("game_start").reset_index(drop=True)
+    hc = hc.assign(
+        prev_champion=hc["champion"].shift(1),
+        prev_win=hc["win"].shift(1),
+    )
+    hc = hc.dropna(subset=["prev_win", "prev_champion"])
+    if not hc.empty:
+        hc = hc.copy()
+        hc["prev_win"] = hc["prev_win"].astype(int)
+        hc["same_champion"] = (hc["champion"] == hc["prev_champion"]).astype(int)
+        after_loss = hc[hc["prev_win"] == 0]
+        stay = after_loss[after_loss["same_champion"] == 1]
+        switch = after_loss[after_loss["same_champion"] == 0]
+        if len(stay) >= 15 and len(switch) >= 15:
+            payoff_pp = (float(stay["win"].mean()) - float(switch["win"].mean())) * 100.0
+            if payoff_pp >= 3.0:
+                bullets.append(
+                    "After a loss: stay on your champion. Switching costs you "
+                    f"~{payoff_pp:.1f}pp."
+                )
+
+    # Bullet 6 — recent form. 30d delta of >=5pp either direction,
+    # keeping the n_30 >= 8 floor used by _me_text.
+    game_start_all = pd.to_datetime(df["game_start"])
+    now = game_start_all.max()
+    if pd.notna(now):
+        sub_ts = pd.to_datetime(sub["game_start"])
+        recent_mask = sub_ts >= (now - pd.Timedelta(days=30))
+        n_30 = int(recent_mask.sum())
+        if n_30 >= 8:
+            wr_30 = float(sub.loc[recent_mask, "win"].mean())
+            delta_pp = (wr_30 - wr) * 100.0
+            if delta_pp >= 5.0:
+                bullets.append(
+                    f"You're on form — recent 30d at {wr_30:.0%} "
+                    f"(+{delta_pp:.1f}pp vs lifetime)."
+                )
+            elif delta_pp <= -5.0:
+                bullets.append(
+                    f"Recent form dip: 30d at {wr_30:.0%} ({delta_pp:+.1f}pp "
+                    "below lifetime). Take a break?"
+                )
+
+    # Bullet 7 — pace style. Welch's t on duration_min, wins vs losses;
+    # gate on |diff| >= 1.5min and p < 0.10.
+    wins_dur = sub.loc[sub["win"] == 1, "duration_min"].to_numpy()
+    losses_dur = sub.loc[sub["win"] == 0, "duration_min"].to_numpy()
+    if len(wins_dur) >= 2 and len(losses_dur) >= 2:
+        diff, p_pace = analysis._welch_t(wins_dur, losses_dur)
+        if abs(diff) >= 1.5 and p_pace < 0.10:
+            if diff < 0:
+                bullets.append(
+                    f"You're an early-game stomper (wins {diff:.1f}min shorter "
+                    f"than losses, p={p_pace:.3f}). Push tempo."
+                )
+            else:
+                bullets.append(
+                    f"You're a late scaler (wins {diff:+.1f}min longer than "
+                    f"losses, p={p_pace:.3f}). Play for scaling comps."
+                )
+
+    bullets = bullets[:5]
+
+    # Descriptive fallback so the user always gets something to read.
+    if len(bullets) < 3:
+        bullets.append(f"Lifetime: {wr:.0%} WR across {n_games} games.")
+        # Top-played champion by raw count.
+        top_played = sub["champion"].value_counts()
+        if not top_played.empty:
+            top_name = str(top_played.index[0])
+            top_n = int(top_played.iloc[0])
+            top_wr = float(sub.loc[sub["champion"] == top_name, "win"].mean())
+            bullets.append(f"Most-played: {top_name} ({top_n} games, {top_wr:.0%} WR).")
+        if top_buy_name is not None and top_buy_wr is not None:
+            bullets.append(f"Consider playing more {top_buy_name} ({top_buy_wr:.0%} shrunk WR).")
+        bullets = bullets[:5]
+
+    primary_hex = analysis.PALETTE["primary"].lstrip("#")
+    embed = discord.Embed(
+        title=f"📋 {person_name} — what to change",
+        color=discord.Color(int(primary_hex, 16)),
+        description="\n".join(f"• {b}" for b in bullets),
+    )
+
+    # Footer mirrors /me_text's percentile-vs-group line.
+    frame = analysis._stat_sheet_frame(df)
+    pct_label: str | None = None
+    if person_name in set(frame["person"]):
+        wr_values = frame["wr"].astype(float)
+        ranks = wr_values.rank(method="average")
+        focal_idx = int(frame.index[frame["person"] == person_name][0])
+        if len(wr_values) > 1:
+            pct = (ranks.iloc[focal_idx] - 1) / (len(wr_values) - 1) * 100.0
+            pct_int = int(round(pct))
+            pct_label = f"{pct_int}{_ordinal_suffix(pct_int)} pct vs group"
+    footer_parts = [f"{n_games} games"]
+    if pct_label is not None:
+        footer_parts.append(pct_label)
+    embed.set_footer(text=" · ".join(footer_parts))
+    return embed
+
+
 def _build_panel_embed() -> discord.Embed:
     """The static description sitting above the panel buttons."""
     embed = discord.Embed(
@@ -1313,6 +1530,50 @@ class MatchAnalysis(commands.Cog):
             return
 
         embed = _build_me_text_embed(df, sub, person_name)
+        await interaction.followup.send(embed=embed)
+
+    @app_commands.command(
+        name="me_todo",
+        description="3-5 actionable bullets — what to change to win more",
+    )
+    @app_commands.guild_only()
+    async def me_todo(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=False)
+
+        try:
+            df = await _load_matches_cached(self.bot.db_path)
+        except Exception as exc:
+            self.bot.logging.error(f"/me_todo data load failed: {exc!r}")
+            await interaction.followup.send(f"Failed to load match data: {exc!r}", ephemeral=True)
+            return
+
+        if df.empty:
+            await interaction.followup.send(
+                "No match data yet — run /backfill_all first.", ephemeral=True
+            )
+            return
+
+        matches = df[df["discord_user_id"].astype(str) == str(interaction.user.id)]
+        if matches.empty:
+            await interaction.followup.send(
+                f"No League account linked for {interaction.user.mention}. "
+                "Link one with `/add_player` first.",
+                ephemeral=True,
+            )
+            return
+
+        person_name = str(matches["person"].iloc[0])
+        sub = df[df["person"] == person_name]
+        n_games = int(len(sub))
+        if n_games < analysis._INSIGHTS_MIN_GAMES:
+            await interaction.followup.send(
+                f"Need >={analysis._INSIGHTS_MIN_GAMES} games for a to-do list "
+                f"(you have {n_games}).",
+                ephemeral=True,
+            )
+            return
+
+        embed = _build_me_todo_embed(df, sub, person_name)
         await interaction.followup.send(embed=embed)
 
     async def open_explorer(

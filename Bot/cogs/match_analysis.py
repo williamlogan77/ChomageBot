@@ -1811,6 +1811,137 @@ class MatchAnalysis(commands.Cog):
 
         await interaction.followup.send(embed=embed)
 
+    @app_commands.command(
+        name="compare",
+        description="Side-by-side stat comparison between two players",
+    )
+    @app_commands.guild_only()
+    @app_commands.describe(
+        user_a="First player to compare",
+        user_b="Second player to compare",
+    )
+    async def compare(
+        self,
+        interaction: discord.Interaction,
+        user_a: discord.User,
+        user_b: discord.User,
+    ) -> None:
+        await interaction.response.defer(ephemeral=False)
+
+        if user_a.id == user_b.id:
+            await interaction.followup.send("Pick two different users.", ephemeral=True)
+            return
+
+        try:
+            df = await _load_matches_cached(self.bot.db_path)
+        except Exception as exc:
+            self.bot.logging.error(f"/compare data load failed: {exc!r}")
+            await interaction.followup.send(f"Failed to load match data: {exc!r}", ephemeral=True)
+            return
+
+        if df.empty:
+            await interaction.followup.send(
+                "No match data yet — run /backfill_all first.", ephemeral=True
+            )
+            return
+
+        rows: dict[str, pd.DataFrame] = {}
+        for key, u in [("a", user_a), ("b", user_b)]:
+            matched = df[df["discord_user_id"].astype(str) == str(u.id)]
+            if matched.empty:
+                await interaction.followup.send(
+                    f"No League account linked for {u.mention}. "
+                    "Link one with `/add_player` first.",
+                    ephemeral=True,
+                )
+                return
+            rows[key] = matched
+
+        now = df["game_start"].max()
+        cutoff = now - pd.Timedelta(days=30)
+
+        metrics: dict[str, dict] = {}
+        for key, sub in rows.items():
+            n = len(sub)
+            wins = int(sub["win"].sum())
+            wr = wins / n
+            kda = (sub["kills"] + sub["assists"]) / sub["deaths"].clip(lower=1)
+            champ_counts = sub["champion"].value_counts()
+            entry = {
+                "name": str(sub["person"].iloc[0]),
+                "n": n,
+                "wr": wr,
+                "kda_mean": float(kda.mean()),
+                "kills_mean": float(sub["kills"].mean()),
+                "deaths_mean": float(sub["deaths"].mean()),
+                "assists_mean": float(sub["assists"].mean()),
+                "top_champ": champ_counts.index[0] if len(champ_counts) else "—",
+                "top_champ_n": int(champ_counts.iloc[0]) if len(champ_counts) else 0,
+            }
+            if "role" in sub.columns:
+                roles = sub[sub["role"] != "UNKNOWN"]["role"].value_counts()
+                entry["top_role"] = roles.index[0] if len(roles) else "—"
+            else:
+                entry["top_role"] = "—"
+
+            recent = sub[sub["game_start"] >= cutoff]
+            if len(recent) >= 5:
+                entry["wr_30d"] = float(recent["win"].mean())
+                entry["n_30d"] = len(recent)
+            else:
+                entry["wr_30d"] = None
+                entry["n_30d"] = len(recent)
+
+            wins_seq = sub.sort_values("game_start")["win"].values
+            max_win = max_loss = cur_w = cur_l = 0
+            for w in wins_seq:
+                if w == 1:
+                    cur_w += 1
+                    cur_l = 0
+                    max_win = max(max_win, cur_w)
+                else:
+                    cur_l += 1
+                    cur_w = 0
+                    max_loss = max(max_loss, cur_l)
+            entry["max_win_streak"] = max_win
+            entry["max_loss_streak"] = max_loss
+
+            metrics[key] = entry
+
+        a = metrics["a"]
+        b = metrics["b"]
+
+        embed = discord.Embed(
+            title=f"⚔️ {a['name']} vs {b['name']}",
+            color=discord.Color(int(analysis.PALETTE["primary"].lstrip("#"), 16)),
+        )
+
+        def fmt_pair(label, a_val, b_val, fmt="{:.0%}"):
+            a_s = fmt.format(a_val) if a_val is not None else "—"
+            b_s = fmt.format(b_val) if b_val is not None else "—"
+            return f"`{label:<12}` {a_s:>10}  vs  {b_s:>10}"
+
+        lines = [
+            fmt_pair("WR", a["wr"], b["wr"]),
+            fmt_pair("Games", a["n"], b["n"], "{:,}"),
+            fmt_pair("KDA", a["kda_mean"], b["kda_mean"], "{:.2f}"),
+            fmt_pair("Kills/g", a["kills_mean"], b["kills_mean"], "{:.1f}"),
+            fmt_pair("Deaths/g", a["deaths_mean"], b["deaths_mean"], "{:.1f}"),
+            fmt_pair("Assists/g", a["assists_mean"], b["assists_mean"], "{:.1f}"),
+            f"`Top role   ` {a['top_role']:>10}  vs  {b['top_role']:>10}",
+            f"`Top champ  ` {a['top_champ']:>10}  vs  {b['top_champ']:>10}",
+            f"`(plays)    ` {a['top_champ_n']:>10}  vs  {b['top_champ_n']:>10}",
+            fmt_pair("30d WR", a["wr_30d"], b["wr_30d"]),
+            fmt_pair("Max W str", a["max_win_streak"], b["max_win_streak"], "{:,}"),
+            fmt_pair("Max L str", a["max_loss_streak"], b["max_loss_streak"], "{:,}"),
+        ]
+        embed.description = "```\n" + "\n".join(lines) + "\n```"
+        embed.set_footer(
+            text=f"{a['n']:,} + {b['n']:,} = {a['n'] + b['n']:,} total games compared"
+        )
+
+        await interaction.followup.send(embed=embed)
+
     async def open_explorer(
         self, interaction: discord.Interaction, chart_idx: int, person: str | None
     ) -> None:

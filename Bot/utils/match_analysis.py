@@ -674,6 +674,49 @@ def compute_lp_events(db_path: Path = DEFAULT_DB) -> pd.DataFrame:
     return one_game[["person", "timestamp", "outcome", "delta_score"]].reset_index(drop=True)
 
 
+def compute_tier_at_match(df: pd.DataFrame, history_df: pd.DataFrame) -> pd.DataFrame:
+    """For each match in ``df``, stamp the player's visible tier+division
+    at game-start by joining against ``history_df`` (one row per LP poll).
+
+    Both frames are keyed by ``person`` rather than ``puuid`` — ``load_rank_history``
+    already collapses Riot accounts to the owning Discord person, and the
+    matches frame does the same. A multi-account player gets the latest
+    rank snapshot from any of their accounts at the time of the match.
+
+    UNRANKED is filled for matches that pre-date any league_history row
+    for that person (early backfilled match_stats with no rank coverage yet).
+    """
+    if df.empty:
+        out = df.copy()
+        out["tier"] = pd.Series(dtype=object)
+        out["division"] = pd.Series(dtype=object)
+        return out
+
+    # merge_asof needs both frames globally sorted by the ``on`` key.
+    # Don't trust the caller's ordering — load_matches sorts by
+    # (person, game_start), which breaks the global ``game_start`` order.
+    left = df.sort_values("game_start").reset_index(drop=True)
+    if history_df.empty:
+        left["tier"] = "UNRANKED"
+        left["division"] = None
+        return left
+    right = (
+        history_df[["person", "timestamp", "tier", "division"]]
+        .sort_values("timestamp")
+        .reset_index(drop=True)
+    )
+    merged = pd.merge_asof(
+        left,
+        right,
+        left_on="game_start",
+        right_on="timestamp",
+        by="person",
+        direction="backward",
+    )
+    merged["tier"] = merged["tier"].fillna("UNRANKED")
+    return merged.drop(columns=["timestamp"])
+
+
 def people_summary(df: pd.DataFrame) -> pd.DataFrame:
     """One row per Discord person: total games, account count, account names.
 
@@ -4943,6 +4986,144 @@ def plot_stats_summary(df: pd.DataFrame, player: str | None = None) -> plt.Figur
     return fig
 
 
+TIER_ORDER = [
+    "IRON",
+    "BRONZE",
+    "SILVER",
+    "GOLD",
+    "PLATINUM",
+    "EMERALD",
+    "DIAMOND",
+    "MASTER",
+    "GRANDMASTER",
+    "CHALLENGER",
+]
+
+
+def plot_tier_winrate(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Per-tier WR — does the player's edge survive when the competition gets harder?
+
+    Joins match_stats outcomes with league_history's tier at game-start.
+    Aggregate view: macro-averages per-person WR per tier across players
+    who have ≥20 games in that tier. Single-person view: their tier WR
+    with Wilson 95% CIs. Empty tiers (never reached) are skipped.
+    """
+    try:
+        ranks = load_rank_history(DEFAULT_DB)
+    except Exception as exc:
+        return _empty_figure(f"Could not load rank history: {exc!r}")
+    if ranks.empty:
+        return _empty_figure("No rank history available")
+
+    d = _filter_player(df, player)
+    if d.empty:
+        return _empty_figure("No matches for the selection")
+
+    stamped = compute_tier_at_match(d, ranks)
+    stamped = stamped[stamped["tier"].isin(TIER_ORDER)]
+    if stamped.empty:
+        return _empty_figure("No matches overlap rank history")
+
+    min_per_tier = 20
+    if _is_aggregate(player):
+        # Per-person WR per tier, then macro-mean across people with
+        # ≥20 games at that tier. Macro keeps a heavy Emerald grinder
+        # from drowning out the rest of the cohort's Emerald signal.
+        per_person = (
+            stamped.groupby(["tier", "person"])
+            .agg(games=("win", "size"), wins=("win", "sum"))
+            .reset_index()
+        )
+        per_person = per_person[per_person["games"] >= min_per_tier]
+        if per_person.empty:
+            return _empty_figure(f"No tier has ≥{min_per_tier} games for any player")
+        per_person["wr"] = per_person["wins"] / per_person["games"]
+        agg = (
+            per_person.groupby("tier")
+            .agg(
+                winrate=("wr", "mean"),
+                std=("wr", "std"),
+                n_people=("person", "nunique"),
+                games=("games", "sum"),
+            )
+            .reset_index()
+        )
+        agg["ci_lo"] = (agg["winrate"] - agg["std"].fillna(0)).clip(lower=0)
+        agg["ci_hi"] = (agg["winrate"] + agg["std"].fillna(0)).clip(upper=1)
+        subtitle_extra = (
+            f"Macro-mean across {agg['n_people'].max()} players "
+            f"(each weighted equally; ≥{min_per_tier} games per tier per player)."
+        )
+    else:
+        # Single player — Wilson CI on pooled tier wr.
+        agg = stamped.groupby("tier").agg(games=("win", "size"), wins=("win", "sum")).reset_index()
+        agg = agg[agg["games"] >= min_per_tier]
+        if agg.empty:
+            return _empty_figure(f"No tier with ≥{min_per_tier} games for this player")
+        agg["winrate"] = agg["wins"] / agg["games"]
+        cis = [wilson_ci(int(w), int(n)) for w, n in zip(agg["wins"], agg["games"], strict=False)]
+        agg["ci_lo"] = [c[0] for c in cis]
+        agg["ci_hi"] = [c[1] for c in cis]
+        agg["n_people"] = 1
+        subtitle_extra = "Whiskers = Wilson 95% CI."
+
+    # Order tiers top→bottom (Challenger at top). Reverse TIER_ORDER so
+    # the highest tier sits at the top row when matplotlib draws ascending y.
+    rank_pos = {t: i for i, t in enumerate(TIER_ORDER)}
+    agg["order"] = agg["tier"].map(rank_pos)
+    agg = agg.sort_values("order").reset_index(drop=True)
+
+    n_tiers = len(agg)
+    fig_h = max(3.5, n_tiers * 0.55 + 1.2)
+    fig, ax = plt.subplots(figsize=(11, fig_h))
+
+    y = np.arange(n_tiers)
+    means = agg["winrate"].to_numpy()
+    lo = agg["ci_lo"].to_numpy()
+    hi = agg["ci_hi"].to_numpy()
+    counts = agg["games"].to_numpy()
+
+    # Sample-weighted alpha so a tier built on 30 games visually recedes
+    # behind a tier built on 800. sqrt softens the contrast so the small
+    # bars stay readable.
+    max_n = max(counts.max(), 1)
+    alphas = np.clip(0.35 + 0.65 * np.sqrt(counts / max_n), 0.35, 1.0)
+    colours = [(*plt.matplotlib.colors.to_rgb(PALETTE["primary"]), a) for a in alphas]
+
+    ax.barh(y, means, color=colours, height=0.7)
+    ax.errorbar(
+        means,
+        y,
+        xerr=[means - lo, hi - means],
+        **WHISKER_STYLE,
+    )
+    ax.axvline(0.5, color=PALETTE["muted"], linewidth=0.8, linestyle=(0, (4, 4)), alpha=0.55)
+    ax.set_yticks(y)
+    ax.set_yticklabels([t.title() for t in agg["tier"]], color=PALETTE["text"])
+    ax.invert_yaxis()  # Challenger on top, Iron on bottom
+    ax.set_xlim(0, 1)
+    ax.set_xlabel("Win rate")
+    ax.set_title(_title("Win rate by rank at match time", player))
+    _subtitle(
+        ax,
+        "Higher tier = harder competition. Drops typically signal you're near your "
+        f"skill ceiling. {subtitle_extra}",
+    )
+    for yi, (wr, n) in enumerate(zip(means, counts, strict=False)):
+        ax.annotate(
+            f"{wr:.0%}  ·  n={int(n)}",
+            xy=(min(wr + 0.02, 0.97), yi),
+            xytext=(6, 0),
+            textcoords="offset points",
+            va="center",
+            fontsize=9,
+            color=PALETTE["text"],
+        )
+    _polish_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
 def summary_table(df: pd.DataFrame) -> pd.DataFrame:
     """Compact per-person summary: games, win rate, mean KDA, mean duration,
     favourite champion."""
@@ -4992,4 +5173,5 @@ ALL_PLOTS = [
     ("22_model_calibration", plot_model_calibration),
     ("23_actions_card", plot_actions_card),
     ("24_per_player_predictability", plot_per_player_predictability),
+    ("25_tier_winrate", plot_tier_winrate),
 ]

@@ -8000,6 +8000,299 @@ def _plot_mastery_per_person(
     return fig
 
 
+# --- 40. Champion rust effect ----------------------------------------------
+
+_RUST_BUCKET_EDGES = [0, 1, 3, 7, 30, 90, np.inf]
+_RUST_BUCKET_LABELS = ["<1d", "1-3d", "3-7d", "7-30d", "30-90d", ">90d"]
+_RUST_MIN_GAMES_PER_PAIR = 10
+_RUST_MIN_SAMPLES_PER_BUCKET = 3
+_RUST_MIN_GAMES_PER_PERSON = 100
+
+
+def _rust_pair_buckets(df: pd.DataFrame) -> pd.DataFrame:
+    """Per-game rust_days + bucket for (person, champion) pairs with >=10 games.
+
+    Sort by (person, champion, game_start) then shift to get the previous
+    game on THAT champion for THAT person. The first game on a champion
+    has no rust (NaN) and is dropped.
+    """
+    d = df[["person", "champion", "game_start", "win"]].copy()
+    d = d.sort_values(["person", "champion", "game_start"]).reset_index(drop=True)
+
+    games_per_pair = d.groupby(["person", "champion"])["win"].transform("size")
+    d = d[games_per_pair >= _RUST_MIN_GAMES_PER_PAIR].copy()
+    if d.empty:
+        return d
+
+    prev = d.groupby(["person", "champion"])["game_start"].shift(1)
+    d["rust_days"] = (d["game_start"] - prev) / pd.Timedelta(days=1)
+    d = d.dropna(subset=["rust_days"]).copy()
+    if d.empty:
+        return d
+
+    d["bucket"] = pd.cut(
+        d["rust_days"],
+        bins=_RUST_BUCKET_EDGES,
+        labels=_RUST_BUCKET_LABELS,
+        right=False,
+        ordered=True,
+    )
+    return d
+
+
+def _rust_pair_bucket_wr(d: pd.DataFrame) -> pd.DataFrame:
+    """Per-(person, champion, bucket) WR, restricted to cells with >=3 samples."""
+    grp = d.groupby(["person", "champion", "bucket"], observed=True).agg(
+        games=("win", "size"), wins=("win", "sum")
+    )
+    grp = grp[grp["games"] >= _RUST_MIN_SAMPLES_PER_BUCKET].reset_index()
+    grp["wr"] = grp["wins"] / grp["games"]
+    return grp
+
+
+def _rust_bootstrap_ci(values: np.ndarray, n_boot: int = 1000) -> tuple[float, float]:
+    """2.5 / 97.5 percentile of resampled means. Returns (lo, hi)."""
+    if len(values) == 0:
+        return (np.nan, np.nan)
+    rng = np.random.default_rng(20260524)
+    n = len(values)
+    means = np.empty(n_boot)
+    for i in range(n_boot):
+        sample = rng.choice(values, size=n, replace=True)
+        means[i] = sample.mean()
+    return (float(np.percentile(means, 2.5)), float(np.percentile(means, 97.5)))
+
+
+def plot_champion_rust(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Champion rust effect — does time-off-a-champion hurt WR?
+
+    For each (person, champion) pair with >=10 games we compute the gap
+    since the previous game on that champion, bucket it, and roll up WR
+    per bucket. Aggregate is the macro mean of (pair, bucket) WRs across
+    pairs with >=3 samples in that bucket. Per-person view pools games
+    across all the focal player's champions and uses Wilson CIs.
+    """
+    pair_rows = _rust_pair_buckets(df)
+    if _is_aggregate(player):
+        if pair_rows.empty:
+            return _empty_figure("Need >=5 (player, champion) pairs with >=10 games")
+        return _plot_rust_aggregate(pair_rows)
+
+    label = _display_label(player) or "this player"
+    person = _resolve_person(df, player)
+    if person is None:
+        return _empty_figure(f"No games for {label}")
+    person_total_games = int((df["person"] == person).sum())
+    if person_total_games < _RUST_MIN_GAMES_PER_PERSON:
+        return _empty_figure(f"Need >=100 games for rust analysis ({person_total_games} games)")
+    person_rows = pair_rows[pair_rows["person"] == person]
+    if person_rows.empty:
+        return _empty_figure(f"No champion with >=10 games for {label}")
+    return _plot_rust_per_person(person_rows, label, player)
+
+
+def _plot_rust_aggregate(pair_rows: pd.DataFrame) -> plt.Figure:
+    bucket_wr = _rust_pair_bucket_wr(pair_rows)
+
+    n_pairs_total = bucket_wr[["person", "champion"]].drop_duplicates().shape[0]
+    if n_pairs_total < 5:
+        return _empty_figure("Need >=5 (player, champion) pairs with >=10 games")
+
+    per_bucket = (
+        bucket_wr.groupby("bucket", observed=True)
+        .agg(
+            wr=("wr", "mean"),
+            n_pairs=("wr", "size"),
+            n_games=("games", "sum"),
+        )
+        .reindex(_RUST_BUCKET_LABELS)
+    )
+
+    cis: list[tuple[float, float]] = []
+    for bucket in _RUST_BUCKET_LABELS:
+        vals = bucket_wr.loc[bucket_wr["bucket"] == bucket, "wr"].to_numpy()
+        cis.append(_rust_bootstrap_ci(vals))
+    per_bucket["ci_lo"] = [c[0] for c in cis]
+    per_bucket["ci_hi"] = [c[1] for c in cis]
+
+    global_macro = float(bucket_wr["wr"].mean())
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    x = np.arange(len(_RUST_BUCKET_LABELS))
+    means = per_bucket["wr"].to_numpy(dtype=float)
+    lo = per_bucket["ci_lo"].to_numpy(dtype=float)
+    hi = per_bucket["ci_hi"].to_numpy(dtype=float)
+    valid = ~np.isnan(means)
+
+    ax.plot(
+        x[valid],
+        means[valid],
+        color=PALETTE["primary"],
+        linewidth=2.0,
+        marker="o",
+        markersize=7,
+        zorder=3,
+    )
+    err_lo = np.where(np.isnan(means), 0.0, means - lo)
+    err_hi = np.where(np.isnan(means), 0.0, hi - means)
+    ax.errorbar(
+        x[valid],
+        means[valid],
+        yerr=[err_lo[valid], err_hi[valid]],
+        **WHISKER_STYLE,
+        zorder=2,
+    )
+
+    _baseline(ax, y=global_macro, label=f"Overall macro WR ({global_macro:.0%})")
+    ax.set_xticks(x)
+    ax.set_xticklabels(_RUST_BUCKET_LABELS)
+    ax.set_xlabel("Days since you last played this champion")
+    ax.set_ylabel("Macro-averaged win rate")
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
+    if np.any(valid):
+        top_hi = float(np.nanmax(hi[valid]))
+        bot_lo = float(np.nanmin(lo[valid]))
+    else:
+        top_hi, bot_lo = 0.6, 0.4
+    ax.set_ylim(max(0.0, bot_lo - 0.08), min(1.0, top_hi + 0.10))
+
+    ax.set_title("Champion rust - does time-off-a-champion hurt WR?")
+    _subtitle(
+        ax,
+        "Macro-averaged WR by days since you last played the same champion. "
+        "Each (player, champion) pair with >=10 games contributes; "
+        "per-bucket cells need >=3 samples to enter the mean.",
+    )
+
+    for xi, bucket in enumerate(_RUST_BUCKET_LABELS):
+        wr = per_bucket.loc[bucket, "wr"]
+        n_pairs = per_bucket.loc[bucket, "n_pairs"]
+        if pd.isna(wr):
+            ax.annotate(
+                "no data",
+                xy=(xi, ax.get_ylim()[0] + 0.01),
+                ha="center",
+                va="bottom",
+                fontsize=9,
+                color=PALETTE["muted"],
+            )
+            continue
+        ax.annotate(
+            f"n={int(n_pairs)}",
+            xy=(xi, float(wr)),
+            xytext=(0, 8),
+            textcoords="offset points",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+            color=PALETTE["text"],
+        )
+
+    ax.legend(loc="upper right", fontsize=9)
+    _polish_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
+def _plot_rust_per_person(person_rows: pd.DataFrame, label: str, player: str | None) -> plt.Figure:
+    # Pool across all of this person's qualifying champions; one WR per
+    # bucket via wins / games (Wilson CI on the binomial proportion).
+    per_bucket = (
+        person_rows.groupby("bucket", observed=True)
+        .agg(games=("win", "size"), wins=("win", "sum"))
+        .reindex(_RUST_BUCKET_LABELS)
+        .fillna(0)
+        .astype(int)
+    )
+    per_bucket["wr"] = np.where(
+        per_bucket["games"] > 0, per_bucket["wins"] / per_bucket["games"], np.nan
+    )
+
+    cis = [
+        wilson_ci(int(w), int(g)) if g > 0 else (float("nan"), float("nan"))
+        for w, g in zip(per_bucket["wins"], per_bucket["games"], strict=False)
+    ]
+    per_bucket["ci_lo"] = [c[0] for c in cis]
+    per_bucket["ci_hi"] = [c[1] for c in cis]
+
+    total_wins = int(per_bucket["wins"].sum())
+    total_games = int(per_bucket["games"].sum())
+    overall = total_wins / total_games if total_games > 0 else float("nan")
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    x = np.arange(len(_RUST_BUCKET_LABELS))
+    means = per_bucket["wr"].to_numpy(dtype=float)
+    lo = per_bucket["ci_lo"].to_numpy(dtype=float)
+    hi = per_bucket["ci_hi"].to_numpy(dtype=float)
+    valid = ~np.isnan(means)
+
+    ax.plot(
+        x[valid],
+        means[valid],
+        color=PALETTE["primary"],
+        linewidth=2.0,
+        marker="o",
+        markersize=7,
+        zorder=3,
+    )
+    err_lo = np.where(np.isnan(means), 0.0, means - lo)
+    err_hi = np.where(np.isnan(means), 0.0, hi - means)
+    ax.errorbar(
+        x[valid],
+        means[valid],
+        yerr=[err_lo[valid], err_hi[valid]],
+        **WHISKER_STYLE,
+        zorder=2,
+    )
+
+    if not np.isnan(overall):
+        _baseline(ax, y=overall, label=f"Personal WR ({overall:.0%})")
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(_RUST_BUCKET_LABELS)
+    ax.set_xlabel("Days since you last played this champion")
+    ax.set_ylabel("Win rate")
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
+    if np.any(valid):
+        top_hi = float(np.nanmax(hi[valid]))
+        bot_lo = float(np.nanmin(lo[valid]))
+    else:
+        top_hi, bot_lo = 0.6, 0.4
+    ax.set_ylim(max(0.0, bot_lo - 0.08), min(1.0, top_hi + 0.10))
+
+    ax.set_title(_title("Champion rust", player))
+    _subtitle(ax, "Your WR by days since last playing the same champion.")
+
+    for xi, bucket in enumerate(_RUST_BUCKET_LABELS):
+        wr = per_bucket.loc[bucket, "wr"]
+        n = int(per_bucket.loc[bucket, "games"])
+        if pd.isna(wr):
+            ax.annotate(
+                "no data",
+                xy=(xi, ax.get_ylim()[0] + 0.01),
+                ha="center",
+                va="bottom",
+                fontsize=9,
+                color=PALETTE["muted"],
+            )
+            continue
+        ax.annotate(
+            f"n={n}",
+            xy=(xi, float(wr)),
+            xytext=(0, 8),
+            textcoords="offset points",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+            color=PALETTE["text"],
+        )
+
+    ax.legend(loc="upper right", fontsize=9)
+    _polish_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
 # --- registry --------------------------------------------------------------
 
 #: All aggregate plot functions, in the order the runner script + notebook
@@ -8044,4 +8337,5 @@ ALL_PLOTS = [
     ("37_shrunk_champ_rankings", plot_shrunk_champ_rankings),
     ("38_champ_pool_concentration", plot_champ_pool_concentration),
     ("39_champion_mastery", plot_champion_mastery),
+    ("40_champion_rust", plot_champion_rust),
 ]

@@ -672,6 +672,60 @@ class MatchAnalysis(commands.Cog):
             ephemeral=True,
         )
 
+    @app_commands.command(
+        name="me",
+        description="Post your personal insights card (TL;DR of your stats)",
+    )
+    @app_commands.guild_only()
+    async def me(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=False)
+
+        try:
+            df = await asyncio.to_thread(analysis.load_matches, self.bot.db_path)
+        except Exception as exc:
+            self.bot.logging.error(f"/me data load failed: {exc!r}")
+            await interaction.followup.send(f"Failed to load match data: {exc!r}", ephemeral=True)
+            return
+
+        if df.empty:
+            await interaction.followup.send(
+                "No match data yet — run /backfill_all first.", ephemeral=True
+            )
+            return
+
+        # discord_user_id is stored as TEXT in SQLite for legacy reasons;
+        # cast both sides to str so we don't miss matches on dtype mismatch.
+        matches = df[df["discord_user_id"].astype(str) == str(interaction.user.id)]
+        if matches.empty:
+            await interaction.followup.send(
+                f"No League account linked for {interaction.user.mention}. "
+                "Link one with `/add_player` first.",
+                ephemeral=True,
+            )
+            return
+
+        person_name = str(matches["person"].iloc[0])
+        player_key = f"person:{person_name}"
+
+        try:
+            fig = await asyncio.to_thread(analysis.plot_insights_card, df, player_key)
+        except Exception as exc:
+            self.bot.logging.error(f"/me insights-card render failed: {exc!r}")
+            await interaction.followup.send(f"Chart failed: {exc!r}", ephemeral=True)
+            return
+
+        embed = discord.Embed(title=f"🧾 Insights card — {person_name}")
+        embed.set_footer(
+            text=(
+                f"{len(df):,} games · {df['person'].nunique()} people "
+                f"({df['riot_account'].nunique()} Riot accounts) · "
+                f"{df['game_start'].min().date()} → {df['game_start'].max().date()}"
+            )
+        )
+        embed.set_image(url="attachment://chart.png")
+        file = _figure_to_file(fig)
+        await interaction.followup.send(embed=embed, file=file)
+
     async def open_explorer(
         self, interaction: discord.Interaction, chart_idx: int, person: str | None
     ) -> None:

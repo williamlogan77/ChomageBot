@@ -53,6 +53,7 @@ create table if not exists match_stats (
     deaths INTEGER not null,
     assists INTEGER not null,
     duration_sec INTEGER not null,
+    patch_version TEXT,
     primary key (match_id, puuid)
 );
 create index if not exists idx_match_stats_puuid_time on match_stats (puuid, game_start DESC);

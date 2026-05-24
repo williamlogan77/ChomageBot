@@ -1729,7 +1729,7 @@ def plot_actions_card(df: pd.DataFrame, player: str | None = None) -> plt.Figure
     tile(
         0,
         0,
-        "🎯 Play this champ more",
+        "Play this champ more",
         champ_pick_value,
         champ_pick_sub,
         champ_pick_accent,
@@ -1738,16 +1738,16 @@ def plot_actions_card(df: pd.DataFrame, player: str | None = None) -> plt.Figure
     tile(
         1,
         0,
-        "❌ Drop this champ",
+        "Drop this champ",
         champ_drop_value,
         champ_drop_sub,
         champ_drop_accent,
         champ_drop_color,
     )
-    tile(2, 0, "🛑 Stop at N losses", stop_value, stop_sub, stop_accent, stop_color)
-    tile(0, 1, "💰 MMR verdict", mmr_value, mmr_sub, mmr_accent, mmr_color)
-    tile(1, 1, "🤝 Duo with", duo_value, duo_sub, duo_accent, duo_color)
-    tile(2, 1, "🕐 Avoid this hour", hour_value, hour_sub, hour_accent, hour_color)
+    tile(2, 0, "Stop at N losses", stop_value, stop_sub, stop_accent, stop_color)
+    tile(0, 1, "MMR verdict", mmr_value, mmr_sub, mmr_accent, mmr_color)
+    tile(1, 1, "Duo with", duo_value, duo_sub, duo_accent, duo_color)
+    tile(2, 1, "Avoid this hour", hour_value, hour_sub, hour_accent, hour_color)
 
     return fig
 
@@ -4162,7 +4162,7 @@ def plot_logistic_coefficients(
     ax.text(
         0.98,
         0.04,
-        "Out-of-sample AUC = 0.498 (random).\nPre-game factors don't predict wins.\n→ For real signal see ✨ Picks and 💰 LP.",
+        "Out-of-sample AUC = 0.498 (random).\nPre-game factors don't predict wins.\n→ For real signal see Picks and LP.",
         transform=ax.transAxes,
         ha="right",
         va="bottom",

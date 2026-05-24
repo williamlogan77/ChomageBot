@@ -322,6 +322,212 @@ def _figure_to_file(fig, name: str = "chart.png") -> discord.File:
     return discord.File(buf, filename=name)
 
 
+def _ordinal_suffix(n: int) -> str:
+    """English ordinal suffix — 11/12/13 are "th"; 1/2/3 take st/nd/rd."""
+    if 10 <= (n % 100) <= 20:
+        return "th"
+    return {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+
+
+def _build_me_text_embed(df: pd.DataFrame, sub: pd.DataFrame, person_name: str) -> discord.Embed:
+    """Compact text-only insights summary for /me_text.
+
+    Mirrors the gating logic of ``analysis.plot_insights_card`` (>=50 games
+    overall, per-section thresholds) but emits Discord embed fields rather
+    than a matplotlib card. Sections with insufficient data are skipped.
+    """
+    n_games = int(len(sub))
+    wr = float(sub["win"].mean())
+
+    primary_hex = analysis.PALETTE["primary"].lstrip("#")
+    embed = discord.Embed(
+        title=f"📊 {person_name}",
+        color=discord.Color(int(primary_hex, 16)),
+    )
+
+    # Headline: WR + games + percentile vs friend group via stat-sheet frame.
+    frame = analysis._stat_sheet_frame(df)
+    pct_label: str | None = None
+    if person_name in set(frame["person"]):
+        wr_values = frame["wr"].astype(float)
+        ranks = wr_values.rank(method="average")
+        focal_idx = int(frame.index[frame["person"] == person_name][0])
+        if len(wr_values) > 1:
+            pct = (ranks.iloc[focal_idx] - 1) / (len(wr_values) - 1) * 100.0
+            pct_int = int(round(pct))
+            pct_label = f"{pct_int}{_ordinal_suffix(pct_int)} pct vs group"
+    headline = f"{wr:.1%} WR, {n_games} games"
+    if pct_label is not None:
+        headline = f"{headline}, {pct_label}"
+    embed.description = headline
+
+    # Role: best + worst (each requires >=10 games in that role).
+    role_d = sub[sub["role"].isin(analysis.ROLE_ORDER)]
+    if not role_d.empty:
+        role_agg = (
+            role_d.groupby("role").agg(games=("win", "size"), wins=("win", "sum")).reset_index()
+        )
+        role_agg = role_agg[role_agg["games"] >= analysis._INSIGHTS_ROLE_MIN_GAMES]
+        if not role_agg.empty:
+            role_agg["wr"] = role_agg["wins"] / role_agg["games"]
+            role_agg = role_agg.sort_values("wr", ascending=False)
+            best = role_agg.iloc[0]
+            worst = role_agg.iloc[-1]
+            lines = [
+                f"Best: {best['role']} {best['wr']:.1%} (n={int(best['games'])})",
+            ]
+            if len(role_agg) > 1:
+                lines.append(f"Worst: {worst['role']} {worst['wr']:.1%} (n={int(worst['games'])})")
+            embed.add_field(name="🛡️ Role", value="\n".join(lines), inline=False)
+
+    # Pace: Welch's t-test on duration_min, wins vs losses.
+    wins_dur = sub.loc[sub["win"] == 1, "duration_min"].to_numpy()
+    losses_dur = sub.loc[sub["win"] == 0, "duration_min"].to_numpy()
+    if len(wins_dur) >= 2 and len(losses_dur) >= 2:
+        diff, p_pace = analysis._welch_t(wins_dur, losses_dur)
+        if diff < -1.0:
+            verdict = "Stomper"
+        elif diff > 1.0:
+            verdict = "Scaler"
+        else:
+            verdict = "Neutral"
+        embed.add_field(
+            name="⏱️ Pace",
+            value=f"{verdict} | wins {diff:+.1f}min vs losses (p={p_pace:.3f})",
+            inline=False,
+        )
+
+    # Top picks — Bayesian-shrunk BUY/SELL recs. Needs >=100 games total.
+    if n_games >= analysis._INSIGHTS_SWAP_MIN_GAMES:
+        baseline_wr = wr
+        prior_n = 30.0
+        champ = sub.groupby("champion")["win"].agg(["count", "sum"])
+        champ = champ.rename(columns={"count": "games", "sum": "wins"})
+        champ = champ[champ["games"] >= 3]
+        if not champ.empty:
+            champ["shrunk_wr"] = [
+                analysis.bayesian_shrunk_wr(int(w), int(n), baseline_wr, prior_n)
+                for w, n in zip(champ["wins"], champ["games"], strict=False)
+            ]
+            champ["play_freq"] = champ["games"] / n_games
+            champ["vs_baseline"] = champ["shrunk_wr"] - baseline_wr
+
+            buy = champ[(champ["shrunk_wr"] > baseline_wr + 0.02) & (champ["games"] >= 5)].copy()
+            buy["score"] = buy["vs_baseline"] * (1.0 - buy["play_freq"])
+            buy = buy.sort_values("score", ascending=False).head(3)
+
+            sell = champ[(champ["shrunk_wr"] < baseline_wr - 0.02) & (champ["games"] >= 20)].copy()
+            sell["score"] = (-sell["vs_baseline"]) * sell["play_freq"]
+            sell = sell.sort_values("score", ascending=False).head(3)
+
+            def _fmt_champ_row(name: str, row) -> str:
+                return f"{name} ({row['shrunk_wr']:.0%}, n={int(row['games'])})"
+
+            lines: list[str] = []
+            if not buy.empty:
+                buy_strs = ", ".join(_fmt_champ_row(c, r) for c, r in buy.iterrows())
+                lines.append(f"BUY: {buy_strs}")
+            if not sell.empty:
+                sell_strs = ", ".join(_fmt_champ_row(c, r) for c, r in sell.iterrows())
+                lines.append(f"SELL: {sell_strs}")
+            if lines:
+                embed.add_field(
+                    name="🏆 Shrunken champ rankings",
+                    value="\n".join(lines),
+                    inline=False,
+                )
+
+    # Golden hour — best/worst (dow, hour_bucket) cell with >=15 games each.
+    if not sub.empty:
+        gh = sub.copy()
+        gh["hour_bucket"] = gh["hour"].map(analysis._hour_bucket)
+        cells = (
+            gh.groupby(["dow", "hour_bucket"], observed=True)
+            .agg(games=("win", "size"), wins=("win", "sum"))
+            .reset_index()
+        )
+        cells = cells[cells["games"] >= analysis._INSIGHTS_CELL_MIN_GAMES]
+        if not cells.empty:
+            cells["wr"] = cells["wins"] / cells["games"]
+            best_cell = cells.sort_values("wr", ascending=False).iloc[0]
+            worst_cell = cells.sort_values("wr", ascending=True).iloc[0]
+            best_day = analysis.DOW_LABELS[int(best_cell["dow"])]
+            best_part = str(best_cell["hour_bucket"]).split(" ")[0]
+            worst_day = analysis.DOW_LABELS[int(worst_cell["dow"])]
+            worst_part = str(worst_cell["hour_bucket"]).split(" ")[0]
+            lines = [
+                f"BEST: {best_day} {best_part} {best_cell['wr']:.0%} "
+                f"(n={int(best_cell['games'])})",
+            ]
+            if (best_cell["dow"], best_cell["hour_bucket"]) != (
+                worst_cell["dow"],
+                worst_cell["hour_bucket"],
+            ):
+                lines.append(
+                    f"WORST: {worst_day} {worst_part} {worst_cell['wr']:.0%} "
+                    f"(n={int(worst_cell['games'])})"
+                )
+            embed.add_field(name="🕐 Golden hour", value="\n".join(lines), inline=False)
+
+    # Recent form — 30d vs lifetime, anchored to global latest game_start.
+    game_start_all = pd.to_datetime(df["game_start"])
+    now = game_start_all.max()
+    if pd.notna(now):
+        sub_ts = pd.to_datetime(sub["game_start"])
+        recent_mask = sub_ts >= (now - pd.Timedelta(days=30))
+        n_30 = int(recent_mask.sum())
+        if n_30 >= 8:
+            wr_30 = float(sub.loc[recent_mask, "win"].mean())
+            delta_pp = (wr_30 - wr) * 100.0
+            embed.add_field(
+                name="🔥 Recent form",
+                value=(f"30d: {wr_30:.0%} (n={n_30}) vs lifetime {wr:.0%} " f"→ {delta_pp:+.1f}pp"),
+                inline=False,
+            )
+
+    # Hot-champ behavior: P(same|win) vs P(same|loss); need >=30 each.
+    hc = sub.sort_values("game_start").reset_index(drop=True)
+    hc = hc.assign(
+        prev_champion=hc["champion"].shift(1),
+        prev_win=hc["win"].shift(1),
+    )
+    hc = hc.dropna(subset=["prev_win", "prev_champion"])
+    if not hc.empty:
+        hc = hc.copy()
+        hc["prev_win"] = hc["prev_win"].astype(int)
+        hc["same_champion"] = (hc["champion"] == hc["prev_champion"]).astype(int)
+        win_rows = hc[hc["prev_win"] == 1]
+        loss_rows = hc[hc["prev_win"] == 0]
+        if len(win_rows) >= 30 and len(loss_rows) >= 30:
+            p_w = float(win_rows["same_champion"].mean())
+            p_l = float(loss_rows["same_champion"].mean())
+            delta = p_w - p_l
+            delta_pp = delta * 100.0
+            if delta_pp > 15.0:
+                interp = "strong ride-hot"
+            elif delta_pp >= 0.0:
+                interp = "neutral"
+            else:
+                interp = "comfort-pick after loss"
+            embed.add_field(
+                name="🔁 Hot-champ behavior",
+                value=(
+                    f"P(same|win) = {p_w:.0%}  P(same|loss) = {p_l:.0%}  "
+                    f"delta = {delta:+.1%}\n{interp}"
+                ),
+                inline=False,
+            )
+
+    last_update = pd.to_datetime(df["game_start"]).max()
+    embed.set_footer(
+        text=(
+            f"{len(df):,} games · {df['person'].nunique()} people · "
+            f"last update {last_update:%Y-%m-%d}"
+        )
+    )
+    return embed
+
+
 def _build_panel_embed() -> discord.Embed:
     """The static description sitting above the panel buttons."""
     embed = discord.Embed(
@@ -1058,6 +1264,50 @@ class MatchAnalysis(commands.Cog):
         embed.set_image(url="attachment://chart.png")
         file = _figure_to_file(fig)
         await interaction.followup.send(embed=embed, file=file)
+
+    @app_commands.command(
+        name="me_text",
+        description="Compact text summary of your stats (no chart)",
+    )
+    @app_commands.guild_only()
+    async def me_text(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=False)
+
+        try:
+            df = await _load_matches_cached(self.bot.db_path)
+        except Exception as exc:
+            self.bot.logging.error(f"/me_text data load failed: {exc!r}")
+            await interaction.followup.send(f"Failed to load match data: {exc!r}", ephemeral=True)
+            return
+
+        if df.empty:
+            await interaction.followup.send(
+                "No match data yet — run /backfill_all first.", ephemeral=True
+            )
+            return
+
+        matches = df[df["discord_user_id"].astype(str) == str(interaction.user.id)]
+        if matches.empty:
+            await interaction.followup.send(
+                f"No League account linked for {interaction.user.mention}. "
+                "Link one with `/add_player` first.",
+                ephemeral=True,
+            )
+            return
+
+        person_name = str(matches["person"].iloc[0])
+        sub = df[df["person"] == person_name]
+        n_games = int(len(sub))
+        if n_games < analysis._INSIGHTS_MIN_GAMES:
+            await interaction.followup.send(
+                f"Need >={analysis._INSIGHTS_MIN_GAMES} games for a summary "
+                f"(you have {n_games}).",
+                ephemeral=True,
+            )
+            return
+
+        embed = _build_me_text_embed(df, sub, person_name)
+        await interaction.followup.send(embed=embed)
 
     async def open_explorer(
         self, interaction: discord.Interaction, chart_idx: int, person: str | None

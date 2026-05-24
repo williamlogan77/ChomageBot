@@ -1576,6 +1576,86 @@ class MatchAnalysis(commands.Cog):
         embed = _build_me_todo_embed(df, sub, person_name)
         await interaction.followup.send(embed=embed)
 
+    @app_commands.command(
+        name="leaderboard_week",
+        description="Past 7 days WR per player (use days arg for other windows)",
+    )
+    @app_commands.guild_only()
+    @app_commands.describe(days="Number of days to include (1-90, default 7)")
+    async def leaderboard_week(self, interaction: discord.Interaction, days: int = 7) -> None:
+        await interaction.response.defer(ephemeral=False)
+        days = max(1, min(days, 90))
+
+        try:
+            df = await _load_matches_cached(self.bot.db_path)
+        except Exception as exc:
+            self.bot.logging.error(f"/leaderboard_week data load failed: {exc!r}")
+            await interaction.followup.send(f"Failed to load match data: {exc!r}", ephemeral=True)
+            return
+
+        if df.empty:
+            await interaction.followup.send(
+                "No match data yet — run /backfill_all first.", ephemeral=True
+            )
+            return
+
+        now = df["game_start"].max()
+        cutoff = now - pd.Timedelta(days=days)
+        recent = df[df["game_start"] >= cutoff]
+
+        if recent.empty:
+            await interaction.followup.send(f"No games in the last {days} days.", ephemeral=True)
+            return
+
+        rows = []
+        for person, group in recent.groupby("person"):
+            n = len(group)
+            if n < 3:
+                continue
+            wins = int(group["win"].sum())
+            wr = wins / n
+            wilson_lo, wilson_hi = analysis.wilson_ci(wins, n)
+            rows.append(
+                {
+                    "person": person,
+                    "n": n,
+                    "wr": wr,
+                    "wilson_lo": wilson_lo,
+                    "wilson_hi": wilson_hi,
+                }
+            )
+
+        if not rows:
+            await interaction.followup.send(
+                f"No qualifying players (need ≥3 games) in the last {days} days.",
+                ephemeral=True,
+            )
+            return
+
+        rows.sort(key=lambda r: r["wr"], reverse=True)
+
+        medal = ["🥇", "🥈", "🥉"]
+        lines = []
+        for i, r in enumerate(rows):
+            prefix = medal[i] if i < 3 else f"{i + 1}."
+            lines.append(
+                f"{prefix} **{r['person']}** — {r['wr']:.0%}  "
+                f"({r['n']} games, CI {r['wilson_lo']:.0%}–{r['wilson_hi']:.0%})"
+            )
+
+        embed = discord.Embed(
+            title=f"📈 Past {days}-day leaderboard",
+            description="\n".join(lines),
+            color=discord.Color(int(analysis.PALETTE["primary"].lstrip("#"), 16)),
+        )
+        embed.set_footer(
+            text=(
+                f"{len(recent):,} games · {len(rows)} qualifying players · "
+                f"{cutoff:%Y-%m-%d} → {now:%Y-%m-%d}"
+            )
+        )
+        await interaction.followup.send(embed=embed)
+
     async def open_explorer(
         self, interaction: discord.Interaction, chart_idx: int, person: str | None
     ) -> None:

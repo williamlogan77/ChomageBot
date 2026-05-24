@@ -7711,6 +7711,295 @@ def plot_champ_pool_concentration(df: pd.DataFrame, player: str | None = None) -
     return fig
 
 
+# --- 39. Champion mastery learning curve -----------------------------------
+
+_MASTERY_BUCKET_EDGES = [1, 11, 21, 51, np.inf]
+_MASTERY_BUCKET_LABELS = ["1-10", "11-20", "21-50", "51+"]
+_MASTERY_MIN_GAMES_PER_PAIR = 30
+_MASTERY_MIN_GAMES_PER_BUCKET = 5
+
+
+def _mastery_pair_buckets(df: pd.DataFrame) -> pd.DataFrame:
+    """Per-(person, champion) game-on-champ index and bucket assignment.
+
+    Re-cumcounts on ``(person, champion)`` rather than reusing the
+    prebuilt ``nth_on_champ`` (which is per-Riot-account — a player
+    with two smurfs would otherwise restart their Zac counter on each).
+    Returns rows of qualifying pairs only (>= MIN_GAMES_PER_PAIR games).
+    """
+    d = df[["person", "champion", "game_start", "win"]].copy()
+    d = d.sort_values(["person", "champion", "game_start"]).reset_index(drop=True)
+    d["nth"] = d.groupby(["person", "champion"]).cumcount() + 1
+
+    games_per_pair = d.groupby(["person", "champion"])["win"].transform("size")
+    d = d[games_per_pair >= _MASTERY_MIN_GAMES_PER_PAIR].copy()
+    if d.empty:
+        return d
+
+    d["bucket"] = pd.cut(
+        d["nth"],
+        bins=_MASTERY_BUCKET_EDGES,
+        labels=_MASTERY_BUCKET_LABELS,
+        right=False,
+        ordered=True,
+    )
+    return d
+
+
+def _mastery_pair_bucket_wr(d: pd.DataFrame) -> pd.DataFrame:
+    """Per-(person, champion, bucket) WR for buckets with >=5 games."""
+    grp = d.groupby(["person", "champion", "bucket"], observed=True).agg(
+        games=("win", "size"), wins=("win", "sum")
+    )
+    grp = grp[grp["games"] >= _MASTERY_MIN_GAMES_PER_BUCKET].reset_index()
+    grp["wr"] = grp["wins"] / grp["games"]
+    return grp
+
+
+def _mastery_bootstrap_ci(values: np.ndarray, n_boot: int = 1000) -> tuple[float, float]:
+    """2.5 / 97.5 percentile of resampled means. Returns (lo, hi)."""
+    if len(values) == 0:
+        return (np.nan, np.nan)
+    rng = np.random.default_rng(20240524)
+    n = len(values)
+    means = np.empty(n_boot)
+    for i in range(n_boot):
+        sample = rng.choice(values, size=n, replace=True)
+        means[i] = sample.mean()
+    return (float(np.percentile(means, 2.5)), float(np.percentile(means, 97.5)))
+
+
+def plot_champion_mastery(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Champion mastery learning curve — does WR improve with reps?
+
+    For each (person, champion) pair with >=30 games we sort by game
+    start, label each game 1, 2, 3, ... and bucket by play count
+    (1-10, 11-20, 21-50, 51+). Per bucket we compute that pair's WR
+    on that champ (>=5 games per bucket to count). Aggregate is the
+    macro mean of those per-pair WR values per bucket.
+    """
+    pair_rows = _mastery_pair_buckets(df)
+    if _is_aggregate(player):
+        if pair_rows.empty:
+            return _empty_figure("Need >=5 (player, champion) pairs with >=30 games")
+        return _plot_mastery_aggregate(pair_rows)
+
+    label = _display_label(player) or "this player"
+    person = _resolve_person(df, player)
+    if person is None:
+        return _empty_figure(f"No champion with >=30 games for {label}")
+    person_rows = pair_rows[pair_rows["person"] == person]
+    if person_rows.empty:
+        return _empty_figure(f"No champion with >=30 games for {label}")
+    return _plot_mastery_per_person(person_rows, label, player)
+
+
+def _plot_mastery_aggregate(pair_rows: pd.DataFrame) -> plt.Figure:
+    bucket_wr = _mastery_pair_bucket_wr(pair_rows)
+
+    n_pairs_total = bucket_wr[["person", "champion"]].drop_duplicates().shape[0]
+    if n_pairs_total < 5:
+        return _empty_figure("Need >=5 (player, champion) pairs with >=30 games")
+
+    per_bucket = (
+        bucket_wr.groupby("bucket", observed=True)
+        .agg(
+            wr=("wr", "mean"),
+            n_pairs=("wr", "size"),
+            n_games=("games", "sum"),
+        )
+        .reindex(_MASTERY_BUCKET_LABELS)
+    )
+
+    cis: list[tuple[float, float]] = []
+    for bucket in _MASTERY_BUCKET_LABELS:
+        vals = bucket_wr.loc[bucket_wr["bucket"] == bucket, "wr"].to_numpy()
+        cis.append(_mastery_bootstrap_ci(vals))
+    per_bucket["ci_lo"] = [c[0] for c in cis]
+    per_bucket["ci_hi"] = [c[1] for c in cis]
+
+    global_macro = float(bucket_wr["wr"].mean())
+
+    # Paired test: pairs with data in BOTH "first 10" AND ("21-50" or "51+").
+    first = bucket_wr[bucket_wr["bucket"] == "1-10"].set_index(["person", "champion"])
+    late = bucket_wr[bucket_wr["bucket"].isin(["21-50", "51+"])]
+    # Macro WR over pooled "21+" games per pair (weighted by games inside the pair).
+    late_agg = late.groupby(["person", "champion"]).apply(
+        lambda g: pd.Series({"wr_late": g["wins"].sum() / g["games"].sum()})
+    )
+    paired = first[["wr"]].rename(columns={"wr": "wr_early"}).join(late_agg, how="inner")
+    paired_diff = (paired["wr_late"] - paired["wr_early"]).to_numpy()
+    n_paired = len(paired_diff)
+    if n_paired >= 2:
+        mean_diff = float(paired_diff.mean())
+        diff_ci = _mastery_bootstrap_ci(paired_diff)
+        paired_summary = (
+            f"Paired late-minus-early WR: {mean_diff:+.1%} "
+            f"[{diff_ci[0]:+.1%}, {diff_ci[1]:+.1%}], n_pairs={n_paired}."
+        )
+    else:
+        paired_summary = "Not enough pairs spanning early and late buckets for a paired test."
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    x = np.arange(len(_MASTERY_BUCKET_LABELS))
+    means = per_bucket["wr"].to_numpy()
+    lo = per_bucket["ci_lo"].to_numpy()
+    hi = per_bucket["ci_hi"].to_numpy()
+    err_lo = np.where(np.isnan(means), 0.0, means - lo)
+    err_hi = np.where(np.isnan(means), 0.0, hi - means)
+    bar_means = np.where(np.isnan(means), 0.0, means)
+
+    ax.bar(
+        x,
+        bar_means,
+        color=PALETTE["primary"],
+        width=0.62,
+        zorder=2,
+    )
+    ax.errorbar(
+        x,
+        bar_means,
+        yerr=[err_lo, err_hi],
+        fmt="none",
+        ecolor=PALETTE["muted"],
+        elinewidth=1.0,
+        capsize=4,
+        alpha=0.7,
+        zorder=3,
+    )
+
+    _baseline(ax, y=global_macro, label=f"Global macro WR ({global_macro:.0%})")
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"Games {b}" for b in _MASTERY_BUCKET_LABELS])
+    ax.set_ylabel("Macro-averaged win rate")
+    ax.set_xlabel("Game-on-champion bucket")
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
+    top_hi = float(np.nanmax(np.where(np.isnan(hi), 0.0, hi))) if len(hi) else 0.6
+    ax.set_ylim(0, max(0.85, top_hi + 0.08))
+
+    ax.set_title("Champion mastery - does WR improve with practice?")
+    _subtitle(
+        ax,
+        "Macro-averaged across all (player, champion) pairs with >=30 games. "
+        "Each (pair, bucket) contributes one WR value to the mean. " + paired_summary,
+    )
+
+    for xi, bucket in enumerate(_MASTERY_BUCKET_LABELS):
+        wr = per_bucket.loc[bucket, "wr"]
+        n_pairs = per_bucket.loc[bucket, "n_pairs"]
+        n_games = per_bucket.loc[bucket, "n_games"]
+        if pd.isna(wr):
+            ax.annotate(
+                "no data",
+                xy=(xi, 0.02),
+                ha="center",
+                va="bottom",
+                fontsize=9,
+                color=PALETTE["muted"],
+            )
+            continue
+        ax.annotate(
+            f"{wr:.0%}  pairs={int(n_pairs)}  games={int(n_games)}",
+            xy=(xi, float(wr)),
+            xytext=(0, 6),
+            textcoords="offset points",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+            color=PALETTE["text"],
+        )
+
+    ax.legend(loc="upper left", fontsize=9)
+    _polish_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
+def _plot_mastery_per_person(
+    person_rows: pd.DataFrame, label: str, player: str | None
+) -> plt.Figure:
+    bucket_wr = _mastery_pair_bucket_wr(person_rows)
+    if bucket_wr.empty:
+        return _empty_figure(f"No champion with >=30 games for {label}")
+
+    # Order champions by total qualifying games desc — colour cycle gets
+    # assigned to the most-played first so the busiest curves dominate.
+    champs_by_games = (
+        bucket_wr.groupby("champion")["games"].sum().sort_values(ascending=False).index.tolist()
+    )
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+    x_pos = {b: i for i, b in enumerate(_MASTERY_BUCKET_LABELS)}
+
+    # Track end-of-line label positions so we can nudge collisions.
+    end_labels: list[tuple[float, float, str, str]] = []  # (x, y, name, colour)
+    for idx, champ in enumerate(champs_by_games):
+        sub = bucket_wr[bucket_wr["champion"] == champ].sort_values("bucket")
+        xs = [x_pos[b] for b in sub["bucket"]]
+        ys = sub["wr"].to_numpy()
+        colour = SERIES_CYCLE[idx % len(SERIES_CYCLE)]
+        ax.plot(
+            xs,
+            ys,
+            color=colour,
+            linewidth=2.0,
+            marker="o",
+            markersize=5,
+            alpha=0.9,
+            label=champ,
+        )
+        end_labels.append((float(xs[-1]), float(ys[-1]), champ, colour))
+
+    _baseline(ax, y=0.5, label="50%")
+    ax.set_xticks(list(x_pos.values()))
+    ax.set_xticklabels([f"Games {b}" for b in _MASTERY_BUCKET_LABELS])
+    ax.set_ylim(0, 1.0)
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
+    ax.set_xlabel("Game-on-champion bucket")
+    ax.set_ylabel("Win rate")
+    ax.set_title(_title("Mastery curves", player))
+    _subtitle(ax, "WR by play-count bucket for your most-played champions (>=30 games each).")
+
+    # Pad right so end-of-line annotations don't fall off the axes.
+    ax.set_xlim(-0.4, len(_MASTERY_BUCKET_LABELS) - 1 + 0.9)
+
+    # Greedy y-nudge: sort by y, push the next one down if it overlaps.
+    # The annotation's anchor stays at the true (x_end, y_end); only the
+    # text label position is shifted in data coordinates with a thin
+    # leader line so the reader can still match label -> endpoint.
+    end_labels.sort(key=lambda t: t[1], reverse=True)
+    last_y = float("inf")
+    min_gap = 0.04
+    for x_end, y_end, name, colour in end_labels:
+        text_y = min(y_end, last_y - min_gap)
+        last_y = text_y
+        needs_leader = abs(text_y - y_end) > 1e-3
+        ax.annotate(
+            name,
+            xy=(x_end, y_end),
+            xytext=(x_end + 0.08, text_y),
+            textcoords="data",
+            ha="left",
+            va="center",
+            fontsize=9,
+            color=colour,
+            arrowprops=(
+                {
+                    "arrowstyle": "-",
+                    "color": colour,
+                    "linewidth": 0.6,
+                    "alpha": 0.5,
+                }
+                if needs_leader
+                else None
+            ),
+        )
+
+    _polish_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
 # --- registry --------------------------------------------------------------
 
 #: All aggregate plot functions, in the order the runner script + notebook
@@ -7754,4 +8043,5 @@ ALL_PLOTS = [
     ("36_game_pace", plot_game_pace),
     ("37_shrunk_champ_rankings", plot_shrunk_champ_rankings),
     ("38_champ_pool_concentration", plot_champ_pool_concentration),
+    ("39_champion_mastery", plot_champion_mastery),
 ]

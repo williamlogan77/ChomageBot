@@ -1399,6 +1399,24 @@ class MatchAnalysis(commands.Cog):
 
         orphan_stems = [s for s, _ in analysis.ALL_PLOTS if s not in seen_stems]
 
+        cmds_embed = discord.Embed(
+            title="⚡ Slash commands",
+            description="\n".join(
+                [
+                    "`/match_stats_panel` — Post the persistent control panel (admin)",
+                    "`/me [user]` — Visual insights card",
+                    "`/me_text [user]` — Compact text summary",
+                    "`/me_todo [user]` — Prescriptive bullet advice",
+                    "`/champ <name>` — Group-wide stats for one champion",
+                    "`/compare <a> <b>` — Side-by-side player comparison",
+                    "`/leaderboard_week [days]` — Past-N-days WR ranking",
+                    "`/chart_index` — This catalog",
+                    "`/refresh_db_cache` — Force cache invalidation (admin)",
+                ]
+            ),
+            color=discord.Color(int(analysis.PALETTE["primary"].lstrip("#"), 16)),
+        )
+
         panel_embed = discord.Embed(
             title="📊 Panel buttons",
             description=(
@@ -1419,7 +1437,7 @@ class MatchAnalysis(commands.Cog):
             color=discord.Color.dark_teal(),
         )
 
-        embeds = [panel_embed, more_embed]
+        embeds = [cmds_embed, panel_embed, more_embed]
         if orphan_stems:
             orphan_lines = [f"`{stem}`" for stem in orphan_stems]
             orphan_embed = discord.Embed(

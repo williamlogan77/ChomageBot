@@ -1656,6 +1656,32 @@ class MatchAnalysis(commands.Cog):
         )
         await interaction.followup.send(embed=embed)
 
+    async def _champ_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        """Suggest up to 25 champions matching the user's typed substring."""
+        try:
+            df = await _load_matches_cached(self.bot.db_path)
+        except Exception:
+            return []
+
+        if df.empty:
+            return []
+
+        # Sort by play count desc so the most-played champs surface first
+        # when the input is empty.
+        counts = df.groupby("champion").size().sort_values(ascending=False)
+
+        current_lc = current.lower()
+        matches = [
+            champion for champion in counts.index
+            if current_lc in str(champion).lower()
+        ]
+        return [
+            app_commands.Choice(name=champion, value=champion)
+            for champion in matches[:25]
+        ]
+
     @app_commands.command(
         name="champ",
         description="Group-wide stats for a single champion",
@@ -1664,6 +1690,7 @@ class MatchAnalysis(commands.Cog):
     @app_commands.describe(
         name="Champion name (Riot internal name, e.g. 'Khazix', 'MissFortune')"
     )
+    @app_commands.autocomplete(name=_champ_autocomplete)
     async def champ(self, interaction: discord.Interaction, name: str) -> None:
         await interaction.response.defer(ephemeral=False)
 

@@ -212,6 +212,12 @@ MORE_CHART_DEFS = [
         "🧾",
         "TL;DR — your role, pace, BUY/SELL champs, golden hour in one chart",
     ),
+    (
+        "49_recent_form",
+        "Recent form",
+        "🔥",
+        "Last 30/60/90d WR vs lifetime — who's hot/cold?",
+    ),
 ]
 
 

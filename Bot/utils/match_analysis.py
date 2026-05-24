@@ -10510,6 +10510,367 @@ def plot_insights_card(df: pd.DataFrame, player: str | None = None) -> plt.Figur
     return fig
 
 
+# --- 49. Recent form vs lifetime WR ----------------------------------------
+
+_RECENT_FORM_LIFETIME_MIN = 50
+_RECENT_FORM_WINDOW_MIN = 8
+_RECENT_FORM_AGGREGATE_MIN_PLAYERS = 3
+_RECENT_FORM_WINDOWS_DAYS = (30, 60, 90)
+_RECENT_FORM_Q_THRESHOLD = 0.10
+
+
+def _recent_form_table(df: pd.DataFrame) -> pd.DataFrame:
+    """Per-person recent-form table — one row per qualifying player.
+
+    Lifetime is wins/games across the player's whole history. Each window
+    captures games within ``now - window`` days, where ``now`` is the
+    latest ``game_start`` in ``df`` (global, not per-player — so an
+    inactive player correctly shows 0 recent games). The 30/60/90 day
+    tests compare the recent window vs the EARLIER baseline (games
+    strictly older than 90 days) — same baseline for all three windows
+    so the test pools don't overlap.
+
+    Returns columns: person, n_life, wr_life, plus n_{w} / wr_{w} /
+    p_{w} / q_{w} for each window in :data:`_RECENT_FORM_WINDOWS_DAYS`,
+    and earlier-baseline ``n_earlier`` / ``wr_earlier``. ``q_*`` is
+    BH-FDR adjusted across the 3 * N qualifying-player tests jointly.
+    Players with <50 lifetime games are dropped.
+    """
+    if df.empty or "game_start" not in df.columns:
+        return pd.DataFrame()
+
+    work = df[["person", "win", "game_start"]].copy()
+    work["game_start"] = pd.to_datetime(work["game_start"])
+    work = work.dropna(subset=["person", "game_start"])
+    if work.empty:
+        return pd.DataFrame()
+
+    now = work["game_start"].max()
+    cutoff_earlier = now - pd.Timedelta(days=max(_RECENT_FORM_WINDOWS_DAYS))
+
+    rows: list[dict] = []
+    p_for_bh: list[float] = []
+    p_keys: list[tuple[str, int]] = []
+
+    for person, sub in work.groupby("person", sort=False):
+        n_life = int(len(sub))
+        if n_life < _RECENT_FORM_LIFETIME_MIN:
+            continue
+        wins_life = int(sub["win"].sum())
+        wr_life = wins_life / n_life
+
+        # Earlier baseline = strictly older than the longest window.
+        earlier = sub[sub["game_start"] < cutoff_earlier]
+        n_earlier = int(len(earlier))
+        wins_earlier = int(earlier["win"].sum())
+        wr_earlier = (wins_earlier / n_earlier) if n_earlier > 0 else float("nan")
+
+        rec: dict = {
+            "person": person,
+            "n_life": n_life,
+            "wins_life": wins_life,
+            "wr_life": wr_life,
+            "n_earlier": n_earlier,
+            "wins_earlier": wins_earlier,
+            "wr_earlier": wr_earlier,
+        }
+
+        for w in _RECENT_FORM_WINDOWS_DAYS:
+            recent = sub[sub["game_start"] >= now - pd.Timedelta(days=w)]
+            n_w = int(len(recent))
+            wins_w = int(recent["win"].sum())
+            wr_w = (wins_w / n_w) if n_w > 0 else float("nan")
+            rec[f"n_{w}"] = n_w
+            rec[f"wins_{w}"] = wins_w
+            rec[f"wr_{w}"] = wr_w
+
+            # 2-proportion test = chi-square 2x2 (df=1) of recent vs earlier.
+            # chi2_homogeneity drops zero-total buckets, but we still want
+            # the helper to see both; gate explicitly so we skip when
+            # either side is empty (NaN p) rather than returning 1.0.
+            if n_w > 0 and n_earlier > 0:
+                _chi2, _dof, p_raw = chi2_homogeneity(
+                    np.array([wins_w, wins_earlier], dtype=float),
+                    np.array([n_w, n_earlier], dtype=float),
+                )
+            else:
+                p_raw = float("nan")
+            rec[f"p_{w}"] = p_raw
+            if np.isfinite(p_raw):
+                p_for_bh.append(p_raw)
+                p_keys.append((person, w))
+
+        rows.append(rec)
+
+    if not rows:
+        return pd.DataFrame()
+
+    out = pd.DataFrame(rows)
+    # BH-FDR across all valid (person, window) p-values jointly.
+    q_values = bh_adjust(p_for_bh) if p_for_bh else []
+    q_lookup = {key: q for key, q in zip(p_keys, q_values, strict=False)}
+    for w in _RECENT_FORM_WINDOWS_DAYS:
+        out[f"q_{w}"] = out["person"].map(lambda p, _w=w: q_lookup.get((p, _w), float("nan")))
+
+    return out
+
+
+def _plot_recent_form_aggregate(df: pd.DataFrame) -> plt.Figure:
+    """Horizontal bar chart of 30d-vs-lifetime WR delta per qualifying player."""
+    table = _recent_form_table(df)
+    if table.empty:
+        return _empty_figure(
+            f"Need >={_RECENT_FORM_AGGREGATE_MIN_PLAYERS} players with >="
+            f"{_RECENT_FORM_LIFETIME_MIN} games"
+        )
+
+    # Drop players with <8 games in the 30d window — bar would be noise.
+    qual = table[table["n_30"] >= _RECENT_FORM_WINDOW_MIN].copy()
+    if len(qual) < _RECENT_FORM_AGGREGATE_MIN_PLAYERS:
+        return _empty_figure(
+            f"Need >={_RECENT_FORM_AGGREGATE_MIN_PLAYERS} players with >="
+            f"{_RECENT_FORM_WINDOW_MIN} games in last 30d"
+        )
+
+    qual["delta"] = qual["wr_30"] - qual["wr_life"]
+    qual = qual.sort_values("delta", ascending=False).reset_index(drop=True)
+
+    fig, ax = plt.subplots(figsize=(10, max(4.0, 0.45 * len(qual) + 2.0)))
+    y_pos = np.arange(len(qual))
+
+    colors: list[str] = []
+    for _, row in qual.iterrows():
+        q30 = row["q_30"]
+        wr_recent = row["wr_30"]
+        wr_earlier = row["wr_earlier"]
+        # Color uses test direction (recent vs earlier), not display delta —
+        # the q-value tests the earlier-vs-recent gap, not the lifetime gap.
+        if np.isfinite(q30) and q30 < _RECENT_FORM_Q_THRESHOLD and np.isfinite(wr_earlier):
+            if wr_recent > wr_earlier:
+                colors.append(PALETTE["win"])
+            elif wr_recent < wr_earlier:
+                colors.append(PALETTE["loss"])
+            else:
+                colors.append(PALETTE["neutral"])
+        else:
+            colors.append(PALETTE["neutral"])
+
+    ax.barh(y_pos, qual["delta"].to_numpy() * 100.0, color=colors, alpha=0.85)
+    ax.axvline(0.0, color=PALETTE["muted"], linewidth=1.0)
+
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(qual["person"].tolist())
+    ax.invert_yaxis()
+    ax.set_xlabel("30d WR  -  lifetime WR  (pp)")
+
+    # Annotate every bar to the RIGHT of its tip when positive, or just
+    # past x=0 when negative — keeps the text off the y-axis labels and
+    # in the chart's right-hand whitespace.
+    deltas = qual["delta"].to_numpy() * 100.0
+    if len(deltas):
+        max_pos = max(float(np.nanmax(deltas)), 0.0)
+        pad = max(0.8, 0.02 * (np.nanmax(np.abs(deltas)) + 1.0))
+    else:
+        max_pos = 0.0
+        pad = 1.0
+    for i, (_, row) in enumerate(qual.iterrows()):
+        delta_pp = row["delta"] * 100.0
+        q30 = row["q_30"]
+        q_txt = f"{q30:.3f}" if np.isfinite(q30) else "-"
+        label = (
+            f"30d: {row['wr_30']:.0%} (n={int(row['n_30'])})  "
+            f"lifetime: {row['wr_life']:.0%} (n={int(row['n_life'])})  "
+            f"Δ={delta_pp:+.1f}pp  q={q_txt}"
+        )
+        x_text = (delta_pp + pad) if delta_pp >= 0 else pad
+        ax.text(
+            x_text,
+            i,
+            label,
+            ha="left",
+            va="center",
+            fontsize=8.5,
+            color=PALETTE["text"],
+        )
+
+    # Pad x-limits so annotations don't clip — right edge needs room for
+    # the longest label past the longest positive bar.
+    if len(deltas):
+        min_neg = min(float(np.nanmin(deltas)), 0.0)
+        # ~55 chars * ~0.8 pp/char-equivalent at fontsize=8.5 on a 10in axes
+        # → reserve ~45pp of right-side room.
+        ax.set_xlim(min_neg - 2.0, max_pos + 50.0)
+
+    ax.set_title("Recent form - last 30 days vs lifetime")
+    _subtitle(
+        ax,
+        f"Delta in pp. Bar colored if BH-FDR adjusted q < {_RECENT_FORM_Q_THRESHOLD:.2f} "
+        "(recent vs earlier baseline, earlier = games >90d old).",
+    )
+    _polish_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
+def _plot_recent_form_person(df: pd.DataFrame, player: str | None) -> plt.Figure:
+    """Per-player view: 4 bars (lifetime / 90d / 60d / 30d) with Wilson CIs."""
+    person = _resolve_person(df, player)
+    sub = _filter_player(df, player)
+    n_life = int(len(sub))
+    if person is None or n_life < _RECENT_FORM_LIFETIME_MIN:
+        return _empty_figure(f"Need >={_RECENT_FORM_LIFETIME_MIN} games ({n_life})")
+
+    work = sub[["person", "win", "game_start"]].copy()
+    work["game_start"] = pd.to_datetime(work["game_start"])
+    work = work.dropna(subset=["game_start"])
+    n_life = int(len(work))
+    if n_life < _RECENT_FORM_LIFETIME_MIN:
+        return _empty_figure(f"Need >={_RECENT_FORM_LIFETIME_MIN} games ({n_life})")
+
+    # "now" must be the GLOBAL latest game_start to match the aggregate
+    # definition — using the player's own latest would hide inactivity.
+    global_now = pd.to_datetime(df["game_start"]).max()
+    cutoff_earlier = global_now - pd.Timedelta(days=max(_RECENT_FORM_WINDOWS_DAYS))
+
+    wins_life = int(work["win"].sum())
+    wr_life = wins_life / n_life
+
+    earlier = work[work["game_start"] < cutoff_earlier]
+    n_earlier = int(len(earlier))
+    wins_earlier = int(earlier["win"].sum())
+
+    bars: list[dict] = []
+    bars.append(
+        {
+            "label": "Lifetime",
+            "n": n_life,
+            "wins": wins_life,
+            "wr": wr_life,
+            "p": None,
+        }
+    )
+    # Order: lifetime, then 90d, 60d, 30d so the rolling cap shrinks left-to-right.
+    for w in (90, 60, 30):
+        recent = work[work["game_start"] >= global_now - pd.Timedelta(days=w)]
+        n_w = int(len(recent))
+        wins_w = int(recent["win"].sum())
+        wr_w = (wins_w / n_w) if n_w > 0 else float("nan")
+        if n_w > 0 and n_earlier > 0:
+            _chi2, _dof, p_raw = chi2_homogeneity(
+                np.array([wins_w, wins_earlier], dtype=float),
+                np.array([n_w, n_earlier], dtype=float),
+            )
+        else:
+            p_raw = float("nan")
+        bars.append({"label": f"Last {w}d", "n": n_w, "wins": wins_w, "wr": wr_w, "p": p_raw})
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    x = np.arange(len(bars))
+    heights = np.array([b["wr"] if np.isfinite(b["wr"]) else 0.0 for b in bars], dtype=float)
+    visible = np.array([b["n"] >= _RECENT_FORM_WINDOW_MIN for b in bars], dtype=bool)
+    # Lifetime always visible since we passed the >=50 gate above.
+    visible[0] = True
+
+    # Lifetime in primary, recent windows in win/loss tint depending on
+    # whether they're above or below lifetime (purely cosmetic — the test
+    # result is annotated separately as raw p).
+    colors = [PALETTE["primary"]]
+    for b in bars[1:]:
+        if not np.isfinite(b["wr"]):
+            colors.append(PALETTE["neutral"])
+        elif b["wr"] > wr_life:
+            colors.append(PALETTE["win"])
+        elif b["wr"] < wr_life:
+            colors.append(PALETTE["loss"])
+        else:
+            colors.append(PALETTE["neutral"])
+
+    draw_heights = np.where(visible, heights, 0.0)
+    ax.bar(x, draw_heights, color=colors, alpha=0.85, width=0.65)
+
+    # Wilson CIs only on bars we actually draw.
+    yerr_lo = np.zeros(len(bars))
+    yerr_hi = np.zeros(len(bars))
+    for i, b in enumerate(bars):
+        if not visible[i] or not np.isfinite(b["wr"]):
+            continue
+        lo, hi = wilson_ci(int(b["wins"]), int(b["n"]))
+        yerr_lo[i] = max(0.0, b["wr"] - lo)
+        yerr_hi[i] = max(0.0, hi - b["wr"])
+    ax.errorbar(
+        x[visible], heights[visible], yerr=[yerr_lo[visible], yerr_hi[visible]], **WHISKER_STYLE
+    )
+
+    # Annotations: WR + sample count under each bar, raw p above each
+    # recent bar (no p on lifetime — it's the baseline pole).
+    for i, b in enumerate(bars):
+        if not visible[i]:
+            ax.text(
+                x[i],
+                0.02,
+                f"—\nn={b['n']}",
+                ha="center",
+                va="bottom",
+                fontsize=9,
+                color=PALETTE["muted"],
+            )
+            continue
+        if np.isfinite(b["wr"]):
+            ax.text(
+                x[i],
+                b["wr"] / 2,
+                f"{b['wr']:.0%}\nn={b['n']}",
+                ha="center",
+                va="center",
+                fontsize=10,
+                color=PALETTE["text"],
+                fontweight="bold",
+            )
+        # P-value above the upper whisker for recent windows.
+        if i > 0 and b["p"] is not None and np.isfinite(b["p"]):
+            top = (b["wr"] + yerr_hi[i]) if visible[i] else b["wr"]
+            ax.text(
+                x[i],
+                top + 0.02,
+                f"p={b['p']:.3f}",
+                ha="center",
+                va="bottom",
+                fontsize=9,
+                color=PALETTE["muted"],
+            )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels([b["label"] for b in bars])
+    ax.set_ylabel("Win rate")
+    ax.set_ylim(0, max(0.7, float(np.nanmax(heights)) + 0.15))
+    _baseline(ax, 0.5)
+    ax.set_title(f"Recent form - {_display_label(player) or person}")
+    _subtitle(
+        ax,
+        f"Lifetime ({n_life} games) vs recent rolling windows. "
+        "Chi-square tests recent vs earlier (life - 90d) baseline.",
+    )
+    _polish_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
+def plot_recent_form(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Recent form (30/60/90d) vs lifetime WR — who's hot or cold right now?
+
+    Aggregate view shows one bar per qualifying player: 30d_WR minus
+    lifetime_WR in pp, colored by chi-square significance of the recent
+    vs earlier (>90d) baseline gap, BH-FDR adjusted across all tests.
+
+    Per-player view shows four bars (lifetime + 90d + 60d + 30d) with
+    Wilson 95% CIs and the raw p of recent-vs-earlier baseline annotated
+    above each recent bar.
+    """
+    if _is_aggregate(player):
+        return _plot_recent_form_aggregate(df)
+    return _plot_recent_form_person(df, player)
+
+
 # --- registry --------------------------------------------------------------
 
 #: All aggregate plot functions, in the order the runner script + notebook
@@ -10563,4 +10924,5 @@ ALL_PLOTS = [
     ("46_per_account_breakdown", plot_per_account_breakdown),
     ("47_champion_meta_shifts", plot_champion_meta_shifts),
     ("48_insights_card", plot_insights_card),
+    ("49_recent_form", plot_recent_form),
 ]

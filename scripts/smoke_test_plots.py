@@ -139,7 +139,14 @@ def main() -> int:
     failed_stems = {stem for stem, _, _ in failures}
     print(f"{total} charts x {len(modes)} modes = {n_calls} calls")
     print(f"Passed: {n_passed}")
-    print(f"Failed: {n_failed}" + (f" ({len(failed_stems)} chart{'s' if len(failed_stems) != 1 else ''})" if n_failed else ""))
+    print(
+        f"Failed: {n_failed}"
+        + (
+            f" ({len(failed_stems)} chart{'s' if len(failed_stems) != 1 else ''})"
+            if n_failed
+            else ""
+        )
+    )
     for stem, mode_label, err in failures:
         print(f"  - {stem} @ {mode_label}: {err}")
 

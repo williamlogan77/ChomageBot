@@ -1826,23 +1826,15 @@ class MatchAnalysis(commands.Cog):
         counts = df.groupby("champion").size().sort_values(ascending=False)
 
         current_lc = current.lower()
-        matches = [
-            champion for champion in counts.index
-            if current_lc in str(champion).lower()
-        ]
-        return [
-            app_commands.Choice(name=champion, value=champion)
-            for champion in matches[:25]
-        ]
+        matches = [champion for champion in counts.index if current_lc in str(champion).lower()]
+        return [app_commands.Choice(name=champion, value=champion) for champion in matches[:25]]
 
     @app_commands.command(
         name="champ",
         description="Group-wide stats for a single champion",
     )
     @app_commands.guild_only()
-    @app_commands.describe(
-        name="Champion name (Riot internal name, e.g. 'Khazix', 'MissFortune')"
-    )
+    @app_commands.describe(name="Champion name (Riot internal name, e.g. 'Khazix', 'MissFortune')")
     @app_commands.autocomplete(name=_champ_autocomplete)
     async def champ(self, interaction: discord.Interaction, name: str) -> None:
         await interaction.response.defer(ephemeral=False)
@@ -2071,9 +2063,7 @@ class MatchAnalysis(commands.Cog):
             fmt_pair("Max L str", a["max_loss_streak"], b["max_loss_streak"], "{:,}"),
         ]
         embed.description = "```\n" + "\n".join(lines) + "\n```"
-        embed.set_footer(
-            text=f"{a['n']:,} + {b['n']:,} = {a['n'] + b['n']:,} total games compared"
-        )
+        embed.set_footer(text=f"{a['n']:,} + {b['n']:,} = {a['n'] + b['n']:,} total games compared")
 
         await interaction.followup.send(embed=embed)
 

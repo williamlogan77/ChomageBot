@@ -4637,7 +4637,6 @@ def plot_model_calibration(df: pd.DataFrame, player: str | None = None) -> plt.F
     p_bar = float(y_tr.mean())
     p_bar_safe = float(np.clip(p_bar, 1e-12, 1 - 1e-12))
     triv_acc = float(max(y_tr.mean(), 1 - y_tr.mean()))
-    triv_auc = 0.5
     y_te_mean = float(y_te.mean())
     triv_logloss = float(
         -(y_te_mean * math.log(p_bar_safe) + (1 - y_te_mean) * math.log(1 - p_bar_safe))
@@ -9814,7 +9813,7 @@ def plot_per_account_breakdown(df: pd.DataFrame, player: str | None = None) -> p
         # green/red that mean something elsewhere on the dashboard.
         acct_colours = [PALETTE["primary"], PALETTE["accent_teal"], PALETTE["accent_orange"]]
 
-        for row_i, (name, tbl, p_val) in enumerate(per_person):
+        for row_i, (_name, tbl, _p_val) in enumerate(per_person):
             k = len(tbl)
             bar_h = row_h / k
             # Largest n at the top of each block (tbl is sorted desc on
@@ -13020,9 +13019,7 @@ def plot_monthly_champion_shifts(df: pd.DataFrame, player: str | None = None) ->
     # "YYYY-MM" — sortable lexicographically and matches Discord's date hints.
     work["month"] = work["game_start"].dt.strftime("%Y-%m")
 
-    grouped = (
-        work.groupby(["champion", "month"])["win"].agg(games="size", wins="sum").reset_index()
-    )
+    grouped = work.groupby(["champion", "month"])["win"].agg(games="size", wins="sum").reset_index()
     grouped["wins"] = grouped["wins"].astype(int)
     grouped["games"] = grouped["games"].astype(int)
 

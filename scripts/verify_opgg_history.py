@@ -54,7 +54,7 @@ def main() -> None:
 
         # Look for distinct tier strings
         # Look for embedded RSC chunks inside script tags: self.__next_f.push([N, "..."])
-        pushes = re.findall(r"self\.__next_f\.push\(\[\d+,\s*(\"(?:\\.|[^\"])*\")\]\)", body)
+        pushes = re.findall(r"self\.__next_f\.push\(\[\d+,\s*(\"(?:[^\"\\]|\\.)*\")\]\)", body)
         print(f"  __next_f.push() chunks: {len(pushes)}")
 
         # Concat all into one big string, then look for season/tier patterns

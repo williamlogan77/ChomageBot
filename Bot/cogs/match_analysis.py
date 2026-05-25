@@ -95,6 +95,21 @@ PANEL_SELECT_ID = f"{PANEL_CUSTOM_ID_PREFIX}:person"
 # ``_build_panel_embed``.
 PANEL_EMBED_TITLE = "📊 ChomageBot — Match Stats"
 
+# Role name (case-sensitive) gating the admin slash commands. We use a
+# role check rather than ``default_permissions`` because the friend
+# group's admins don't have the built-in ``manage_guild`` perm — Discord
+# would hide the commands from them.
+CHOMAGE_KEEPER_ROLE = "Keeper of Chomage"
+
+
+def _is_chomage_keeper(interaction: discord.Interaction) -> bool:
+    """app_commands.check predicate: True iff invoker has the keeper role."""
+    user = interaction.user
+    if not isinstance(user, discord.Member):
+        return False
+    return any(role.name == CHOMAGE_KEEPER_ROLE for role in user.roles)
+
+
 # How often the sticky-pin loop checks whether the panel is still the
 # most-recent message in PANEL_CHANNEL_ID. Cheap (one history call),
 # generous enough to avoid API noise.
@@ -1182,12 +1197,34 @@ class MatchAnalysis(commands.Cog):
         self.sticky_panel.cancel()
         self._panel_view.stop()
 
+    async def cog_app_command_error(
+        self,
+        interaction: discord.Interaction,
+        error: app_commands.AppCommandError,
+    ) -> None:
+        """Make `@app_commands.check` failures user-visible.
+
+        Without this, denied admin invocations surface as a generic
+        "interaction failed" — confusing for non-keepers who didn't know
+        the command existed.
+        """
+        if isinstance(error, app_commands.CheckFailure):
+            msg = f"That command is restricted to the **{CHOMAGE_KEEPER_ROLE}** role."
+            if interaction.response.is_done():
+                await interaction.followup.send(msg, ephemeral=True)
+            else:
+                await interaction.response.send_message(msg, ephemeral=True)
+            return
+        # Let the rest fall through to default handling (raises into the
+        # bot's global error handler, if any).
+        raise error
+
     @app_commands.command(
         name="match_stats_panel",
         description="(Re-)post the persistent match-stats control panel in the dedicated channel",
     )
     @app_commands.guild_only()
-    @app_commands.default_permissions(manage_channels=True)
+    @app_commands.check(_is_chomage_keeper)
     async def match_stats_panel(self, ctx: discord.Interaction) -> None:
         await ctx.response.defer(ephemeral=True)
 
@@ -1229,7 +1266,7 @@ class MatchAnalysis(commands.Cog):
         description="Clear the 5-minute chart-data cache (admin only)",
     )
     @app_commands.guild_only()
-    @app_commands.default_permissions(manage_guild=True)
+    @app_commands.check(_is_chomage_keeper)
     async def refresh_db_cache(self, interaction: discord.Interaction) -> None:
         """Force the next chart render to re-read match_stats from disk
         instead of using the in-memory cache. Useful after running a backfill
@@ -1245,7 +1282,7 @@ class MatchAnalysis(commands.Cog):
 
     @app_commands.command(name="whois", description="Bot operational status (admin)")
     @app_commands.guild_only()
-    @app_commands.default_permissions(manage_guild=True)
+    @app_commands.check(_is_chomage_keeper)
     async def whois(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
 

@@ -1164,6 +1164,7 @@ def plot_kda_vs_outcome(df: pd.DataFrame, player: str | None = None) -> plt.Figu
     axes[1].set_xticklabels(g["kda_bucket"])
     axes[1].set_ylim(0, 1.1)
     axes[1].set_ylabel("Win rate")
+    axes[1].yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
     axes[1].set_xlabel("KDA bucket")
     axes[1].set_title(_title("Win rate by KDA", player))
     whisker_note = "; whiskers = spread across people" if macro_n > 1 else ""
@@ -1207,6 +1208,7 @@ def plot_duration_vs_outcome(df: pd.DataFrame, player: str | None = None) -> plt
     axes[0].set_ylim(0, 1.1)
     axes[0].set_xlabel("Game duration (min)")
     axes[0].set_ylabel("Win rate")
+    axes[0].yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
     axes[0].set_title(_title("Win rate by game duration", player))
     whisker_note = "; whiskers = spread across people" if macro_n > 1 else ""
     _subtitle(
@@ -1293,6 +1295,7 @@ def plot_champion_winrate(
         ax.set_yticklabels(frame.index, color=PALETTE["text"])
         ax.set_xlim(0, 1)
         ax.set_xlabel("Win rate")
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
         ax.set_title(_title(f"{title} (≥{min_games} games)", player))
         _subtitle(
             ax,
@@ -1982,6 +1985,7 @@ def plot_champion_learning_curve(
     _baseline(ax)
     ax.set_xlabel("Nth game on champion")
     ax.set_ylabel(f"Rolling win rate (window={window})")
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
     ax.set_title(_title(f"Learning curves — top {top} champions", player))
     _subtitle(ax, "Up = grinding the champ pays off. Flat = practice isn't improving you.")
     ax.set_ylim(0, 1.05)
@@ -2029,6 +2033,7 @@ def _temporal_dual_axis(
     _baseline(ax_wr)
     ax_wr.set_ylim(0, 1.05)
     ax_wr.set_ylabel("Win rate", color=PALETTE["primary"])
+    ax_wr.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
     ax_wr.tick_params(axis="y", colors=PALETTE["primary"])
     ax_wr.grid(False)
     ax_wr.spines["right"].set_visible(False)
@@ -2390,6 +2395,7 @@ def plot_streak_recovery(df: pd.DataFrame, player: str | None = None) -> plt.Fig
     ax.set_xticklabels(_SIGNED_STREAK_LABELS, rotation=0, fontsize=9)
     ax.set_xlabel("Entering streak  (green = win streak, orange = loss streak)")
     ax.set_ylabel("Win rate of this game")
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
     ax.set_title(_title("Win rate by entering streak  (W ← → L)", player))
     _subtitle(
         ax,
@@ -2503,6 +2509,7 @@ def plot_streak_recovery(df: pd.DataFrame, player: str | None = None) -> plt.Fig
 
     ax2.set_xlabel("Additional games of the same outcome (k)")
     ax2.set_ylabel("P(streak still alive after k more)")
+    ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
     ax2.set_xticks(list(ks))
     ax2.set_ylim(0, 1.05)
     ax2.set_title(_title("Streak survival — wins vs losses", player))
@@ -2546,6 +2553,7 @@ def plot_time_since_prev(df: pd.DataFrame, player: str | None = None) -> plt.Fig
     ax.set_xticklabels(g["gap_bucket"])
     ax.set_xlabel("Time since previous game")
     ax.set_ylabel("Win rate")
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
     ax.set_title(_title("Win rate vs gap since previous game", player))
     _subtitle(
         ax,
@@ -2648,6 +2656,7 @@ def plot_session_analysis(df: pd.DataFrame, player: str | None = None) -> plt.Fi
     _baseline(ax)
     ax.set_xlabel("Nth game in current session  (10+ collapsed)")
     ax.set_ylabel("Win rate")
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
     ax.set_ylim(0, 1.05)
     ax.set_xticks(range(1, 11))
     ax.set_xticklabels([str(i) for i in range(1, 10)] + ["10+"])
@@ -2685,6 +2694,7 @@ def plot_session_analysis(df: pd.DataFrame, player: str | None = None) -> plt.Fi
     ax.set_xticklabels(g3["session_length_bucket"], rotation=0)
     ax.set_xlabel("Session length bucket")
     ax.set_ylabel("Win rate")
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
     ax.set_ylim(0, 1.1)
     ax.set_title(_title("Win rate by session length", player))
     _baseline(ax)
@@ -3073,6 +3083,7 @@ def plot_rank_trajectory(df: pd.DataFrame, player: str | None = None) -> plt.Fig
         ax_wr.axhline(0.5, color=PALETTE["muted"], linewidth=0.7, linestyle=":", alpha=0.6)
         ax_wr.set_ylim(0, 1.05)
         ax_wr.set_ylabel("Match-stats WR", color=PALETTE["accent_orange"])
+        ax_wr.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
         ax_wr.tick_params(axis="y", colors=PALETTE["accent_orange"])
         ax_wr.grid(False)
         ax_wr.spines["right"].set_visible(False)
@@ -3190,6 +3201,7 @@ def plot_cumulative_winrate(df: pd.DataFrame, player: str | None = None) -> plt.
     ax.set_ylim(0, 1.05)
     ax.set_xlabel("Date")
     ax.set_ylabel("Win rate")
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
     ax.set_title(_title("Win rate over time", player))
     _subtitle(
         ax,
@@ -3307,6 +3319,7 @@ def plot_player_progression(
     ax.set_xlim(0, 100)
     ax.set_xlabel("Percent of career (oldest → newest)")
     ax.set_ylabel(f"Rolling win rate (window={window})")
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
     ax.set_title(_title("Lifetime progression — getting better or worse?", player))
     _subtitle(
         ax,
@@ -3531,6 +3544,7 @@ def plot_duo_winrate(
         ax.set_yticklabels(partner_rows["partner"])
         ax.set_xlabel("WR same-team with partner")
         ax.set_xlim(0, 1)
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
         ax.set_title(_title("Duo WR by partner", player))
         _subtitle(ax, "Green = partner lifts you above baseline; red = drags below.")
         ax.legend(loc="lower right")
@@ -3586,6 +3600,7 @@ def plot_duo_winrate(
         ax.set_yticklabels(h_player["opponent"])
         ax.set_xlabel(f"{display_name}'s WR vs opponent")
         ax.set_xlim(0, 1)
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
         ax.set_title(_title("Head-to-head by opponent", player))
         _subtitle(ax, "Above 50% = you beat them more often. Bar colour = direction.")
         ax.legend(loc="lower right")
@@ -3656,6 +3671,7 @@ def plot_activity_over_time(df: pd.DataFrame, player: str | None = None) -> plt.
     _baseline(ax_wr)
     ax_wr.set_ylim(0, 1.05)
     ax_wr.set_ylabel("Win rate", color=PALETTE["primary"])
+    ax_wr.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
     ax_wr.tick_params(axis="y", colors=PALETTE["primary"])
     ax_wr.grid(False)
     ax_wr.spines["right"].set_visible(False)
@@ -4683,6 +4699,8 @@ def plot_model_calibration(df: pd.DataFrame, player: str | None = None) -> plt.F
     ax_cal.set_ylim(0, 1)
     ax_cal.set_xlabel("Predicted win probability")
     ax_cal.set_ylabel("Observed win rate (holdout)")
+    ax_cal.xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
+    ax_cal.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
     ax_cal.set_title("Calibration curve (holdout)")
     _subtitle(
         ax_cal,
@@ -5328,6 +5346,7 @@ def plot_tier_winrate(df: pd.DataFrame, player: str | None = None) -> plt.Figure
     ax.invert_yaxis()  # Challenger on top, Iron on bottom
     ax.set_xlim(0, 1)
     ax.set_xlabel("Win rate")
+    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
     ax.set_title(_title("Win rate by rank at match time", player))
     _subtitle(
         ax,
@@ -6195,6 +6214,7 @@ def plot_role_winrate(df: pd.DataFrame, player: str | None = None) -> plt.Figure
     ax.set_xticklabels(agg["role"].tolist())
     ax.set_ylim(0, 1)
     ax.set_ylabel("Win rate")
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
     ax.set_title(_title("Win rate by role", player))
     _subtitle(ax, subtitle)
     ax.legend(loc="upper right")
@@ -6551,6 +6571,7 @@ def plot_tilt_by_gap(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
     ax.set_xticklabels(_TILT_GAP_LABELS)
     ax.set_xlabel("Gap since previous game")
     ax.set_ylabel("Win rate")
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
     ax.set_ylim(0.0, 1.0)
 
     if is_aggregate_mode:
@@ -6725,6 +6746,7 @@ def plot_session_position_wr(df: pd.DataFrame, player: str | None = None) -> plt
     ax.set_xticklabels(_SESSION_POS_LABELS)
     ax.set_xlabel("Game position within session")
     ax.set_ylabel("Win rate")
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
     ax.set_ylim(0.0, 1.0)
 
     subtitle = (
@@ -6940,6 +6962,7 @@ def plot_improvement_slope(df: pd.DataFrame, player: str | None = None) -> plt.F
     ax.set_ylim(0.0, 1.05)
     ax.set_xlabel("Game index (0 = oldest)")
     ax.set_ylabel("Win rate")
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
     name = _display_label(player) or person
     ax.set_title(f"Improvement trajectory - {name}")
     if np.isfinite(fit["ci_lo_pp"]) and np.isfinite(fit["ci_hi_pp"]):
@@ -7456,6 +7479,7 @@ def plot_game_pace(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
     ax_bot.set_ylim(0, 1.1)
     ax_bot.set_xlabel("Game duration bin (min)")
     ax_bot.set_ylabel("Win rate")
+    ax_bot.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
     ax_bot.set_title("Win rate by duration bin")
     _subtitle(ax_bot, "Bars = pooled WR in bin; whiskers = Wilson 95% CI; n labelled per bin.")
     _annotate_bars(ax_bot, x, means, pace["games"])
@@ -7558,6 +7582,7 @@ def plot_shrunk_champ_rankings(df: pd.DataFrame, player: str | None = None) -> p
     )
     ax.set_xlabel("Win rate")
     ax.set_xlim(0, max(1.0, float(top["shrunk_wr"].max()) + 0.18))
+    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
     ax.set_title(title)
     _subtitle(ax, subtitle)
     ax.legend(loc="lower right", framealpha=0.85, fontsize=9)
@@ -7712,6 +7737,7 @@ def plot_champ_pool_concentration(df: pd.DataFrame, player: str | None = None) -
         r, p_val = _pearson_r_with_p(x, y)
         axes[1].set_xlabel("Effective number of champions")
         axes[1].set_ylabel("Win rate")
+        axes[1].yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
         axes[1].set_title("Pool size vs win rate")
         if np.isnan(r):
             sub = "Not enough data to compute Pearson correlation."
@@ -9576,6 +9602,7 @@ def _render_swap_panel(
     ax.set_yticklabels([r["champion"] for r in rows])
     ax.set_xlim(0, 1.0)
     ax.set_xlabel("Shrunken win rate")
+    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
 
     # Stats annotation immediately to the right of each bar — no overflow
     # into the neighbouring axes because the x-axis is hard-capped at 1.0.
@@ -9853,6 +9880,7 @@ def plot_per_account_breakdown(df: pd.DataFrame, player: str | None = None) -> p
         ax.set_xlim(0, 1)
         ax.axvline(0.5, color=PALETTE["muted"], linewidth=0.8, linestyle=(0, (4, 4)), alpha=0.55)
         ax.set_xlabel("Win rate")
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
         ax.set_title(_title("Per-account WR breakdown - main vs smurf/alt detection", None))
         _subtitle(
             ax,
@@ -9913,6 +9941,7 @@ def plot_per_account_breakdown(df: pd.DataFrame, player: str | None = None) -> p
     ax.invert_yaxis()
     ax.set_xlim(0, 1)
     ax.set_xlabel("Win rate")
+    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
     ax.set_title(_title(f"Per-account breakdown - {person_name}", None))
     sig_label = "significant" if p_val < 0.05 else "not significant"
     _subtitle(
@@ -11290,6 +11319,7 @@ def _plot_recent_form_person(df: pd.DataFrame, player: str | None) -> plt.Figure
     ax.set_xticks(x)
     ax.set_xticklabels([b["label"] for b in bars])
     ax.set_ylabel("Win rate")
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
     ax.set_ylim(0, max(0.7, float(np.nanmax(heights)) + 0.15))
     _baseline(ax, 0.5)
     ax.set_title(f"Recent form - {_display_label(player) or person}")
@@ -11494,6 +11524,7 @@ def plot_session_stamina(df: pd.DataFrame, player: str | None = None) -> plt.Fig
     ax.set_xticklabels(series["bucket"].tolist())
     ax.set_xlabel("Total session duration")
     ax.set_ylabel("Win rate")
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
     ax.set_ylim(0.0, 1.0)
 
     if is_aggregate_mode:
@@ -11661,6 +11692,7 @@ def plot_kda_dominance(df: pd.DataFrame, player: str | None = None) -> plt.Figur
         ax.set_yticklabels(own["teammate"].tolist())
         ax.set_xlim(0.0, 1.0)
         ax.set_xlabel("Share of shared games where your KDA > teammate's")
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
         ax.set_title(_title("KDA dominance", player))
         _subtitle(
             ax,

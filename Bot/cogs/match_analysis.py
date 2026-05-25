@@ -1237,6 +1237,30 @@ class MatchAnalysis(commands.Cog):
             )
             return
 
+        # Clear the channel before posting so the new panel is the only
+        # message visible. purge handles 14-day-young messages in bulk;
+        # older ones fall back to per-message deletes automatically.
+        purged = 0
+        try:
+            deleted = await channel.purge(limit=None)
+            purged = len(deleted)
+            self.bot.logging.info(
+                f"match_stats_panel: purged {purged} message(s) from <#{channel.id}> before posting"
+            )
+        except discord.Forbidden:
+            await ctx.followup.send(
+                f"I don't have permission to delete messages in <#{PANEL_CHANNEL_ID}>. "
+                "Grant Manage Messages and re-run.",
+                ephemeral=True,
+            )
+            return
+        except Exception as exc:
+            self.bot.logging.warning(f"match_stats_panel purge failed: {exc!r}, continuing anyway")
+
+        # Any panel message id we had cached is now gone — let the loop
+        # re-detect from the fresh post.
+        self._panel_message_id = None
+
         try:
             msg, df = await self._post_panel(channel)
         except discord.Forbidden:
@@ -1253,9 +1277,8 @@ class MatchAnalysis(commands.Cog):
         n_accounts = int(df["riot_account"].nunique()) if not df.empty else 0
         await ctx.followup.send(
             f"Panel posted in <#{channel.id}> → [jump]({msg.jump_url}).\n"
-            f"Dropdown lists {n_people} people ({n_accounts} Riot accounts total). "
-            "If there's a previous panel above this one, delete it manually — "
-            "both will work but you probably don't want two.",
+            f"Cleared {purged} prior message(s). "
+            f"Dropdown lists {n_people} people ({n_accounts} Riot accounts total).",
             ephemeral=True,
         )
 

@@ -20,20 +20,36 @@ class Refresh(
 
     @command(name="sync")
     async def sync(self, ctx: discord.Interaction):
-        """Command to sync all slash commands to discord
+        """Sync slash commands.
 
-        Args:
-            ctx (discord.Interaction): The discord interaction object
+        Guild-scope sync first (instant — appears immediately in this
+        server) followed by a global sync (canonical, propagates to
+        other servers / DMs over the next ~hour). Mirrors the pattern
+        in ``Bot/utils/sync_commands.py`` so admins don't have to wait
+        for global propagation after updating a command's decorator.
         """
         await ctx.response.defer()
         msg = await ctx.followup.send("Syncing commands...", wait=True, ephemeral=True)
         self.bot.logging.info("Syncing commands")
         try:
-            await self.bot.tree.sync()
-            await msg.edit(content="Succesfully synced")
+            guild = ctx.guild
+            if guild is not None:
+                self.bot.tree.copy_global_to(guild=guild)
+                guild_synced = await self.bot.tree.sync(guild=guild)
+                self.bot.logging.info(
+                    f"Synced {len(guild_synced)} guild-scope command(s) to {guild.id}"
+                )
+            global_synced = await self.bot.tree.sync()
+            self.bot.logging.info(f"Synced {len(global_synced)} global command(s)")
+            await msg.edit(
+                content=(
+                    f"Synced {len(guild_synced) if guild else 0} guild + "
+                    f"{len(global_synced)} global commands."
+                )
+            )
         except Exception as e:
             self.bot.logging.error(f"Failed to sync due to: {e}")
-            await msg.edit(content="Unsuccesful sync")
+            await msg.edit(content=f"Unsuccessful sync: {e!r}")
 
     @command(name="reload_cogs")
     async def reload_cogs(self, ctx: discord.Interaction):

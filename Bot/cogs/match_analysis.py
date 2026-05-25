@@ -1081,10 +1081,8 @@ class _MoreAnalyticsView(discord.ui.View):
         embed = discord.Embed(title=f"{emoji} {label} — {who}")
         embed.set_image(url="attachment://chart.png")
         file = _figure_to_file(fig)
-        # Public follow-up — channel sees the chart even though the menu
-        # was ephemeral. Mirrors the panel's "click button → public chart"
-        # flow so onlookers can react.
-        await interaction.followup.send(embed=embed, file=file, ephemeral=False)
+        # Ephemeral — only the clicker sees the chart, channel stays clean.
+        await interaction.followup.send(embed=embed, file=file, ephemeral=True)
 
 
 # --- Persistent panel ------------------------------------------------------
@@ -1239,6 +1237,30 @@ class MatchAnalysis(commands.Cog):
             )
             return
 
+        # Clear the channel before posting so the new panel is the only
+        # message visible. purge handles 14-day-young messages in bulk;
+        # older ones fall back to per-message deletes automatically.
+        purged = 0
+        try:
+            deleted = await channel.purge(limit=None)
+            purged = len(deleted)
+            self.bot.logging.info(
+                f"match_stats_panel: purged {purged} message(s) from <#{channel.id}> before posting"
+            )
+        except discord.Forbidden:
+            await ctx.followup.send(
+                f"I don't have permission to delete messages in <#{PANEL_CHANNEL_ID}>. "
+                "Grant Manage Messages and re-run.",
+                ephemeral=True,
+            )
+            return
+        except Exception as exc:
+            self.bot.logging.warning(f"match_stats_panel purge failed: {exc!r}, continuing anyway")
+
+        # Any panel message id we had cached is now gone — let the loop
+        # re-detect from the fresh post.
+        self._panel_message_id = None
+
         try:
             msg, df = await self._post_panel(channel)
         except discord.Forbidden:
@@ -1255,9 +1277,8 @@ class MatchAnalysis(commands.Cog):
         n_accounts = int(df["riot_account"].nunique()) if not df.empty else 0
         await ctx.followup.send(
             f"Panel posted in <#{channel.id}> → [jump]({msg.jump_url}).\n"
-            f"Dropdown lists {n_people} people ({n_accounts} Riot accounts total). "
-            "If there's a previous panel above this one, delete it manually — "
-            "both will work but you probably don't want two.",
+            f"Cleared {purged} prior message(s). "
+            f"Dropdown lists {n_people} people ({n_accounts} Riot accounts total).",
             ephemeral=True,
         )
 
@@ -1387,8 +1408,10 @@ class MatchAnalysis(commands.Cog):
 
     @tasks.loop(minutes=STICKY_CHECK_MINUTES)
     async def sticky_panel(self) -> None:
-        """Re-post the panel if it's been bumped off being the most-recent
-        message in PANEL_CHANNEL_ID.
+        """Keep the panel at the top of PANEL_CHANNEL_ID by DELETING any
+        non-panel messages that landed after it. The panel message itself
+        is preserved — no re-post — so its id, reactions and jump-url
+        stay stable.
 
         Cold start (no panel ever posted via the admin command, no panel
         found in history) is a no-op — we don't auto-create panels the
@@ -1428,33 +1451,31 @@ class MatchAnalysis(commands.Cog):
             self._sticky_panel_last_fired = dt.datetime.now()
             return
 
+        # Panel is no longer the topmost message. Delete every message
+        # AFTER it (chronologically newer) until the panel is on top
+        # again. We don't repost the panel itself — keeps its id, embed,
+        # and reactions stable.
         bumper = f"{latest.id} from {latest.author}" if latest is not None else "(empty channel)"
-        self.bot.logging.info(f"Sticky panel: bumped by message {bumper}, re-posting")
+        self.bot.logging.info(f"Sticky panel: bumped by message {bumper}, clearing newer messages")
 
-        # Delete the previous panel before re-posting so the channel
-        # doesn't accumulate stale panels. If the message is already gone
-        # (manual delete, etc.) discord.NotFound is fine.
-        old_id = self._panel_message_id
-        try:
-            old_msg = await channel.fetch_message(old_id)
-            await old_msg.delete()
-        except discord.NotFound:
-            pass
-        except discord.Forbidden:
-            self.bot.logging.warning(
-                f"Sticky panel: missing permission to delete old panel {old_id}; "
-                "re-posting anyway"
-            )
-        except Exception as exc:
-            self.bot.logging.error(f"Sticky panel: failed to delete old panel {old_id}: {exc!r}")
-
-        try:
-            await self._post_panel(channel)
-        except discord.Forbidden:
-            self.bot.logging.warning(
-                f"Sticky panel: missing permission to post in <#{PANEL_CHANNEL_ID}>"
-            )
-        # Any other exception bubbles into sticky_panel_error and restarts.
+        deleted = 0
+        # iterate newest-first; stop when we hit the panel or have cleared 50.
+        async for m in channel.history(limit=50):
+            if m.id == self._panel_message_id:
+                break
+            try:
+                await m.delete()
+                deleted += 1
+            except discord.NotFound:
+                pass
+            except discord.Forbidden:
+                self.bot.logging.warning(
+                    f"Sticky panel: missing permission to delete message {m.id}; stopping"
+                )
+                break
+            except Exception as exc:
+                self.bot.logging.error(f"Sticky panel: failed to delete message {m.id}: {exc!r}")
+        self.bot.logging.info(f"Sticky panel: cleared {deleted} non-panel message(s)")
         self._sticky_panel_last_fired = dt.datetime.now()
 
     @sticky_panel.before_loop
@@ -1574,7 +1595,7 @@ class MatchAnalysis(commands.Cog):
         interaction: discord.Interaction,
         user: discord.User | None = None,
     ) -> None:
-        await interaction.response.defer(ephemeral=False)
+        await interaction.response.defer(ephemeral=True)
         target = user or interaction.user
 
         try:
@@ -1621,7 +1642,7 @@ class MatchAnalysis(commands.Cog):
         )
         embed.set_image(url="attachment://chart.png")
         file = _figure_to_file(fig)
-        await interaction.followup.send(embed=embed, file=file)
+        await interaction.followup.send(embed=embed, file=file, ephemeral=True)
 
     @app_commands.command(
         name="me_text",
@@ -1634,7 +1655,7 @@ class MatchAnalysis(commands.Cog):
         interaction: discord.Interaction,
         user: discord.User | None = None,
     ) -> None:
-        await interaction.response.defer(ephemeral=False)
+        await interaction.response.defer(ephemeral=True)
         target = user or interaction.user
 
         try:
@@ -1671,7 +1692,7 @@ class MatchAnalysis(commands.Cog):
             return
 
         embed = _build_me_text_embed(df, sub, person_name)
-        await interaction.followup.send(embed=embed)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     @app_commands.command(
         name="me_todo",
@@ -1684,7 +1705,7 @@ class MatchAnalysis(commands.Cog):
         interaction: discord.Interaction,
         user: discord.User | None = None,
     ) -> None:
-        await interaction.response.defer(ephemeral=False)
+        await interaction.response.defer(ephemeral=True)
         target = user or interaction.user
 
         try:
@@ -1721,7 +1742,7 @@ class MatchAnalysis(commands.Cog):
             return
 
         embed = _build_me_todo_embed(df, sub, person_name)
-        await interaction.followup.send(embed=embed)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     @app_commands.command(name="streak", description="Show your current active win/loss streak")
     @app_commands.guild_only()
@@ -1732,7 +1753,7 @@ class MatchAnalysis(commands.Cog):
         user: discord.User | None = None,
     ) -> None:
         target = user or interaction.user
-        await interaction.response.defer(ephemeral=False)
+        await interaction.response.defer(ephemeral=True)
 
         df = await _load_matches_cached(self.bot.db_path)
         matched = df[df["discord_user_id"].astype(str) == str(target.id)]
@@ -1764,7 +1785,7 @@ class MatchAnalysis(commands.Cog):
             color=discord.Color.green() if last_outcome == 1 else discord.Color.red(),
         )
         embed.set_footer(text=f"{len(sub):,} total games · WR {sub['win'].mean():.0%}")
-        await interaction.followup.send(embed=embed)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     @app_commands.command(
         name="leaderboard_week",
@@ -1773,7 +1794,7 @@ class MatchAnalysis(commands.Cog):
     @app_commands.guild_only()
     @app_commands.describe(days="Number of days to include (1-90, default 7)")
     async def leaderboard_week(self, interaction: discord.Interaction, days: int = 7) -> None:
-        await interaction.response.defer(ephemeral=False)
+        await interaction.response.defer(ephemeral=True)
         days = max(1, min(days, 90))
 
         try:
@@ -1844,7 +1865,7 @@ class MatchAnalysis(commands.Cog):
                 f"{cutoff:%Y-%m-%d} → {now:%Y-%m-%d}"
             )
         )
-        await interaction.followup.send(embed=embed)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     async def _champ_autocomplete(
         self, interaction: discord.Interaction, current: str
@@ -1874,7 +1895,7 @@ class MatchAnalysis(commands.Cog):
     @app_commands.describe(name="Champion name (Riot internal name, e.g. 'Khazix', 'MissFortune')")
     @app_commands.autocomplete(name=_champ_autocomplete)
     async def champ(self, interaction: discord.Interaction, name: str) -> None:
-        await interaction.response.defer(ephemeral=False)
+        await interaction.response.defer(ephemeral=True)
 
         try:
             df = await _load_matches_cached(self.bot.db_path)
@@ -1973,7 +1994,7 @@ class MatchAnalysis(commands.Cog):
             text=f"Role: {role} · Played by {sel['person'].nunique()} different people"
         )
 
-        await interaction.followup.send(embed=embed)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     @app_commands.command(
         name="compare",
@@ -1990,7 +2011,7 @@ class MatchAnalysis(commands.Cog):
         user_a: discord.User,
         user_b: discord.User,
     ) -> None:
-        await interaction.response.defer(ephemeral=False)
+        await interaction.response.defer(ephemeral=True)
 
         if user_a.id == user_b.id:
             await interaction.followup.send("Pick two different users.", ephemeral=True)
@@ -2102,16 +2123,17 @@ class MatchAnalysis(commands.Cog):
         embed.description = "```\n" + "\n".join(lines) + "\n```"
         embed.set_footer(text=f"{a['n']:,} + {b['n']:,} = {a['n'] + b['n']:,} total games compared")
 
-        await interaction.followup.send(embed=embed)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     async def open_explorer(
         self, interaction: discord.Interaction, chart_idx: int, person: str | None
     ) -> None:
         """Entry point called by panel components: load data, render the
-        requested chart for the requested person, and post the chart as a
-        public message. The chart-switcher buttons inside are restricted
-        to the original clicker via interaction_check."""
-        await interaction.response.defer()
+        requested chart for the requested person, post the chart as an
+        EPHEMERAL message (only the clicker sees it). The chart-switcher
+        buttons inside are restricted to the original clicker via
+        interaction_check."""
+        await interaction.response.defer(ephemeral=True)
         try:
             df = await _load_matches_cached(self.bot.db_path)
         except Exception as exc:
@@ -2145,7 +2167,7 @@ class MatchAnalysis(commands.Cog):
         embed.set_image(url="attachment://chart.png")
         file = _figure_to_file(fig)
         view = _ExplorerView(df, invoker_id=interaction.user.id, chart_idx=chart_idx, person=person)
-        await interaction.followup.send(embed=embed, file=file, view=view)
+        await interaction.followup.send(embed=embed, file=file, view=view, ephemeral=True)
 
 
 async def setup(bot: commands.Bot) -> None:

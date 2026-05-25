@@ -59,3 +59,17 @@ create table if not exists match_stats (
 create index if not exists idx_match_stats_puuid_time on match_stats (puuid, game_start DESC);
 create unique index if not exists discord_events_event_id_uindex on discord_events (event_id);
 create unique index if not exists users_user_id_uindex on users (user_id);
+-- Audit log of slash commands + button clicks + select-menu picks. Used to
+-- surface which features actually get used, so we can prune the unused ones.
+-- Written by the `usage_logger` cog via the on_interaction event. Indexed
+-- on (timestamp, command_name) for the typical "top commands in last N days"
+-- query.
+create table if not exists command_usage (
+    id INTEGER not null primary key autoincrement,
+    timestamp DATETIME not null DEFAULT CURRENT_TIMESTAMP,
+    command_name TEXT not null,
+    user_id TEXT,
+    guild_id TEXT,
+    interaction_type TEXT not null
+);
+create index if not exists idx_command_usage_time_cmd on command_usage (timestamp DESC, command_name);

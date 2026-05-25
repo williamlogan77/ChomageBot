@@ -325,8 +325,8 @@ class Backfill(commands.Cog):
                     await db.execute(
                         "INSERT OR IGNORE INTO match_stats "
                         "(match_id, puuid, game_start, queue_id, champion, "
-                        " win, kills, deaths, assists, duration_sec) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        " win, kills, deaths, assists, duration_sec, patch_version) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (
                             mid,
                             puuid,
@@ -338,6 +338,7 @@ class Backfill(commands.Cog):
                             participant["deaths"],
                             participant["assists"],
                             match["info"]["gameDuration"],
+                            match["info"].get("gameVersion"),
                         ),
                     )
                     await db.commit()

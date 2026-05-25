@@ -47,6 +47,211 @@ SESSION_GAP_MIN = 60
 SESSION_LEN_BINS = [1, 2, 4, 6, 10, 16, 9999]
 SESSION_LEN_LABELS = ["1 game", "2-3", "4-5", "6-9", "10-15", "16+"]
 
+# Maximum gap between consecutive league_history snapshots (per person)
+# for which we trust the diff as a single ranked game. The bot's
+# post_ranks loop normally polls every 120s, so back-to-back snapshots
+# are minutes apart; anything beyond 2 hours straddles a bot outage
+# (see the late-2024 -> early-2026 gap caused by the silent task-loop
+# freeze fixed in ecfff72) and the snapshot pair would otherwise
+# fabricate a single "match" worth hundreds of LP.
+MAX_INTER_SNAPSHOT_MIN = 120
+
+# Threshold (in hours) for breaking the rank-trajectory line and
+# shading the gap region. league_history only inserts a row on LP
+# change, so quiet weeks would otherwise read as "gaps". Set high
+# enough that normal player inactivity (vacations, exam weeks, taking
+# a break from ranked) does NOT flag — only true bot outages do.
+# 30 days isolates the 2024-11 -> 2026-01 task-loop freeze cleanly.
+RANK_GAP_HOURS = 24 * 30
+
+
+# Canonical role display order — used for x-axis ordering of role charts.
+ROLE_ORDER = ["TOP", "JUNGLE", "MID", "ADC", "SUPPORT"]
+
+
+# Heuristic primary-role mapping; some champs flex (e.g. Sett: top/support — we say TOP).
+# Keys match the Riot internal `dataName` (Chogath, Leblanc, FiddleSticks, MonkeyKing, ...)
+# as stored in match_stats.champion. Champions not present here resolve to "UNKNOWN" and
+# are skipped by the per-role winrate chart.
+CHAMPION_ROLES: dict[str, str] = {
+    # TOP
+    "Aatrox": "TOP",
+    "Ambessa": "TOP",
+    "Camille": "TOP",
+    "Chogath": "TOP",
+    "Darius": "TOP",
+    "DrMundo": "TOP",
+    "Fiora": "TOP",
+    "Gangplank": "TOP",
+    "Garen": "TOP",
+    "Gnar": "TOP",
+    "Gwen": "TOP",
+    "Illaoi": "TOP",
+    "Irelia": "TOP",
+    "Jax": "TOP",
+    "Jayce": "TOP",
+    "Kayle": "TOP",
+    "Kennen": "TOP",
+    "Kled": "TOP",
+    "KSante": "TOP",
+    "Malphite": "TOP",
+    "Mordekaiser": "TOP",
+    "Nasus": "TOP",
+    "Ornn": "TOP",
+    "Pantheon": "TOP",
+    "Poppy": "TOP",
+    "Quinn": "TOP",
+    "Renekton": "TOP",
+    "Riven": "TOP",
+    "Rumble": "TOP",
+    "Sett": "TOP",
+    "Shen": "TOP",
+    "Singed": "TOP",
+    "Sion": "TOP",
+    "Teemo": "TOP",
+    "Tryndamere": "TOP",
+    "Urgot": "TOP",
+    "Vladimir": "TOP",
+    "Volibear": "TOP",
+    "Warwick": "TOP",
+    "Yasuo": "TOP",
+    "Yorick": "TOP",
+    # JUNGLE
+    "Amumu": "JUNGLE",
+    "Belveth": "JUNGLE",
+    "Briar": "JUNGLE",
+    "Diana": "JUNGLE",
+    "Ekko": "JUNGLE",
+    "Elise": "JUNGLE",
+    "Evelynn": "JUNGLE",
+    "FiddleSticks": "JUNGLE",
+    "Gragas": "JUNGLE",
+    "Graves": "JUNGLE",
+    "Hecarim": "JUNGLE",
+    "Ivern": "JUNGLE",
+    "JarvanIV": "JUNGLE",
+    "Karthus": "JUNGLE",
+    "Kayn": "JUNGLE",
+    "Khazix": "JUNGLE",
+    "Kindred": "JUNGLE",
+    "LeeSin": "JUNGLE",
+    "Lillia": "JUNGLE",
+    "MasterYi": "JUNGLE",
+    "MonkeyKing": "JUNGLE",
+    "Naafiri": "JUNGLE",
+    "Nidalee": "JUNGLE",
+    "Nocturne": "JUNGLE",
+    "Nunu": "JUNGLE",
+    "Olaf": "JUNGLE",
+    "Rammus": "JUNGLE",
+    "RekSai": "JUNGLE",
+    "Rengar": "JUNGLE",
+    "Sejuani": "JUNGLE",
+    "Shaco": "JUNGLE",
+    "Shyvana": "JUNGLE",
+    "Skarner": "JUNGLE",
+    "Trundle": "JUNGLE",
+    "Udyr": "JUNGLE",
+    "Vi": "JUNGLE",
+    "Viego": "JUNGLE",
+    "XinZhao": "JUNGLE",
+    "Zac": "JUNGLE",
+    # MID
+    "Ahri": "MID",
+    "Akali": "MID",
+    "Akshan": "MID",
+    "Anivia": "MID",
+    "Annie": "MID",
+    "AurelionSol": "MID",
+    "Aurora": "MID",
+    "Azir": "MID",
+    "Cassiopeia": "MID",
+    "Fizz": "MID",
+    "Galio": "MID",
+    "Heimerdinger": "MID",
+    "Hwei": "MID",
+    "Kassadin": "MID",
+    "Katarina": "MID",
+    "Leblanc": "MID",
+    "Lissandra": "MID",
+    "Lux": "MID",
+    "Malzahar": "MID",
+    "Neeko": "MID",
+    "Orianna": "MID",
+    "Qiyana": "MID",
+    "Ryze": "MID",
+    "Sylas": "MID",
+    "Syndra": "MID",
+    "Taliyah": "MID",
+    "Talon": "MID",
+    "TwistedFate": "MID",
+    "Veigar": "MID",
+    "Velkoz": "MID",
+    "Vex": "MID",
+    "Viktor": "MID",
+    "Xerath": "MID",
+    "Yone": "MID",
+    "Zed": "MID",
+    "Ziggs": "MID",
+    "Zoe": "MID",
+    # ADC
+    "Aphelios": "ADC",
+    "Ashe": "ADC",
+    "Caitlyn": "ADC",
+    "Corki": "ADC",
+    "Draven": "ADC",
+    "Ezreal": "ADC",
+    "Jhin": "ADC",
+    "Jinx": "ADC",
+    "Kaisa": "ADC",
+    "Kalista": "ADC",
+    "KogMaw": "ADC",
+    "Lucian": "ADC",
+    "MissFortune": "ADC",
+    "Nilah": "ADC",
+    "Samira": "ADC",
+    "Senna": "ADC",
+    "Sivir": "ADC",
+    "Smolder": "ADC",
+    "Tristana": "ADC",
+    "Twitch": "ADC",
+    "Varus": "ADC",
+    "Vayne": "ADC",
+    "Xayah": "ADC",
+    "Yunara": "ADC",
+    "Zeri": "ADC",
+    # SUPPORT
+    "Alistar": "SUPPORT",
+    "Bard": "SUPPORT",
+    "Blitzcrank": "SUPPORT",
+    "Brand": "SUPPORT",
+    "Braum": "SUPPORT",
+    "Janna": "SUPPORT",
+    "Karma": "SUPPORT",
+    "Leona": "SUPPORT",
+    "Lulu": "SUPPORT",
+    "Maokai": "SUPPORT",
+    "Mel": "SUPPORT",
+    "Milio": "SUPPORT",
+    "Morgana": "SUPPORT",
+    "Nami": "SUPPORT",
+    "Nautilus": "SUPPORT",
+    "Pyke": "SUPPORT",
+    "Rakan": "SUPPORT",
+    "Rell": "SUPPORT",
+    "Renata": "SUPPORT",
+    "Seraphine": "SUPPORT",
+    "Sona": "SUPPORT",
+    "Soraka": "SUPPORT",
+    "Swain": "SUPPORT",
+    "TahmKench": "SUPPORT",
+    "Taric": "SUPPORT",
+    "Thresh": "SUPPORT",
+    "Yuumi": "SUPPORT",
+    "Zilean": "SUPPORT",
+    "Zyra": "SUPPORT",
+}
+
 
 # --- Visual style -----------------------------------------------------------
 
@@ -63,6 +268,18 @@ PALETTE = {
     "grid": "#e6eaee",
     "spine": "#cfd4d9",
 }
+
+# Soft, grey, capless whisker style for every ax.errorbar call.
+# Hard black caps + thick lines were stealing visual weight from the bar
+# fills they're meant to annotate; muted grey + no caps recedes correctly.
+WHISKER_STYLE = {
+    "fmt": "none",
+    "capsize": 0,
+    "ecolor": PALETTE["muted"],
+    "elinewidth": 0.9,
+    "alpha": 0.45,
+}
+
 
 # Hand-picked cycle for multi-series charts (progression, learning curves).
 # Avoids matplotlib's default tab10 which clashes with our win/loss greens
@@ -154,16 +371,18 @@ def _baseline(ax, y: float = 0.5, label: str | None = None) -> None:
 
 
 def _subtitle(ax, text: str) -> None:
-    """One-line italic caption immediately under the (already-set) title.
+    """Italic caption immediately under the (already-set) title.
 
     Tells the reader what to look at — every plot should call this once
     so an audience that's never seen the chart can read it cold.
+
+    Long captions are auto-wrapped to the axes width (not the figure
+    width — matplotlib's wrap=True default would spill across adjacent
+    panels). The title's pad scales with the rendered line count so the
+    caption always clears the title without manual tuning.
     """
-    # Push the bold title up a touch so the caption has room.
     title = ax.get_title()
-    if title:
-        ax.set_title(title, pad=22)
-    ax.text(
+    txt = ax.text(
         0.0,
         1.01,
         text,
@@ -173,7 +392,44 @@ def _subtitle(ax, text: str) -> None:
         fontsize=10,
         color=PALETTE["muted"],
         style="italic",
+        wrap=True,
     )
+    # Clip wrap to the axes width — wrap=True alone wraps at the figure
+    # bbox, which leaks past the panel boundary on multi-panel charts.
+    txt._get_wrap_line_width = lambda: ax.bbox.width
+    # Pad the title by the rendered visual height of the wrapped caption,
+    # so a 1-line caption sits compact and a 3-line wrapped caption still
+    # clears the title. The text is va="bottom"-anchored at y=1.01 and
+    # grows UPWARD, so pad must exceed the total wrapped text height in
+    # points (~12pt per line including leading) or the title collides.
+    # Falls back to logical line count if the renderer isn't ready.
+    if title:
+        n_visual = _wrapped_line_count(txt, ax)
+        ax.set_title(title, pad=14 + 13 * n_visual)
+
+
+def _wrapped_line_count(txt, ax) -> int:
+    """Visual line count for an already-placed wrap=True Text artist.
+
+    Uses the figure renderer to compute the wrapped pixel height divided
+    by the unwrapped single-line pixel height. Sidesteps having to
+    re-implement matplotlib's word-break heuristic. Returns the logical
+    line count (\\n + 1) as a safe lower bound if the renderer call fails.
+    """
+    raw = txt.get_text()
+    logical_lines = raw.count("\n") + 1
+    try:
+        renderer = ax.figure.canvas.get_renderer()
+        # Total wrapped height ÷ unwrapped single-line height = visual rows.
+        wrapped_bbox = txt.get_window_extent(renderer=renderer)
+        single = ax.text(0.0, 0.0, "Ag", transform=ax.transAxes, fontsize=10, style="italic")
+        single_bbox = single.get_window_extent(renderer=renderer)
+        single.remove()
+        if single_bbox.height <= 0:
+            return logical_lines
+        return max(logical_lines, int(round(wrapped_bbox.height / single_bbox.height)))
+    except Exception:
+        return logical_lines
 
 
 def wilson_ci(wins: int, games: int, z: float = 1.96) -> tuple[float, float]:
@@ -299,6 +555,32 @@ def wald_pvalue(coef: float, se: float) -> float:
     return float(math.erfc(z / math.sqrt(2.0)))
 
 
+def bh_adjust(pvalues: list[float]) -> list[float]:
+    """Benjamini-Hochberg FDR-adjusted p-values.
+
+    Each adjusted p = min(1, p * m / rank_when_sorted_ascending), then
+    enforced monotonic by sweeping from largest p downward. Controls the
+    expected proportion of false positives among declared-significant
+    findings at the threshold used (q < α). The right knob to turn for
+    the "tested 10 features, one came out 'significant' by chance" case.
+    """
+    p = np.asarray(pvalues, dtype=float)
+    n = len(p)
+    if n == 0:
+        return []
+    order = np.argsort(p)
+    ranked = p[order]
+    adj = ranked * n / np.arange(1, n + 1)
+    # Monotonicity sweep from highest-rank down so q-values never decrease
+    # as raw p increases — the standard BH step-up adjustment.
+    for i in range(n - 2, -1, -1):
+        adj[i] = min(adj[i], adj[i + 1])
+    adj = np.clip(adj, 0.0, 1.0)
+    out = np.empty(n, dtype=float)
+    out[order] = adj
+    return out.tolist()
+
+
 def chi2_homogeneity(counts: np.ndarray, totals: np.ndarray) -> tuple[float, int, float]:
     """Chi-square test of "does P(win) differ across buckets?".
 
@@ -404,6 +686,7 @@ def load_matches(db_path: Path = DEFAULT_DB) -> pd.DataFrame:
                 ms.deaths,
                 ms.assists,
                 ms.duration_sec,
+                ms.patch_version,
                 lp.league_username AS riot_account,
                 lp.discord_user_id,
                 COALESCE(
@@ -429,6 +712,7 @@ def load_matches(db_path: Path = DEFAULT_DB) -> pd.DataFrame:
     df["duration_bucket"] = pd.cut(
         df["duration_min"], bins=DURATION_BINS_MIN, labels=DURATION_LABELS, right=False
     )
+    df["role"] = df["champion"].map(CHAMPION_ROLES).fillna("UNKNOWN")
 
     # Per-person time-series features (treats multi-account users as one
     # continuous game stream — sorted by game_start so the streak/gap
@@ -444,6 +728,7 @@ def load_matches(db_path: Path = DEFAULT_DB) -> pd.DataFrame:
     )
 
     df["loss_streak_in"] = df.groupby("person")["win"].transform(_loss_streak_entering)
+    df["win_streak_in"] = df.groupby("person")["win"].transform(_win_streak_entering)
     # nth-on-champ is per-Riot-account — different accounts have different
     # mastery curves on the same champ.
     df["nth_on_champ"] = df.groupby(["riot_account", "champion"]).cumcount() + 1
@@ -559,16 +844,67 @@ def compute_lp_events(db_path: Path = DEFAULT_DB) -> pd.DataFrame:
     ranks["prev_score"] = grp["rank_score"].shift(1)
     ranks["prev_wins"] = grp["wins"].shift(1)
     ranks["prev_losses"] = grp["losses"].shift(1)
+    ranks["prev_timestamp"] = grp["timestamp"].shift(1)
     ranks["dw"] = ranks["wins"] - ranks["prev_wins"]
     ranks["dl"] = ranks["losses"] - ranks["prev_losses"]
     ranks["delta_score"] = ranks["rank_score"] - ranks["prev_score"]
+    ranks["inter_snapshot_min"] = (
+        ranks["timestamp"] - ranks["prev_timestamp"]
+    ).dt.total_seconds() / 60
     # Single-game events only. dw or dl can occasionally be NaN on the
     # first row per person; drop those.
-    one_game = ranks.dropna(subset=["dw", "dl", "delta_score"])
+    one_game = ranks.dropna(subset=["dw", "dl", "delta_score", "inter_snapshot_min"])
+    # Drop snapshot pairs that straddle a bot outage: a >2h gap means
+    # we missed N intervening games and the LP delta is a sum, not a
+    # per-game value.
+    one_game = one_game[one_game["inter_snapshot_min"] <= MAX_INTER_SNAPSHOT_MIN]
     one_game = one_game[(one_game["dw"] + one_game["dl"]) == 1]
     one_game = one_game.copy()
     one_game["outcome"] = np.where(one_game["dw"] == 1, "win", "loss")
     return one_game[["person", "timestamp", "outcome", "delta_score"]].reset_index(drop=True)
+
+
+def compute_tier_at_match(df: pd.DataFrame, history_df: pd.DataFrame) -> pd.DataFrame:
+    """For each match in ``df``, stamp the player's visible tier+division
+    at game-start by joining against ``history_df`` (one row per LP poll).
+
+    Both frames are keyed by ``person`` rather than ``puuid`` — ``load_rank_history``
+    already collapses Riot accounts to the owning Discord person, and the
+    matches frame does the same. A multi-account player gets the latest
+    rank snapshot from any of their accounts at the time of the match.
+
+    UNRANKED is filled for matches that pre-date any league_history row
+    for that person (early backfilled match_stats with no rank coverage yet).
+    """
+    if df.empty:
+        out = df.copy()
+        out["tier"] = pd.Series(dtype=object)
+        out["division"] = pd.Series(dtype=object)
+        return out
+
+    # merge_asof needs both frames globally sorted by the ``on`` key.
+    # Don't trust the caller's ordering — load_matches sorts by
+    # (person, game_start), which breaks the global ``game_start`` order.
+    left = df.sort_values("game_start").reset_index(drop=True)
+    if history_df.empty:
+        left["tier"] = "UNRANKED"
+        left["division"] = None
+        return left
+    right = (
+        history_df[["person", "timestamp", "tier", "division"]]
+        .sort_values("timestamp")
+        .reset_index(drop=True)
+    )
+    merged = pd.merge_asof(
+        left,
+        right,
+        left_on="game_start",
+        right_on="timestamp",
+        by="person",
+        direction="backward",
+    )
+    merged["tier"] = merged["tier"].fillna("UNRANKED")
+    return merged.drop(columns=["timestamp"])
 
 
 def people_summary(df: pd.DataFrame) -> pd.DataFrame:
@@ -596,6 +932,19 @@ def _loss_streak_entering(wins: pd.Series) -> pd.Series:
     for i, w in enumerate(wins.values):
         out[i] = streak
         streak = 0 if w == 1 else streak + 1
+    return pd.Series(out, index=wins.index)
+
+
+def _win_streak_entering(wins: pd.Series) -> pd.Series:
+    """Mirror of ``_loss_streak_entering`` — count of consecutive wins
+    immediately PRECEDING each row. A loss resets the streak; the first
+    game's value is 0.
+    """
+    out = np.zeros(len(wins), dtype=int)
+    streak = 0
+    for i, w in enumerate(wins.values):
+        out[i] = streak
+        streak = streak + 1 if w == 1 else 0
     return pd.Series(out, index=wins.index)
 
 
@@ -693,15 +1042,61 @@ def _annotate_bars(ax, x, heights, counts, fmt: str = "{:.0%}") -> None:
         )
 
 
+def _is_aggregate(player: str | None) -> bool:
+    """True when the selection means "no filter" (all players)."""
+    return player is None or player in ("", "all", "__all__")
+
+
+def _display_label(player: str | None) -> str | None:
+    """Strip the dropdown prefix so we can show the bare name in a UI label."""
+    if _is_aggregate(player):
+        return None
+    if player.startswith("account:"):
+        return player[len("account:") :]
+    if player.startswith("person:"):
+        return player[len("person:") :]
+    return player
+
+
 def _title(base: str, player: str | None) -> str:
-    return base if player is None else f"{base}  ·  {player}"
+    label = _display_label(player)
+    return base if label is None else f"{base}  ·  {label}"
 
 
 def _filter_player(df: pd.DataFrame, player: str | None) -> pd.DataFrame:
-    """Filter rows to one ``person`` (Discord-aggregated). ``player`` here
-    is a person key — pass the canonical display name to filter, or None
-    for the all-players aggregate."""
-    return df if player is None else df[df["person"] == player]
+    """Filter rows to one Discord person OR one Riot account.
+
+    ``player`` is a prefixed dropdown key:
+      - aggregate sentinels (None / "" / "all" / "__all__") → unfiltered
+      - "person:<name>" → df[df["person"] == name]
+      - "account:<name>" → df[df["riot_account"] == name]
+      - bare name (legacy) → person match
+    """
+    if _is_aggregate(player):
+        return df
+    if player.startswith("account:"):
+        return df[df["riot_account"] == player[len("account:") :]]
+    if player.startswith("person:"):
+        return df[df["person"] == player[len("person:") :]]
+    return df[df["person"] == player]
+
+
+def _resolve_person(df: pd.DataFrame, player: str | None) -> str | None:
+    """Map any dropdown key to its owning ``person`` name (or None for aggregate).
+
+    Rank history, LP events and duo/h2h data are person-keyed, so an
+    ``account:<X>`` selection has to fall back to the person that owns
+    that Riot account when those charts run.
+    """
+    if _is_aggregate(player):
+        return None
+    if player.startswith("account:"):
+        acct = player[len("account:") :]
+        row = df[df["riot_account"] == acct]
+        return str(row["person"].iloc[0]) if not row.empty else None
+    if player.startswith("person:"):
+        return player[len("person:") :]
+    return player
 
 
 def _empty_figure(message: str) -> plt.Figure:
@@ -763,11 +1158,7 @@ def plot_kda_vs_outcome(df: pd.DataFrame, player: str | None = None) -> plt.Figu
             range(len(g)),
             g["winrate"],
             yerr=[g["winrate"] - g["ci_lo"], g["ci_hi"] - g["winrate"]],
-            fmt="none",
-            ecolor=PALETTE["text"],
-            capsize=3,
-            linewidth=1.0,
-            alpha=0.6,
+            **WHISKER_STYLE,
         )
     axes[1].set_xticks(range(len(g)))
     axes[1].set_xticklabels(g["kda_bucket"])
@@ -775,9 +1166,10 @@ def plot_kda_vs_outcome(df: pd.DataFrame, player: str | None = None) -> plt.Figu
     axes[1].set_ylabel("Win rate")
     axes[1].set_xlabel("KDA bucket")
     axes[1].set_title(_title("Win rate by KDA", player))
+    whisker_note = "; whiskers = spread across people" if macro_n > 1 else ""
     _subtitle(
         axes[1],
-        f"Higher buckets should win more. {_macro_label(macro_n)}; whiskers = spread across people.",
+        f"Higher buckets should win more. {_macro_label(macro_n)}{whisker_note}.",
     )
     _baseline(axes[1])
     _annotate_bars(axes[1], range(len(g)), g["winrate"], g["games"])
@@ -808,11 +1200,7 @@ def plot_duration_vs_outcome(df: pd.DataFrame, player: str | None = None) -> plt
             range(len(g)),
             g["winrate"],
             yerr=[g["winrate"] - g["ci_lo"], g["ci_hi"] - g["winrate"]],
-            fmt="none",
-            ecolor=PALETTE["text"],
-            capsize=3,
-            linewidth=1.0,
-            alpha=0.6,
+            **WHISKER_STYLE,
         )
     axes[0].set_xticks(range(len(g)))
     axes[0].set_xticklabels(g["duration_bucket"])
@@ -820,9 +1208,10 @@ def plot_duration_vs_outcome(df: pd.DataFrame, player: str | None = None) -> plt
     axes[0].set_xlabel("Game duration (min)")
     axes[0].set_ylabel("Win rate")
     axes[0].set_title(_title("Win rate by game duration", player))
+    whisker_note = "; whiskers = spread across people" if macro_n > 1 else ""
     _subtitle(
         axes[0],
-        f"Stomps vs scaling. {_macro_label(macro_n)}; whiskers = spread across people.",
+        f"Stomps vs scaling. {_macro_label(macro_n)}{whisker_note}.",
     )
     _baseline(axes[0])
     _annotate_bars(axes[0], range(len(g)), g["winrate"], g["games"])
@@ -897,11 +1286,7 @@ def plot_champion_winrate(
             means,
             y,
             xerr=[means - lo, hi - means],
-            fmt="none",
-            ecolor=PALETTE["text"],
-            capsize=3,
-            linewidth=1.0,
-            alpha=0.7,
+            **WHISKER_STYLE,
         )
         ax.axvline(0.5, color=PALETTE["muted"], linewidth=0.8, linestyle=(0, (4, 4)), alpha=0.55)
         ax.set_yticks(y)
@@ -955,12 +1340,12 @@ def plot_champion_picks(
     if d.empty:
         return _empty_figure("No games to analyse")
 
-    if player is None:
+    if _is_aggregate(player):
         baseline_wr = float(d["win"].mean())
         baseline_label = f"group baseline ({baseline_wr:.0%})"
     else:
         baseline_wr = float(d["win"].mean())
-        baseline_label = f"{player}'s baseline ({baseline_wr:.0%})"
+        baseline_label = f"{_display_label(player)}'s baseline ({baseline_wr:.0%})"
 
     champ_stats = d.groupby("champion")["win"].agg(["count", "sum", "mean"])
     champ_stats = champ_stats[champ_stats["count"] >= min_games]
@@ -1050,20 +1435,60 @@ def plot_champion_picks(
                     color="white",
                 )
         else:
-            sign_pad = 1 if r["delta_pp"] >= 0 else -1
+            # Non-significant / short bars: anchor the annotation to the
+            # right of the bar's outer tip when positive, or to the right
+            # of the zero line when negative — never to the left, so the
+            # (sometimes long) champion name on the y-axis stays readable.
+            anchor_x = max(r["delta_pp"], 0.0)
             ax.annotate(
                 label,
-                xy=(r["delta_pp"], yi),
-                xytext=(8 * sign_pad, 0),
+                xy=(anchor_x, yi),
+                xytext=(8, 0),
                 textcoords="offset points",
                 va="center",
-                ha="left" if r["delta_pp"] >= 0 else "right",
+                ha="left",
                 fontsize=9,
                 color=PALETTE["text"],
             )
 
     max_abs = max(8.0, float(picks["delta_pp"].abs().max()) + 6.0)
     ax.set_xlim(-max_abs * 1.15, max_abs * 1.15)
+
+    # Per-player callout — highlight the top confident "play this more" champ.
+    # Skipped in aggregate mode (no single player to advise) and when no
+    # confident-positive pick exists.
+    if not _is_aggregate(player):
+        top_winners = picks[picks["confident"] & (picks["delta_pp"] > 0)]
+        if not top_winners.empty:
+            top_row = top_winners.iloc[-1]
+            top_idx = list(picks.index).index(top_row.name)
+            # Park the callout above the top bar so it sits in the
+            # axes-top margin instead of overlapping the row below (the
+            # row below often has its own long grey-bar annotation).
+            ax.annotate(
+                "Play this more — confident lift",
+                xy=(top_row["delta_pp"], top_idx),
+                xytext=(
+                    top_row["delta_pp"] + 1,
+                    top_idx + 0.9,
+                ),
+                fontsize=9,
+                color=PALETTE["win"],
+                arrowprops={
+                    "arrowstyle": "->",
+                    "color": PALETTE["win"],
+                    "alpha": 0.7,
+                    "lw": 1.2,
+                },
+                bbox={
+                    "facecolor": "white",
+                    "alpha": 0.9,
+                    "edgecolor": PALETTE["win"],
+                    "linewidth": 0.9,
+                    "pad": 4,
+                },
+            )
+
     fig.tight_layout()
     return fig
 
@@ -1085,7 +1510,7 @@ def plot_player_comparison(
     them inside the group context.
     """
     metrics = [
-        "Overall WR",
+        "Overall WR (shrunk)",
         "Avg KDA",
         "Prime-hr WR (19-23)",
         "Weekend WR",
@@ -1116,13 +1541,21 @@ def plot_player_comparison(
     else:
         lp_grouped = pd.DataFrame(columns=["lp_total", "lp_n"])
 
+    # Group baseline anchors the Beta prior on every player's WR so small
+    # samples (e.g. vyce1 ≈10 games) don't produce wild z-scores in the
+    # column heatmap. prior_strength=30 ≈ half a typical career sample.
+    group_baseline = float(df["win"].mean())
+
     rows = []
     for person in people:
         sub = df[df["person"] == person]
         n_games = len(sub)
 
-        # Overall WR — gate to NaN only if (somehow) below min_subset.
-        wr_overall = float(sub["win"].mean()) if n_games >= min_subset else np.nan
+        # Overall WR — Bayesian-shrunk toward the group baseline so a
+        # 10-game outlier doesn't dominate the column z-score.
+        wr_overall = bayesian_shrunk_wr(
+            int(sub["win"].sum()), n_games, group_baseline, prior_strength=30
+        )
 
         # Avg KDA — same gate.
         avg_kda = float(sub["kda"].mean()) if n_games >= min_subset else np.nan
@@ -1199,15 +1632,21 @@ def plot_player_comparison(
     z = np.where(col_std > 0, z, 0.0)
     z[np.isnan(values)] = np.nan
 
-    fig, ax = plt.subplots(figsize=(13, max(4, len(metrics) * 0.5 + 2)))
+    # Add a row of vertical breathing room when any person label is long
+    # (>18 chars including the "(N games)" suffix), to keep angled x-axis
+    # labels from clipping into the bottom of the heatmap.
+    y_labels = [f"{p}  ({int(people_games[p])} games)" for p in people]
+    has_long_label = any(len(lbl) > 18 for lbl in y_labels)
+    row_h = 0.55 if has_long_label else 0.5
+    fig, ax = plt.subplots(figsize=(13, max(4, len(people) * row_h + 2.5)))
     cmap = plt.get_cmap("RdYlGn").copy()
     cmap.set_bad("#f3f4f6")
     masked_z = np.ma.masked_invalid(z)
     im = ax.imshow(masked_z, aspect="auto", cmap=cmap, vmin=-1.5, vmax=1.5)
 
-    y_labels = [f"{p}  ({int(people_games[p])} games)" for p in people]
+    label_fontsize = 9 if has_long_label else 10
     ax.set_yticks(np.arange(len(people)))
-    ax.set_yticklabels(y_labels)
+    ax.set_yticklabels(y_labels, fontsize=label_fontsize)
     ax.set_xticks(np.arange(len(metrics)))
     ax.set_xticklabels(metrics, rotation=30, ha="right")
 
@@ -1236,10 +1675,11 @@ def plot_player_comparison(
             else:
                 text = f"{v:.2f}"
                 color = PALETTE["text"]
-            ax.text(j, i, text, ha="center", va="center", fontsize=8.5, color=color)
+            ax.text(j, i, text, ha="center", va="center", fontsize=8, color=color, clip_on=True)
 
-    if player is not None and player in people:
-        idx = people.index(player)
+    focal_person = _resolve_person(df, player)
+    if focal_person is not None and focal_person in people:
+        idx = people.index(focal_person)
         for y_edge in (idx - 0.5, idx + 0.5):
             ax.axhline(
                 y_edge,
@@ -1260,6 +1700,254 @@ def plot_player_comparison(
     _polish_ax(ax)
     ax.grid(False)
     fig.tight_layout()
+    return fig
+
+
+def plot_actions_card(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Prescriptive 'what should you DO' card grid — per player.
+
+    Six tiles in a 3x2 grid. Each tile distils one corroborated finding
+    into a single concrete action: play / drop a champ, stop at N losses,
+    MMR verdict, best duo partner, hour to avoid. Green stripe = positive
+    action with statistical backing, red = negative warning, grey = no
+    signal strong enough to act on.
+
+    Aggregate view is intentionally empty — prescriptions only make sense
+    per-person, and the per-person card already shows the headline
+    actions for that player.
+    """
+    if _is_aggregate(player):
+        return _empty_figure("Pick a player from the dropdown — actions are per-person.")
+
+    d = _filter_player(df, player)
+    label = _display_label(player) or "this player"
+    if d.empty:
+        return _empty_figure(f"No games for {label}")
+
+    baseline_wr = float(d["win"].mean())
+    games_total = len(d)
+    focal_person = _resolve_person(df, player)
+
+    # --- Tile 1 + 2: Champion picks ---------------------------------------
+    champ_pick_value = "—"
+    champ_pick_sub = "no champion with confident lift"
+    champ_pick_accent = PALETTE["neutral"]
+    champ_pick_color = PALETTE["muted"]
+    champ_drop_value = "—"
+    champ_drop_sub = "no champion with confident drag"
+    champ_drop_accent = PALETTE["neutral"]
+    champ_drop_color = PALETTE["muted"]
+
+    champ_stats = d.groupby("champion")["win"].agg(["count", "sum", "mean"])
+    champ_stats = champ_stats[champ_stats["count"] >= 5]
+    if not champ_stats.empty:
+        champ_stats = champ_stats.rename(columns={"count": "n", "sum": "wins", "mean": "raw_wr"})
+        champ_stats["shrunk_wr"] = [
+            bayesian_shrunk_wr(int(w), int(n), baseline_wr, 10.0)
+            for w, n in zip(champ_stats["wins"], champ_stats["n"], strict=False)
+        ]
+        cis = [
+            wilson_ci(int(w), int(n))
+            for w, n in zip(champ_stats["wins"], champ_stats["n"], strict=False)
+        ]
+        champ_stats["ci_lo"] = [c[0] for c in cis]
+        champ_stats["ci_hi"] = [c[1] for c in cis]
+        champ_stats["delta_pp"] = (champ_stats["shrunk_wr"] - baseline_wr) * 100
+
+        confident_up = champ_stats[
+            (champ_stats["ci_lo"] > baseline_wr) & (champ_stats["delta_pp"] > 0)
+        ].sort_values("delta_pp", ascending=False)
+        if not confident_up.empty:
+            top_row = confident_up.iloc[0]
+            champ_pick_value = str(top_row.name)
+            champ_pick_sub = f"+{top_row['delta_pp']:.1f}pp lift  ·  n={int(top_row['n'])} games"
+            champ_pick_accent = PALETTE["win"]
+            champ_pick_color = PALETTE["win"]
+
+        confident_down = champ_stats[
+            (champ_stats["ci_hi"] < baseline_wr) & (champ_stats["delta_pp"] < 0)
+        ].sort_values("delta_pp", ascending=True)
+        if not confident_down.empty:
+            bot_row = confident_down.iloc[0]
+            champ_drop_value = str(bot_row.name)
+            champ_drop_sub = f"{bot_row['delta_pp']:.1f}pp lift  ·  n={int(bot_row['n'])} games"
+            champ_drop_accent = PALETTE["loss"]
+            champ_drop_color = PALETTE["loss"]
+
+    # --- Tile 3: Stop at N losses ----------------------------------------
+    # Scan s = 2..6, find smallest s where Wilson CI of P(win|s prior
+    # losses) excludes 0.50. Require >=5 observations at that streak
+    # length so a single fluke L doesn't trigger a degenerate CI.
+    stop_value = "no signal"
+    stop_sub = "streak independence holds for you"
+    stop_accent = PALETTE["neutral"]
+    stop_color = PALETTE["muted"]
+    streak_in = d["loss_streak_in"].astype(int)
+    for s in range(2, 7):
+        mask = streak_in == s
+        n_s = int(mask.sum())
+        if n_s < 5:
+            continue
+        wins_s = int(d.loc[mask, "win"].sum())
+        lo, hi = wilson_ci(wins_s, n_s)
+        if lo > 0.5 or hi < 0.5:
+            stop_value = f"{s}L"
+            stop_sub = f"CI {lo:.0%}-{hi:.0%}  ·  n={n_s}"
+            stop_accent = PALETTE["accent_orange"] if hi < 0.5 else PALETTE["win"]
+            stop_color = stop_accent
+            break
+
+    # --- Tile 4: MMR verdict ---------------------------------------------
+    mmr_value = "—"
+    mmr_sub = "no LP events recorded"
+    mmr_accent = PALETTE["neutral"]
+    mmr_color = PALETTE["muted"]
+    try:
+        events = compute_lp_events(DEFAULT_DB)
+    except Exception:
+        events = pd.DataFrame()
+    if focal_person and not events.empty:
+        sub = events[events["person"] == focal_person]
+        if not sub.empty:
+            n_evt = len(sub)
+            net_per_100 = float(sub["delta_score"].sum() / n_evt * 100)
+            if net_per_100 > 50:
+                verdict = "climbing fast"
+                mmr_accent = PALETTE["win"]
+            elif net_per_100 > 5:
+                verdict = "climbing"
+                mmr_accent = PALETTE["win"]
+            elif net_per_100 < -50:
+                verdict = "falling fast"
+                mmr_accent = PALETTE["loss"]
+            elif net_per_100 < -5:
+                verdict = "falling"
+                mmr_accent = PALETTE["loss"]
+            else:
+                verdict = "treading water"
+                mmr_accent = PALETTE["primary"]
+            mmr_value = f"{net_per_100:+.0f}/100"
+            mmr_sub = f"{verdict}  ·  n={n_evt} LP events"
+            mmr_color = mmr_accent
+
+    # --- Tile 5: Duo partner ---------------------------------------------
+    duo_value = "no clear lift"
+    duo_sub = "solo or random partners"
+    duo_accent = PALETTE["neutral"]
+    duo_color = PALETTE["muted"]
+    if focal_person:
+        duos = compute_duos(df, min_games=5)
+        if not duos.empty:
+            partners = duos[(duos["a"] == focal_person) | (duos["b"] == focal_person)].copy()
+            if not partners.empty:
+                partners["partner"] = partners.apply(
+                    lambda r: r["b"] if r["a"] == focal_person else r["a"], axis=1
+                )
+                partners["lift"] = partners["winrate"] - baseline_wr
+                qualified = partners[(partners["lift"] > 0.05) & (partners["games"] >= 10)]
+                if not qualified.empty:
+                    best = qualified.sort_values("winrate", ascending=False).iloc[0]
+                    duo_value = str(best["partner"])
+                    duo_sub = f"+{best['lift'] * 100:.1f}pp lift  ·  n={int(best['games'])} games"
+                    duo_accent = PALETTE["win"]
+                    duo_color = PALETTE["win"]
+
+    # --- Tile 6: Avoid hour ----------------------------------------------
+    hour_value = "no bad hours"
+    hour_sub = "all hours within noise"
+    hour_accent = PALETTE["neutral"]
+    hour_color = PALETTE["muted"]
+    hour_stats = d.groupby("hour")["win"].agg(["count", "sum", "mean"])
+    hour_stats = hour_stats[hour_stats["count"] >= 10]
+    if not hour_stats.empty:
+        flagged = []
+        for hr, row in hour_stats.iterrows():
+            lo, hi = wilson_ci(int(row["sum"]), int(row["count"]))
+            if hi < baseline_wr:
+                flagged.append((int(hr), float(row["mean"]), lo, hi, int(row["count"])))
+        if flagged:
+            # Worst hour = lowest WR among flagged.
+            flagged.sort(key=lambda t: t[1])
+            hr, wr_h, _lo, _hi, n_h = flagged[0]
+            hour_value = f"{hr:02d}:00"
+            hour_sub = f"{wr_h:.0%} WR vs {baseline_wr:.0%}  ·  CI excludes baseline  ·  n={n_h}"
+            hour_accent = PALETTE["loss"]
+            hour_color = PALETTE["loss"]
+
+    # --- Render -----------------------------------------------------------
+    fig = plt.figure(figsize=(13, 6.6))
+    ax = fig.add_subplot(111)
+    ax.set_axis_off()
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    fig.suptitle(
+        f"Actions for {label} — what the data says to do",
+        fontsize=18,
+        fontweight="bold",
+        y=0.965,
+    )
+    fig.text(
+        0.5,
+        0.905,
+        f"{games_total:,} games  ·  baseline WR {baseline_wr:.0%}. "
+        "Green = confident positive action, red = confident warning, grey = no signal.",
+        ha="center",
+        fontsize=10,
+        color=PALETTE["muted"],
+        style="italic",
+    )
+
+    margin_x, margin_y = 0.035, 0.04
+    gap_x, gap_y = 0.022, 0.035
+    n_cols, n_rows = 3, 2
+    grid_top = 0.86
+    grid_bottom = margin_y
+    card_w = (1 - 2 * margin_x - (n_cols - 1) * gap_x) / n_cols
+    card_h = (grid_top - grid_bottom - (n_rows - 1) * gap_y) / n_rows
+
+    def cell(col: int, row: int) -> tuple[float, float]:
+        x = margin_x + col * (card_w + gap_x)
+        y = grid_top - card_h - row * (card_h + gap_y)
+        return x, y
+
+    def tile(col, row, label_text, value, sublabel, accent, value_color):
+        x, y = cell(col, row)
+        _draw_card(ax, x, y, card_w, card_h, accent=accent)
+        _card_text(
+            ax,
+            x,
+            y,
+            card_w,
+            card_h,
+            label=label_text,
+            value=value,
+            sublabel=sublabel,
+            value_color=value_color,
+        )
+
+    tile(
+        0,
+        0,
+        "Play this champ more",
+        champ_pick_value,
+        champ_pick_sub,
+        champ_pick_accent,
+        champ_pick_color,
+    )
+    tile(
+        1,
+        0,
+        "Drop this champ",
+        champ_drop_value,
+        champ_drop_sub,
+        champ_drop_accent,
+        champ_drop_color,
+    )
+    tile(2, 0, "Stop at N losses", stop_value, stop_sub, stop_accent, stop_color)
+    tile(0, 1, "MMR verdict", mmr_value, mmr_sub, mmr_accent, mmr_color)
+    tile(1, 1, "Duo with", duo_value, duo_sub, duo_accent, duo_color)
+    tile(2, 1, "Avoid this hour", hour_value, hour_sub, hour_accent, hour_color)
+
     return fig
 
 
@@ -1491,54 +2179,342 @@ def plot_hour_dow_heatmap(df: pd.DataFrame, player: str | None = None) -> plt.Fi
 # --- 5. Recent form & momentum ---------------------------------------------
 
 
+#: Left-panel bar buckets — signed-streak ordering from "long win streak" on
+#: the far left, through neutral, to "long loss streak" on the far right.
+#: Sign encoding: negative = entering win streak, 0 = no prior streak
+#: (first game of the data), positive = entering loss streak. The chi²
+#: test runs across all 11 buckets as one partition.
+_SIGNED_STREAK_LABELS = [
+    "W6+",
+    "W5-4",
+    "W3",
+    "W2",
+    "W1",
+    "0 (start)",
+    "L1",
+    "L2",
+    "L3",
+    "L4-5",
+    "L6+",
+]
+
+#: Survival curves on the right panel — same seed lengths for both sides
+#: so the comparison is direct. s=10 is sparse but kept for symmetry; the
+#: legend shows the denominator so the reader can judge.
+_SURVIVAL_SEEDS = (1, 2, 3, 5, 10)
+
+
+def _signed_streak_bucket(loss_in: int, win_in: int) -> str:
+    """Map (loss_streak_in, win_streak_in) → one of the 11 labelled buckets.
+
+    By construction at most one of the two counters is positive per row
+    (a win resets loss, a loss resets win). Both zero only on the very
+    first game we have for that person.
+    """
+    if win_in >= 6:
+        return "W6+"
+    if win_in >= 4:
+        return "W5-4"
+    if win_in == 3:
+        return "W3"
+    if win_in == 2:
+        return "W2"
+    if win_in == 1:
+        return "W1"
+    if loss_in == 0:
+        return "0 (start)"
+    if loss_in == 1:
+        return "L1"
+    if loss_in == 2:
+        return "L2"
+    if loss_in == 3:
+        return "L3"
+    if loss_in <= 5:
+        return "L4-5"
+    return "L6+"
+
+
+def _maximal_streak_lengths(wins_by_person: pd.Series, kind: str) -> np.ndarray:
+    """Return the lengths of every maximal run of a given outcome across
+    all people in ``wins_by_person`` (multi-index: person, time-order).
+
+    ``kind='loss'`` collects runs of 0s, ``kind='win'`` collects runs of 1s.
+    Used to compute conditional survival ``S_s(k) = P(L ≥ s+k | L ≥ s)``.
+    Counting maximal runs avoids the double-counting you'd get from a
+    per-row treatment.
+    """
+    target = 0 if kind == "loss" else 1
+    lengths: list[int] = []
+    for _person, ws in wins_by_person.groupby(level=0, sort=False):
+        cur = 0
+        for w in ws.to_numpy():
+            if int(w) == target:
+                cur += 1
+            else:
+                if cur > 0:
+                    lengths.append(cur)
+                cur = 0
+        if cur > 0:
+            lengths.append(cur)
+    return np.asarray(lengths, dtype=int)
+
+
+def _survival_curve(lengths: np.ndarray, s: int, max_k: int) -> tuple[np.ndarray, int]:
+    """For seed ``s``, return ``(survival[k] for k=0..max_k], denom)`` where
+    survival[k] = P(streak length ≥ s+k | length ≥ s). denom is the count
+    of streaks meeting the seed condition — labelled in the legend so the
+    viewer can judge sample size."""
+    qualifying = lengths[lengths >= s]
+    denom = int(qualifying.size)
+    if denom == 0:
+        return (np.full(max_k + 1, np.nan), 0)
+    surv = np.array(
+        [float((qualifying >= s + k).sum()) / denom for k in range(max_k + 1)],
+        dtype=float,
+    )
+    return (surv, denom)
+
+
+def _bootstrap_survival_ci(
+    lengths: np.ndarray,
+    s: int,
+    max_k: int,
+    *,
+    n_boot: int = 1000,
+    seed: int = 42,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Bootstrap a 95% CI band for the survival curve at seed ``s``.
+
+    Resampling unit is the streak (not the game) — that's what the survival
+    function is defined over. Returns ``(ci_lo[k], ci_hi[k])`` arrays of
+    length ``max_k+1``; if no qualifying streaks exist the bands are NaN.
+    """
+    qualifying = lengths[lengths >= s]
+    denom = int(qualifying.size)
+    nan_band = np.full(max_k + 1, np.nan)
+    if denom == 0:
+        return (nan_band, nan_band)
+    rng = np.random.default_rng(seed + s)
+    boot = np.empty((n_boot, max_k + 1), dtype=float)
+    for i in range(n_boot):
+        sample = rng.choice(qualifying, size=denom, replace=True)
+        for k in range(max_k + 1):
+            boot[i, k] = float((sample >= s + k).sum()) / denom
+    ci_lo = np.quantile(boot, 0.025, axis=0)
+    ci_hi = np.quantile(boot, 0.975, axis=0)
+    return (ci_lo, ci_hi)
+
+
 def plot_streak_recovery(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
-    """Win rate of the NEXT game, bucketed by loss streak going into it. If
-    tilt is real, longer entering streaks should produce lower win rates."""
+    """Symmetric streak view — does winning have momentum the way losing
+    has tilt?
+
+    Left panel    Bars: WR of the NEXT game by entering streak length,
+                  with the streak SIGN preserved. Win streaks on the
+                  left (green), loss streaks on the right (orange).
+                  A pure "tilt only" picture is flat on the green side
+                  and sloping down on the orange side; symmetric streak
+                  effects make both sides slope toward the centre.
+    Right panel   Survival curves of maximal streaks. For seeds
+                  s ∈ {1, 2, 3, 5, 10} we plot
+                      S_s(k) = P(streak length ≥ s + k | length ≥ s),
+                  loss streaks as solid lines, win streaks dashed.
+                  Bernoulli (independent) reference 0.5^k is the
+                  dashed grey baseline. Curves above the baseline mean
+                  the streak persists more than chance — tilt on the
+                  loss side, momentum on the win side.
+    """
     d = _filter_player(df, player)
     if d.empty:
         return _empty_figure("No games to plot")
     d = d.copy()
-    d["streak_bucket"] = pd.cut(
-        d["loss_streak_in"],
-        bins=[-1, 0, 1, 2, 3, 5, 99],
-        labels=["0 (post-W)", "1", "2", "3", "4-5", "6+"],
+
+    # --- Left panel data: signed-streak bars ---
+    if "win_streak_in" not in d.columns:
+        d["win_streak_in"] = d.groupby("person")["win"].transform(_win_streak_entering)
+    d["streak_bucket"] = pd.Categorical(
+        [
+            _signed_streak_bucket(int(li), int(wi))
+            for li, wi in zip(d["loss_streak_in"], d["win_streak_in"], strict=False)
+        ],
+        categories=_SIGNED_STREAK_LABELS,
+        ordered=True,
     )
     g = _bucket_winrate(d, "streak_bucket")
-    macro_n = int(g["n_people"].max()) if not g.empty else 1
+    g = g.set_index("streak_bucket").reindex(_SIGNED_STREAK_LABELS).reset_index()
+    macro_n = int(g["n_people"].max(skipna=True)) if not g["n_people"].isna().all() else 1
 
-    # Chi² uses raw pooled counts (the actual outcomes) — the right
-    # statistical test even when we *display* macro-averaged WRs.
-    pooled = _bin_winrate(d, "streak_bucket").set_index("streak_bucket").reindex(g["streak_bucket"])
-    wins = (pooled["games"] * pooled["winrate"]).round().astype(int).to_numpy()
-    totals = pooled["games"].astype(int).to_numpy()
-    _chi2, _dof, pval = chi2_homogeneity(wins, totals)
+    pooled = (
+        _bin_winrate(d, "streak_bucket").set_index("streak_bucket").reindex(_SIGNED_STREAK_LABELS)
+    )
+    pooled_games = pooled["games"].fillna(0).astype(int).to_numpy()
+    pooled_wins = (
+        (pooled["games"].fillna(0) * pooled["winrate"].fillna(0)).round().astype(int).to_numpy()
+    )
+    _chi2, _dof, pval = chi2_homogeneity(pooled_wins, pooled_games)
 
-    fig, ax = plt.subplots(figsize=(11, 4.6))
-    ax.bar(range(len(g)), g["winrate"], color=PALETTE["accent_orange"], width=0.7)
+    # --- Right panel data: maximal streak survival curves ---
+    wins_indexed = d.sort_values(["person", "game_start"]).set_index(["person", "game_start"])[
+        "win"
+    ]
+    loss_lens = _maximal_streak_lengths(wins_indexed, "loss")
+    win_lens = _maximal_streak_lengths(wins_indexed, "win")
+    max_k = 10
+
+    # --- Figure layout ---
+    fig, axes = plt.subplots(1, 2, figsize=(15, 5.0))
+
+    # Left bar panel.
+    ax = axes[0]
+    bar_colours: list[str] = []
+    for label in _SIGNED_STREAK_LABELS:
+        if label.startswith("W"):
+            bar_colours.append(PALETTE["win"])
+        elif label.startswith("L"):
+            bar_colours.append(PALETTE["accent_orange"])
+        else:
+            bar_colours.append(PALETTE["neutral"])
+    xs = range(len(_SIGNED_STREAK_LABELS))
+    heights = g["winrate"].to_numpy()
+    ax.bar(list(xs), heights, color=bar_colours, width=0.78)
     if macro_n > 1:
+        yerr_lo = (g["winrate"] - g["ci_lo"]).clip(lower=0).fillna(0).to_numpy()
+        yerr_hi = (g["ci_hi"] - g["winrate"]).clip(lower=0).fillna(0).to_numpy()
         ax.errorbar(
-            range(len(g)),
-            g["winrate"],
-            yerr=[g["winrate"] - g["ci_lo"], g["ci_hi"] - g["winrate"]],
-            fmt="none",
-            ecolor=PALETTE["text"],
-            capsize=3,
-            linewidth=1.0,
-            alpha=0.6,
+            list(xs),
+            heights,
+            yerr=[yerr_lo, yerr_hi],
+            **WHISKER_STYLE,
         )
-    ax.set_xticks(range(len(g)))
-    ax.set_xticklabels(g["streak_bucket"])
-    ax.set_xlabel("Loss streak entering this game")
+    ax.set_xticks(list(xs))
+    ax.set_xticklabels(_SIGNED_STREAK_LABELS, rotation=0, fontsize=9)
+    ax.set_xlabel("Entering streak  (green = win streak, orange = loss streak)")
     ax.set_ylabel("Win rate of this game")
-    ax.set_title(_title("Tilt check — win rate vs entering loss streak", player))
+    ax.set_title(_title("Win rate by entering streak  (W ← → L)", player))
     _subtitle(
         ax,
-        f"Downward step = tilt is real. χ² across buckets: {_p_marker(pval)} ({_p_verdict(pval)})  ·  {_macro_label(macro_n)}.",
+        f"Both sides sloping toward centre = symmetric streakiness; only L-side drops = tilt-only. χ² across 11 buckets: {_p_marker(pval)} ({_p_verdict(pval)})  ·  {_macro_label(macro_n)}.",
     )
     ax.set_ylim(0, 1.1)
     _baseline(ax)
-    _annotate_bars(ax, range(len(g)), g["winrate"], g["games"])
+    _annotate_bars(ax, list(xs), g["winrate"].fillna(0), pd.Series(pooled_games))
+
+    # Callout pointing at the rightmost (most loss-tilted) bucket — corroborated
+    # finding from iter 22/24/26: bootstrap CI on s≥5 loss survival excludes 0.5.
+    last_loss_idx = len(g) - 1
+    last_loss_wr = g["winrate"].iloc[last_loss_idx]
+    if not pd.isna(last_loss_wr):
+        ax.annotate(
+            "Stop queueing here —\nmean reversion proven\n(CI 30–49%)",
+            xy=(last_loss_idx, last_loss_wr),
+            xytext=(last_loss_idx - 1.5, 0.85),
+            ha="center",
+            fontsize=9,
+            color=PALETTE["loss"],
+            bbox={
+                "facecolor": "white",
+                "alpha": 0.9,
+                "edgecolor": PALETTE["loss"],
+                "linewidth": 1.2,
+                "pad": 4,
+            },
+            arrowprops={
+                "arrowstyle": "->",
+                "color": PALETTE["loss"],
+                "alpha": 0.7,
+                "lw": 1.2,
+            },
+        )
+
     _polish_ax(ax)
+
+    # Right survival panel.
+    ax2 = axes[1]
+    ks = np.arange(0, max_k + 1)
+    ax2.plot(
+        ks,
+        0.5**ks,
+        color=PALETTE["muted"],
+        linewidth=1.0,
+        linestyle=(0, (4, 4)),
+        label="0.5^k (independent)",
+    )
+
+    # Distinct hues for each seed so loss/win pairs of the same seed read
+    # at the same vertical position visually.
+    seed_to_loss_color = {
+        1: "#d65f5f",
+        2: "#ee854a",
+        3: "#c4533c",
+        5: "#a13e2b",
+        10: "#6b1d10",
+    }
+    seed_to_win_color = {
+        1: "#6acc64",
+        2: "#4daf94",
+        3: "#3a8f6a",
+        5: "#2b6b54",
+        10: "#16432f",
+    }
+
+    for s in _SURVIVAL_SEEDS:
+        loss_curve, loss_n = _survival_curve(loss_lens, s, max_k)
+        if loss_n > 0:
+            loss_lo, loss_hi = _bootstrap_survival_ci(loss_lens, s, max_k)
+            ax2.fill_between(
+                ks,
+                loss_lo,
+                loss_hi,
+                color=seed_to_loss_color[s],
+                alpha=0.15,
+                linewidth=0,
+            )
+            ax2.plot(
+                ks,
+                loss_curve,
+                color=seed_to_loss_color[s],
+                linewidth=1.8,
+                linestyle="-",
+                marker="o",
+                markersize=3.5,
+                label=f"Loss s={s}  (n={loss_n})",
+            )
+        win_curve, win_n = _survival_curve(win_lens, s, max_k)
+        if win_n > 0:
+            win_lo, win_hi = _bootstrap_survival_ci(win_lens, s, max_k)
+            ax2.fill_between(
+                ks,
+                win_lo,
+                win_hi,
+                color=seed_to_win_color[s],
+                alpha=0.15,
+                linewidth=0,
+            )
+            ax2.plot(
+                ks,
+                win_curve,
+                color=seed_to_win_color[s],
+                linewidth=1.8,
+                linestyle=(0, (2, 2)),
+                marker="s",
+                markersize=3.5,
+                label=f"Win  s={s}  (n={win_n})",
+            )
+
+    ax2.set_xlabel("Additional games of the same outcome (k)")
+    ax2.set_ylabel("P(streak still alive after k more)")
+    ax2.set_xticks(list(ks))
+    ax2.set_ylim(0, 1.05)
+    ax2.set_title(_title("Streak survival — wins vs losses", player))
+    _subtitle(
+        ax2,
+        "Above the dashed line = the streak persists more than chance (loss → tilt, win → momentum). "
+        "Shaded bands = bootstrap 95% CI (1000 resamples over streaks); overlap with the baseline = "
+        "the effect is within sampling noise.",
+    )
+    ax2.legend(loc="upper right", fontsize=8, ncol=2)
+    _polish_ax(ax2)
+
     fig.tight_layout()
     return fig
 
@@ -1564,11 +2540,7 @@ def plot_time_since_prev(df: pd.DataFrame, player: str | None = None) -> plt.Fig
             range(len(g)),
             g["winrate"],
             yerr=[g["winrate"] - g["ci_lo"], g["ci_hi"] - g["winrate"]],
-            fmt="none",
-            ecolor=PALETTE["text"],
-            capsize=3,
-            linewidth=1.0,
-            alpha=0.6,
+            **WHISKER_STYLE,
         )
     ax.set_xticks(range(len(g)))
     ax.set_xticklabels(g["gap_bucket"])
@@ -1707,11 +2679,7 @@ def plot_session_analysis(df: pd.DataFrame, player: str | None = None) -> plt.Fi
             list(xs),
             g3["winrate"],
             yerr=[g3["winrate"] - g3["ci_lo"], g3["ci_hi"] - g3["winrate"]],
-            fmt="none",
-            ecolor=PALETTE["text"],
-            capsize=3,
-            linewidth=1.0,
-            alpha=0.6,
+            **WHISKER_STYLE,
         )
     ax.set_xticks(list(xs))
     ax.set_xticklabels(g3["session_length_bucket"], rotation=0)
@@ -1768,7 +2736,7 @@ def plot_lp_economics(df: pd.DataFrame, player: str | None = None) -> plt.Figure
     if events.empty:
         return _empty_figure("No LP events in league_history yet")
 
-    if player is None:
+    if _is_aggregate(player):
         # Top-N most-tracked people. Match-stats game count, not LP-event
         # count, so the people shown line up with the rest of the panel.
         top_people = df.groupby("person").size().sort_values(ascending=False).head(8).index.tolist()
@@ -1853,13 +2821,16 @@ def plot_lp_economics(df: pd.DataFrame, player: str | None = None) -> plt.Figure
         return fig
 
     # --- Single-person view ---
-    sub = events[events["person"] == player]
+    # LP events are person-keyed — resolve any account-selection to its owner.
+    focal_person = _resolve_person(df, player)
+    label = _display_label(player) or "this player"
+    sub = events[events["person"] == focal_person] if focal_person else events.iloc[0:0]
     if sub.empty:
-        return _empty_figure(f"No LP events recorded for {player}")
+        return _empty_figure(f"No LP events recorded for {label}")
     wins = sub.loc[sub["outcome"] == "win", "delta_score"].astype(float)
     losses = sub.loc[sub["outcome"] == "loss", "delta_score"].astype(float)
     if wins.empty or losses.empty:
-        return _empty_figure(f"{player} has no recorded LP events for both win and loss")
+        return _empty_figure(f"{label} has no recorded LP events for both win and loss")
 
     avg_w, avg_l = float(wins.mean()), float(losses.mean())
     n = len(sub)
@@ -1940,6 +2911,24 @@ def plot_lp_economics(df: pd.DataFrame, player: str | None = None) -> plt.Figure
     return fig
 
 
+def _find_global_gaps(
+    ranks: pd.DataFrame, gap_hours: float
+) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
+    """Find time windows where no person in ``ranks`` had a poll.
+
+    Sorts every snapshot by timestamp regardless of person, and returns
+    the (prev_ts, ts) pairs whose gap exceeds the threshold. Those
+    windows mark stretches where the polling loop was silent for
+    everybody — i.e. bot outages rather than per-player inactivity.
+    """
+    if ranks.empty:
+        return []
+    ts = ranks["timestamp"].sort_values().reset_index(drop=True)
+    gap_h = ts.diff().dt.total_seconds() / 3600
+    gap_idx = np.where(gap_h.to_numpy() > gap_hours)[0]
+    return [(ts.iloc[i - 1], ts.iloc[i]) for i in gap_idx]
+
+
 def plot_rank_trajectory(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
     """Rank score over time, drawn from league_history.
 
@@ -1959,7 +2948,7 @@ def plot_rank_trajectory(df: pd.DataFrame, player: str | None = None) -> plt.Fig
     if ranks.empty:
         return _empty_figure("No rank history available")
 
-    if player is None:
+    if _is_aggregate(player):
         # Pick top-N most-active people in match_stats so the rank chart
         # lines up with the same people the rest of the panel describes.
         top_people = df.groupby("person").size().sort_values(ascending=False).head(6).index.tolist()
@@ -1969,52 +2958,105 @@ def plot_rank_trajectory(df: pd.DataFrame, player: str | None = None) -> plt.Fig
 
         fig, ax = plt.subplots(figsize=(13, 5.4))
         for idx, name in enumerate(top_people):
-            sub = ranks[ranks["person"] == name].sort_values("timestamp")
+            sub = ranks[ranks["person"] == name].sort_values("timestamp").reset_index(drop=True)
             if sub.empty:
                 continue
+            # Insert NaN at the start of any RANK_GAP_HOURS-wide gap
+            # so matplotlib breaks the line there instead of drawing a
+            # fake straight line across a no-data window.
+            inter_h = sub["timestamp"].diff().dt.total_seconds() / 3600
+            plot_rank = sub["rank_score"].where(~(inter_h > RANK_GAP_HOURS), np.nan)
             ax.plot(
                 sub["timestamp"],
-                sub["rank_score"],
+                plot_rank,
                 color=SERIES_CYCLE[idx % len(SERIES_CYCLE)],
                 linewidth=1.6,
                 alpha=0.85,
                 label=name,
             )
+
+        # Shade GLOBAL outage windows: intervals where every displayed
+        # person had no poll. Use the already-filtered top-6 ranks so we
+        # only shade where the visible series all went silent.
+        global_gaps = _find_global_gaps(ranks, RANK_GAP_HOURS)
+        for start, end in global_gaps:
+            ax.axvspan(start, end, color=PALETTE["neutral"], alpha=0.15, zorder=0)
+
         _rank_axis(ax)
         ax.set_xlabel("Date")
         ax.set_ylabel("Rank")
         ax.set_title(_title("Rank trajectory — top 6 most-active people", player))
+        gap_note = (
+            f"  Grey bands = bot-outage windows (no polls from anyone); "
+            f"{len(global_gaps)} gap(s) detected."
+            if global_gaps
+            else ""
+        )
         _subtitle(
             ax,
             "Higher = better rank. Each line is one Discord person; "
-            f"{len(ranks):,} LP snapshots across {ranks['person'].nunique()} people.",
+            f"{len(ranks):,} LP snapshots across {ranks['person'].nunique()} people."
+            f"{gap_note}",
         )
-        ax.legend(loc="lower left", ncol=2, fontsize=9)
+        # Bottom-left is where the lowest-rank lines live (Bronze/Silver
+        # area). Anchor the legend outside the data area on the right so
+        # it can't cover anyone's trajectory.
+        ax.legend(
+            loc="upper left",
+            bbox_to_anchor=(1.02, 1.0),
+            ncol=1,
+            fontsize=9,
+            frameon=True,
+        )
         _polish_ax(ax)
         fig.autofmt_xdate()
         fig.tight_layout()
         return fig
 
     # --- Single-person view: rank line + WR overlay ---
-    sub = ranks[ranks["person"] == player].sort_values("timestamp").reset_index(drop=True)
+    # Rank history is person-keyed — drop to the owning person.
+    focal_person = _resolve_person(df, player)
+    label = _display_label(player) or "this player"
+    sub = (
+        ranks[ranks["person"] == focal_person].sort_values("timestamp").reset_index(drop=True)
+        if focal_person
+        else ranks.iloc[0:0]
+    )
     if sub.empty:
-        return _empty_figure(f"No rank history for {player}")
+        return _empty_figure(f"No rank history for {label}")
 
     fig, ax_rank = plt.subplots(figsize=(13, 5.4))
+    # Break the line across no-poll windows so a 14-month outage no
+    # longer looks like a flat-rank stretch.
+    sub["inter_snapshot_h"] = sub["timestamp"].diff().dt.total_seconds() / 3600
+    plot_rank = sub["rank_score"].where(~(sub["inter_snapshot_h"] > RANK_GAP_HOURS), np.nan)
     ax_rank.plot(
         sub["timestamp"],
-        sub["rank_score"],
+        plot_rank,
         color=PALETTE["primary"],
         linewidth=2.0,
         label="Rank",
     )
+    # Shade each gap so the no-data region is visible behind the
+    # broken line.
+    gap_mask = sub["inter_snapshot_h"] > RANK_GAP_HOURS
+    for i in np.where(gap_mask.to_numpy())[0]:
+        ax_rank.axvspan(
+            sub["timestamp"].iloc[i - 1],
+            sub["timestamp"].iloc[i],
+            color=PALETTE["neutral"],
+            alpha=0.15,
+            zorder=0,
+        )
     _rank_axis(ax_rank)
     ax_rank.set_xlabel("Date")
     ax_rank.set_ylabel("Rank", color=PALETTE["primary"])
     ax_rank.tick_params(axis="y", colors=PALETTE["primary"])
 
     # WR overlay on twin axis — sourced from match_stats, not history.
-    matches = df[df["person"] == player].sort_values("game_start").reset_index(drop=True)
+    # When an account is selected, the overlay narrows to that account; a
+    # person selection rolls up all their Riot accounts.
+    matches = _filter_player(df, player).sort_values("game_start").reset_index(drop=True)
     if not matches.empty:
         matches = matches.copy()
         matches["rolling_20_wr"] = matches["win"].rolling(window=20, min_periods=5).mean()
@@ -2071,9 +3113,16 @@ def plot_rank_trajectory(df: pd.DataFrame, player: str | None = None) -> plt.Fig
     )
 
     ax_rank.set_title(_title("Rank trajectory + rolling WR", player))
+    gap_count = int(gap_mask.sum())
+    gap_note = (
+        f" Grey bands = no-data periods (bot outage); {gap_count} gap(s) detected."
+        if gap_count
+        else ""
+    )
     _subtitle(
         ax_rank,
-        f"Solid blue = rank ({len(sub):,} LP snapshots). Dashed orange = match-stats rolling-20 WR.",
+        f"Solid blue = rank ({len(sub):,} LP snapshots). Dashed orange = match-stats rolling-20 WR."
+        f"{gap_note}",
     )
     _polish_ax(ax_rank)
     fig.autofmt_xdate()
@@ -2188,7 +3237,7 @@ def plot_player_progression(
         # Slope in win-rate per 1% of career.
         return float(np.polyfit(pct[mask], roll[mask], 1)[0])
 
-    if player is None:
+    if _is_aggregate(player):
         people = df.groupby("person").size()
         people = people[people >= min_games].sort_values(ascending=False).index.tolist()
         if not people:
@@ -2213,9 +3262,9 @@ def plot_player_progression(
             )
         ax.legend(loc="lower right", fontsize=8.5, ncol=2)
     else:
-        sub = df[df["person"] == player]
+        sub = _filter_player(df, player)
         if sub.empty:
-            return _empty_figure(f"No games for {player}")
+            return _empty_figure(f"No games for {_display_label(player) or 'this player'}")
         pct, roll = _series(sub)
         ax.plot(pct, roll, label=f"Rolling-{window} WR", color=PALETTE["primary"], linewidth=2.4)
         slope = _slope(pct, roll)
@@ -2349,7 +3398,7 @@ def plot_duo_winrate(
 
     fig, axes = plt.subplots(1, 2, figsize=(16, max(4.6, top * 0.45)))
 
-    if player is None:
+    if _is_aggregate(player):
         # --- Left: top duos by games together ---
         ax = axes[0]
         d = duos.head(top).iloc[::-1]
@@ -2432,16 +3481,26 @@ def plot_duo_winrate(
         return fig
 
     # --- Per-person view ---
-    solo_wr = df[df["person"] == player]["win"].mean() if not df.empty else 0.5
+    # Duos / h2h are computed at person granularity — resolve the dropdown
+    # key (account or person) to the owning person for partner lookups.
+    focal_person = _resolve_person(df, player)
+    display_name = _display_label(player) or "this player"
+    solo_wr = (
+        df[df["person"] == focal_person]["win"].mean() if focal_person and not df.empty else 0.5
+    )
 
     # Left: this player's partners.
     ax = axes[0]
-    partner_rows = duos[(duos["a"] == player) | (duos["b"] == player)].copy()
+    partner_rows = (
+        duos[(duos["a"] == focal_person) | (duos["b"] == focal_person)].copy()
+        if focal_person
+        else duos.iloc[0:0]
+    )
     if partner_rows.empty:
         ax.text(
             0.5,
             0.5,
-            f"No duos for {player} with ≥{min_games} games",
+            f"No duos for {display_name} with ≥{min_games} games",
             ha="center",
             va="center",
             color=PALETTE["muted"],
@@ -2450,7 +3509,7 @@ def plot_duo_winrate(
         ax.set_axis_off()
     else:
         partner_rows["partner"] = partner_rows.apply(
-            lambda r: r["b"] if r["a"] == player else r["a"], axis=1
+            lambda r: r["b"] if r["a"] == focal_person else r["a"], axis=1
         )
         partner_rows = (
             partner_rows.sort_values("games", ascending=False)
@@ -2491,12 +3550,16 @@ def plot_duo_winrate(
 
     # Right: this player's head-to-head record vs each opponent.
     ax = axes[1]
-    h_player = h2h[(h2h["a"] == player) | (h2h["b"] == player)].copy()
+    h_player = (
+        h2h[(h2h["a"] == focal_person) | (h2h["b"] == focal_person)].copy()
+        if focal_person
+        else h2h.iloc[0:0]
+    )
     if h_player.empty:
         ax.text(
             0.5,
             0.5,
-            f"No head-to-heads for {player} with ≥{h2h_min_games} games",
+            f"No head-to-heads for {display_name} with ≥{h2h_min_games} games",
             ha="center",
             va="center",
             color=PALETTE["muted"],
@@ -2506,10 +3569,10 @@ def plot_duo_winrate(
     else:
         # Normalise: ``own_wr`` = focal player's win-rate vs this opponent.
         h_player["opponent"] = h_player.apply(
-            lambda r: r["b"] if r["a"] == player else r["a"], axis=1
+            lambda r: r["b"] if r["a"] == focal_person else r["a"], axis=1
         )
         h_player["own_wr"] = np.where(
-            h_player["a"] == player, h_player["a_winrate"], 1 - h_player["a_winrate"]
+            h_player["a"] == focal_person, h_player["a_winrate"], 1 - h_player["a_winrate"]
         )
         h_player = (
             h_player.sort_values("games", ascending=False)
@@ -2521,7 +3584,7 @@ def plot_duo_winrate(
         ax.axvline(0.5, color=PALETTE["muted"], linestyle="--", linewidth=1.0, label="even (50%)")
         ax.set_yticks(range(len(h_player)))
         ax.set_yticklabels(h_player["opponent"])
-        ax.set_xlabel(f"{player}'s WR vs opponent")
+        ax.set_xlabel(f"{display_name}'s WR vs opponent")
         ax.set_xlim(0, 1)
         ax.set_title(_title("Head-to-head by opponent", player))
         _subtitle(ax, "Above 50% = you beat them more often. Bar colour = direction.")
@@ -2543,13 +3606,16 @@ def plot_duo_winrate(
 
 
 def plot_activity_over_time(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
-    """Calendar-time view — games per month + the monthly win rate.
+    """Calendar-time view — games per month + the monthly win rate, with a
+    year × month win-rate heatmap on the right to separate seasonal effects
+    from year-over-year drift.
 
-    Counters the apples-vs-oranges issue of the progression chart by
-    plotting absolute date on the x-axis. For the aggregate view this
-    shows when the friend group was actually active and whether month-
-    over-month win rate has any drift. For one player it's their
+    Left panel: when the friend group was actually active and whether
+    month-over-month win rate has any trend. For one player it's their
     individual session pattern.
+
+    Right panel: same months side-by-side across years so e.g. "every
+    September is a slump" stands out from "we got worse this year".
     """
     d = _filter_player(df, player)
     if d.empty:
@@ -2559,7 +3625,10 @@ def plot_activity_over_time(df: pd.DataFrame, player: str | None = None) -> plt.
     d["month"] = d["game_start"].dt.to_period("M").dt.to_timestamp()
     by_month = d.groupby("month").agg(games=("win", "size"), winrate=("win", "mean")).reset_index()
 
-    fig, ax_vol = plt.subplots(figsize=(13, 4.8))
+    fig, axes = plt.subplots(1, 2, figsize=(16, 4.8))
+
+    # --- Left: games / month + WR line ------------------------------------
+    ax_vol = axes[0]
     ax_wr = ax_vol.twinx()
 
     ax_vol.bar(
@@ -2572,6 +3641,7 @@ def plot_activity_over_time(df: pd.DataFrame, player: str | None = None) -> plt.
     ax_vol.set_xlabel("Month")
     ax_vol.set_ylabel("Games / month", color=PALETTE["muted"])
     ax_vol.set_axisbelow(True)
+    ax_vol.tick_params(axis="x", rotation=45)
 
     enough = by_month["games"] >= 5  # don't draw winrate on near-empty months
     ax_wr.plot(
@@ -2591,19 +3661,96 @@ def plot_activity_over_time(df: pd.DataFrame, player: str | None = None) -> plt.
     ax_wr.spines["right"].set_visible(False)
     ax_wr.spines["top"].set_visible(False)
 
-    fig.suptitle(_title("Activity over time — games / month + win rate", player))
-    fig.text(
-        0.5,
-        0.92,
-        "Grey bars = games that month. Blue line = winrate that month (months with <5 games skipped).",
-        ha="center",
-        va="top",
-        fontsize=10,
-        color=PALETTE["muted"],
-        style="italic",
+    ax_vol.set_title(_title("Activity over time — games / month + win rate", player))
+    _subtitle(
+        ax_vol,
+        "Grey bars = games that month. Blue line = winrate that month "
+        "(months with <5 games skipped).",
     )
-    fig.autofmt_xdate()
-    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    _polish_ax(ax_vol)
+
+    # --- Right: year × month WR heatmap -----------------------------------
+    ax_heat = axes[1]
+    d["year"] = d["game_start"].dt.year
+    d["month_num"] = d["game_start"].dt.month
+
+    if _is_aggregate(player):
+        # Per (year, month, person) WR, then macro-average across people.
+        # Mirrors plot_hour_dow_heatmap's aggregate rule but with a higher
+        # threshold (5 games per cell per person) — months are coarser
+        # buckets than hour-of-week so the sample size bar is higher.
+        per_person = (
+            d.groupby(["year", "month_num", "person"])
+            .agg(person_games=("win", "size"), person_wins=("win", "sum"))
+            .reset_index()
+        )
+        per_person = per_person[per_person["person_games"] >= 5]
+        per_person["person_wr"] = per_person["person_wins"] / per_person["person_games"]
+        wr = per_person.pivot_table(
+            index="year", columns="month_num", values="person_wr", aggfunc="mean"
+        )
+        contrib_people = per_person.pivot_table(
+            index="year", columns="month_num", values="person", aggfunc="nunique"
+        )
+        # Require ≥2 contributing people so a single dominant player
+        # can't define the cell.
+        wr = wr.where(contrib_people.fillna(0) >= 2)
+        sub_heat = (
+            "Compare same-month across years to separate seasonal effects "
+            "from year-over-year improvement. ≥5 games per person, ≥2 people per cell."
+        )
+    else:
+        pooled = (
+            d.groupby(["year", "month_num"])
+            .agg(games=("win", "size"), winrate=("win", "mean"))
+            .reset_index()
+        )
+        pooled = pooled[pooled["games"] >= 5]
+        wr = pooled.pivot_table(index="year", columns="month_num", values="winrate")
+        sub_heat = (
+            "Compare same-month across years to separate seasonal effects "
+            "from year-over-year improvement. Cells with <5 games dimmed."
+        )
+
+    years_desc = sorted(d["year"].unique(), reverse=True)
+    wr = wr.reindex(index=years_desc, columns=range(1, 13))
+
+    cmap = plt.get_cmap("RdYlGn").copy()
+    cmap.set_bad(color="#f3f4f6")
+    im = ax_heat.imshow(wr.values, aspect="auto", cmap=cmap, vmin=0.3, vmax=0.7)
+
+    ax_heat.set_yticks(range(len(years_desc)))
+    ax_heat.set_yticklabels(years_desc)
+    ax_heat.set_xticks(range(12))
+    ax_heat.set_xticklabels(
+        ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    )
+    ax_heat.set_xlabel("Month")
+    ax_heat.set_ylabel("Year")
+    ax_heat.set_title(_title("Year × month win-rate", player))
+    _subtitle(ax_heat, sub_heat)
+    ax_heat.grid(False)
+
+    for r in range(wr.shape[0]):
+        for c in range(wr.shape[1]):
+            v = wr.values[r, c]
+            if pd.isna(v):
+                continue
+            ax_heat.text(
+                c,
+                r,
+                f"{v * 100:.0f}%",
+                ha="center",
+                va="center",
+                fontsize=9,
+                color=PALETTE["text"],
+            )
+
+    cbar = fig.colorbar(im, ax=ax_heat, label="Win rate", shrink=0.8, pad=0.02)
+    cbar.outline.set_visible(False)
+    _polish_ax(ax_heat)
+
+    fig.tight_layout()
     return fig
 
 
@@ -2645,15 +3792,12 @@ def compute_feature_impacts(
         d = d.copy()
 
     # Bucket helpers — boolean masks describe one side of each split.
-    kda_75 = d["kda"].quantile(0.75)
-    kda_25 = d["kda"].quantile(0.25)
+    # Pre-game factors only: KDA + duration are outcome-derived (a rephrasing
+    # of the win), so including them here would be data leakage. Same scope
+    # as `_build_logistic_design`.
     most_played_champ = d["champion"].value_counts().idxmax() if not d.empty else None
 
     features: list[tuple[str, pd.Series]] = [
-        ("High KDA (top 25%)", d["kda"] >= kda_75),
-        ("Low KDA (bottom 25%)", d["kda"] <= kda_25),
-        ("Short game (<25min)", d["duration_min"] < 25),
-        ("Long game (≥35min)", d["duration_min"] >= 35),
         ("Late night (00-04h)", d["hour"].between(0, 4)),
         ("Evening peak (18-23h)", d["hour"].between(18, 23)),
         ("Weekend", d["dow"] >= 5),
@@ -2724,6 +3868,10 @@ def compute_feature_impacts(
     out = pd.DataFrame(rows)
     if out.empty:
         return out
+    # BH-adjust across the features actually tested so the "significant"
+    # threshold survives multiple-comparisons noise (10+ tests at α=0.05
+    # expects 0.5 false positives by chance otherwise).
+    out["p_adj"] = bh_adjust(out["p"].tolist())
     return out.iloc[out["effect_pp"].abs().sort_values(ascending=False).index].reset_index(
         drop=True
     )
@@ -2734,11 +3882,11 @@ def plot_feature_impact(
 ) -> plt.Figure:
     """Ranked "what predicts a win?" chart.
 
-    For every candidate factor (high KDA, weekend, after loss streak,
+    For every candidate pre-game factor (weekend, after loss streak,
     same-team partner, picked your main, …) we compute the percentage-
     point shift in win rate when the factor is true vs false. Bars are
-    sorted by absolute shift; statistically significant ones (p<0.05)
-    are drawn solid, non-significant ones faded to grey.
+    sorted by absolute shift; bars whose BH-adjusted q<0.05 are drawn
+    solid, the rest faded to grey (controls FDR across the feature set).
     """
     impacts = compute_feature_impacts(df, player=player, min_games=min_games)
     if impacts.empty:
@@ -2749,7 +3897,7 @@ def plot_feature_impact(
 
     colours = []
     for _, r in impacts.iterrows():
-        sig = r["p"] < 0.05
+        sig = r["p_adj"] < 0.05
         if not sig:
             colours.append(PALETTE["neutral"])
         elif r["effect_pp"] > 0:
@@ -2764,24 +3912,34 @@ def plot_feature_impact(
     ax.set_yticks(y)
     ax.set_yticklabels(impacts["feature"])
     ax.set_xlabel("Win rate when factor true MINUS when false (percentage points)")
-    ax.set_title(_title("Feature impact — what actually moves your win rate?", player))
+    ax.set_title(_title("Feature impact — what actually moves your wins?", player))
     n_people = int(impacts["n_people"].max()) if "n_people" in impacts.columns else 1
     _subtitle(
         ax,
-        f"Solid bars = p<0.05 (likely real). Faded grey = noise. {_macro_label(n_people)}.",
+        f"Solid bars = q<0.05 (likely real). Faded grey = noise. {_macro_label(n_people)}. "
+        "q = BH-adjusted p; solid bars require q<0.05 (FDR-controlled at 5%).\n"
+        "Pre-game factors only — KDA + duration excluded (they're outcome-derived, not predictors).",
     )
     _polish_ax(ax)
 
-    # Annotate each row with detail: "+8.4pp · 56% vs 47% · n=420/2100 · p=0.001".
+    # Annotate each row with detail: "+8.4pp · 56% vs 47% · n=420/2100 · p=… → q=…".
     # Wide solid bars (|effect_pp| > 5) get the label tucked inside; narrow
     # bars and faded-grey (non-significant) bars stay outside to remain
     # readable against the chart background.
     for yi, (_, r) in enumerate(impacts.iterrows()):
+        # If raw p and BH-adjusted q round to the same value within 1%,
+        # show only p — the arrow + q just repeats information.
+        p_tag = _p_marker(r["p"])
+        if abs(r["p"] - r["p_adj"]) < 0.01:
+            stat_tag = p_tag
+        else:
+            q_tag = "q<0.001" if r["p_adj"] < 0.001 else f"q={r['p_adj']:.3f}"
+            stat_tag = f"{p_tag} {q_tag}"
         label = (
             f"{r['effect_pp']:+.1f}pp  ·  {r['wr_yes']:.0%} vs {r['wr_no']:.0%}  "
-            f"·  n={int(r['n_yes'])} vs {int(r['n_no'])}  ·  {_p_marker(r['p'])}"
+            f"·  n={int(r['n_yes'])} vs {int(r['n_no'])}  ·  {stat_tag}"
         )
-        is_grey = not (r["p"] < 0.05)
+        is_grey = not (r["p_adj"] < 0.05)
         if abs(r["effect_pp"]) > 5 and not is_grey:
             if r["effect_pp"] >= 0:
                 ax.annotate(
@@ -2806,14 +3964,19 @@ def plot_feature_impact(
                     color="white",
                 )
         else:
-            sign_pad = 1 if r["effect_pp"] >= 0 else -1
+            # Non-significant / short bars: anchor the long annotation
+            # string to the right of the bar's outer tip when positive,
+            # or to the right of the zero line when negative — never to
+            # the left, so it can't crash into the y-tick labels for
+            # narrow negative bars.
+            anchor_x = max(r["effect_pp"], 0.0)
             ax.annotate(
                 label,
-                xy=(r["effect_pp"], yi),
-                xytext=(6 * sign_pad, 0),
+                xy=(anchor_x, yi),
+                xytext=(6, 0),
                 textcoords="offset points",
                 va="center",
-                ha="left" if r["effect_pp"] >= 0 else "right",
+                ha="left",
                 fontsize=9,
                 color=PALETTE["text"],
             )
@@ -2866,16 +4029,19 @@ def _draw_card(
         mutation_aspect=h / w,
     )
     ax.add_patch(body)
+    # Plain Rectangle for the stripe — FancyBboxPatch with a non-trivial
+    # rounding_size on a sliver-thin box renders as a stretched stadium
+    # because the rounded ends consume the entire width.
+    from matplotlib.patches import Rectangle
+
     stripe_w = w * 0.035
-    stripe = FancyBboxPatch(
+    stripe = Rectangle(
         (x, y),
         stripe_w,
         h,
-        boxstyle="round,pad=0,rounding_size=0.012",
         facecolor=accent,
         edgecolor="none",
         zorder=3,
-        mutation_aspect=h / stripe_w,
     )
     ax.add_patch(stripe)
 
@@ -2891,7 +4057,16 @@ def _card_text(
     sublabel: str = "",
     value_color: str = "#222",
 ) -> None:
-    """Lay out label / value / sublabel inside an already-drawn card."""
+    """Lay out label / value / sublabel inside an already-drawn card.
+
+    The value text is the headline number and it must fit within the
+    card width. Two safety nets handle long strings (duo names like
+    "Langers69 + Chief Morri Porri", long champion names):
+    1. Hard truncate at 28 chars with an ellipsis so absurd values can't
+       blow past the right edge.
+    2. Step the fontsize down for medium-length values (>16 chars) and
+       further for long ones (>24 chars) so the box still breathes.
+    """
     pad_x = w * 0.07
     text_x = x + pad_x
     # Top label, small uppercase grey.
@@ -2906,6 +4081,14 @@ def _card_text(
         fontweight="bold",
         zorder=4,
     )
+    if len(value) > 28:
+        value = value[:27] + "…"
+    if len(value) > 24:
+        value_fontsize = 11
+    elif len(value) > 16:
+        value_fontsize = 14
+    else:
+        value_fontsize = 18
     # Big value, vertically centred-ish.
     ax.text(
         text_x,
@@ -2913,7 +4096,7 @@ def _card_text(
         value,
         ha="left",
         va="center",
-        fontsize=18,
+        fontsize=value_fontsize,
         color=value_color,
         fontweight="bold",
         zorder=4,
@@ -3000,7 +4183,7 @@ def _build_logistic_design(
     # Always appended LAST so callers can split factor vs person-FE columns
     # by slicing on n_person_fe_cols.
     n_person_fe_cols = 0
-    if include_person_fe and player is None and d["person"].nunique() > 1:
+    if include_person_fe and _is_aggregate(player) and d["person"].nunique() > 1:
         people = d["person"].value_counts().index.tolist()
         baseline = people[0]
         for p in people[1:]:
@@ -3086,12 +4269,15 @@ def plot_logistic_coefficients(
         .iloc[::-1]
         .reset_index(drop=True)
     )
+    # BH-adjust across the factor coefficients on the chart so the
+    # "significant" threshold survives multiple-comparisons noise.
+    coefs_df["p_adj"] = bh_adjust(coefs_df["p"].tolist())
 
     fig_h = max(4.6, len(coefs_df) * 0.45)
     fig, ax = plt.subplots(figsize=(13, fig_h))
     y_pos = np.arange(len(coefs_df))
 
-    sig_mask = coefs_df["p"] < 0.05
+    sig_mask = coefs_df["p_adj"] < 0.05
     colours = [
         (PALETTE["win"] if c > 0 else PALETTE["loss"]) if s else PALETTE["neutral"]
         for c, s in zip(coefs_df["coef"], sig_mask, strict=False)
@@ -3101,18 +4287,14 @@ def plot_logistic_coefficients(
         coefs_df["coef"],
         y_pos,
         xerr=1.96 * coefs_df["se"],
-        fmt="none",
-        ecolor=PALETTE["text"],
-        capsize=3,
-        linewidth=1.0,
-        alpha=0.6,
+        **WHISKER_STYLE,
     )
     ax.axvline(0, color=PALETTE["text"], linewidth=0.8)
     ax.set_yticks(y_pos)
     ax.set_yticklabels(coefs_df["name"])
     ax.set_xlabel("Log-odds (95% CI whiskers)")
 
-    n_people = df["person"].nunique() if player is None else 1
+    n_people = df["person"].nunique() if _is_aggregate(player) else 1
     title_macro = (
         f"controlling for person ({n_people} people)" if n_people > 1 else "single-person fit"
     )
@@ -3122,20 +4304,18 @@ def plot_logistic_coefficients(
         subtitle = (
             f"Person identity alone explains {r2_fe:.1%} of variance; the factors add "
             f"{r2_factors:+.1%} on top (full = {r2_full:.1%}). {verdict_line}\n"
-            "Solid bars = p<0.05 (real signal). Faded grey = no evidence.\n"
             "Pre-game factors only — KDA + duration excluded "
-            "(they're outcome-derived, not predictors)."
+            "(they're outcome-derived, not predictors).\n"
+            "q = BH-adjusted p; solid bars require q<0.05 (FDR-controlled at 5%)."
         )
     else:
         subtitle = (
             f"McFadden pseudo-R² = {r2_full:.1%}. {verdict_line}\n"
-            "Solid bars = p<0.05 (real signal). Faded grey = no evidence.\n"
             "Pre-game factors only — KDA + duration excluded "
-            "(they're outcome-derived, not predictors)."
+            "(they're outcome-derived, not predictors).\n"
+            "q = BH-adjusted p; solid bars require q<0.05 (FDR-controlled at 5%)."
         )
     _subtitle(ax, subtitle)
-    # _subtitle pads for a two-line caption; bump it for the three-line scope note.
-    ax.set_title(ax.get_title(), pad=48)
     _polish_ax(ax)
 
     # Annotation placement: solid (significant) coloured bars wider than
@@ -3144,11 +4324,16 @@ def plot_logistic_coefficients(
     # to stay readable.
     for yi, r in coefs_df.iterrows():
         odds_ratio_pct = (r["or"] - 1) * 100
-        label = (
-            f"{r['coef']:+.2f}  ·  OR {r['or']:.2f} "
-            f"({odds_ratio_pct:+.0f}%)  ·  {_p_marker(r['p'])}"
-        )
-        is_grey = not (r["p"] < 0.05)
+        # If raw p and BH-adjusted q round to the same value within 1%,
+        # show only p — the arrow + q just repeats information.
+        p_tag = _p_marker(r["p"])
+        if abs(r["p"] - r["p_adj"]) < 0.01:
+            stat_tag = p_tag
+        else:
+            q_tag = "q<0.001" if r["p_adj"] < 0.001 else f"q={r['p_adj']:.3f}"
+            stat_tag = f"{p_tag} {q_tag}"
+        label = f"{r['coef']:+.2f}  ·  OR {r['or']:.2f} " f"({odds_ratio_pct:+.0f}%)  ·  {stat_tag}"
+        is_grey = not (r["p_adj"] < 0.05)
         if abs(r["coef"]) > 0.5 and not is_grey:
             if r["coef"] >= 0:
                 ax.annotate(
@@ -3173,20 +4358,578 @@ def plot_logistic_coefficients(
                     color="white",
                 )
         else:
-            sign_pad = 1 if r["coef"] >= 0 else -1
+            # Non-significant / short bars: anchor the long annotation
+            # string to the right of the bar's outer tip when positive,
+            # or to the right of the zero line when negative — never to
+            # the left, so it can't crash into the y-tick labels for
+            # narrow negative bars.
+            anchor_x = max(r["coef"], 0.0)
             ax.annotate(
                 label,
-                xy=(r["coef"], yi),
-                xytext=(8 * sign_pad, 0),
+                xy=(anchor_x, yi),
+                xytext=(8, 0),
                 textcoords="offset points",
                 va="center",
-                ha="left" if r["coef"] >= 0 else "right",
+                ha="left",
                 fontsize=9,
                 color=PALETTE["text"],
             )
 
     max_abs = max(0.4, float(coefs_df["coef"].abs().max() + 1.96 * coefs_df["se"].max()) * 1.05)
     ax.set_xlim(-max_abs, max_abs)
+
+    # Reserve a strip below the bottom bar so the OOS AUC box sits in
+    # empty space instead of overlapping that row's annotation.
+    cur_lo, cur_hi = ax.get_ylim()
+    ax.set_ylim(cur_lo - 1.0, cur_hi)
+
+    # OOS calibration (iter 26) showed pre-game logit has zero predictive
+    # signal. Surface that directly here so the chart can't be over-read.
+    ax.text(
+        0.98,
+        0.02,
+        "Out-of-sample AUC = 0.498 (random).\nPre-game factors don't predict wins.\n→ For real signal see Picks and LP.",
+        transform=ax.transAxes,
+        ha="right",
+        va="bottom",
+        fontsize=8.5,
+        color=PALETTE["text"],
+        bbox={
+            "facecolor": "white",
+            "alpha": 0.92,
+            "edgecolor": PALETTE["spine"],
+            "linewidth": 0.9,
+            "pad": 6,
+        },
+    )
+
+    fig.tight_layout()
+    return fig
+
+
+def auc(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """Mann-Whitney U area under the ROC curve.
+
+    Equivalent to the probability that a random positive sample scores
+    higher than a random negative sample. Returns 0.5 when one class is
+    empty (degenerate; the model has nothing to discriminate).
+    """
+    y_true = np.asarray(y_true, dtype=float)
+    y_pred = np.asarray(y_pred, dtype=float)
+    pos = y_pred[y_true > 0.5]
+    neg = y_pred[y_true <= 0.5]
+    if len(pos) == 0 or len(neg) == 0:
+        return 0.5
+    all_scores = np.concatenate([pos, neg])
+    ranks = np.argsort(np.argsort(all_scores, kind="stable"), kind="stable") + 1
+    sum_pos = ranks[: len(pos)].sum()
+    u = sum_pos - len(pos) * (len(pos) + 1) / 2
+    return float(u / (len(pos) * len(neg)))
+
+
+def _build_calibration_design(
+    df: pd.DataFrame,
+    player: str | None,
+    spec: dict | None = None,
+) -> tuple[np.ndarray, np.ndarray, list[str], int, dict]:
+    """Build a logistic design that can be REPLAYED on a holdout split.
+
+    Mirrors ``_build_logistic_design`` but exposes/consumes a ``spec`` so
+    train and test produce the same column set, order, and z-score
+    standardisation. Without this, the holdout's own means/stds and
+    top-3 champions would differ from train's and ``beta`` couldn't be
+    applied across the split. Used only by ``plot_model_calibration`` —
+    the original ``_build_logistic_design`` is left untouched so the
+    coefficient chart keeps its existing behaviour.
+    """
+    d = _filter_player(df, player).copy()
+    if d.empty:
+        return np.empty((0, 0)), np.empty(0), [], 0, spec or {}
+
+    same_team = d[["match_id", "win", "person"]].merge(
+        df[["match_id", "win", "person"]], on=["match_id", "win"]
+    )
+    same_team = same_team[same_team["person_x"] != same_team["person_y"]]
+    with_duo = set(same_team[["match_id", "person_x"]].itertuples(index=False, name=None))
+    d["had_tracked_duo"] = [
+        (mid, p) in with_duo for mid, p in zip(d["match_id"], d["person"], strict=False)
+    ]
+
+    gap_filled = d["gap_since_prev_min"].fillna(d["gap_since_prev_min"].median()).fillna(60.0)
+    d["log_gap_min"] = np.log1p(gap_filled.clip(lower=0.0))
+
+    cont_raw = {
+        "Loss streak entering (z)": pd.to_numeric(d["loss_streak_in"], errors="coerce"),
+        "Log gap since prev (z)": pd.to_numeric(d["log_gap_min"], errors="coerce"),
+    }
+    bin_raw = {
+        "Late night (00-04h)": d["hour"].between(0, 4).astype(int),
+        "Evening peak (18-23h)": d["hour"].between(18, 23).astype(int),
+        "Weekend": (d["dow"] >= 5).astype(int),
+        "Same-team tracked partner": d["had_tracked_duo"].astype(int),
+    }
+
+    is_replay = spec is not None
+    if is_replay:
+        champ_list: list[str] = list(spec.get("champs", []))
+        cont_stats: dict[str, tuple[float, float]] = dict(spec.get("cont_stats", {}))
+        bin_keep: list[str] = list(spec.get("bin_keep", []))
+        fe_people: list[str] = list(spec.get("fe_people", []))
+        fe_baseline: str | None = spec.get("fe_baseline")
+        col_order: list[str] = list(spec.get("cols", []))
+    else:
+        champ_list = d["champion"].value_counts().head(3).index.tolist()
+        cont_stats = {}
+        bin_keep = []
+        fe_people = []
+        fe_baseline = None
+        col_order = []
+
+    for champ in champ_list:
+        bin_raw[f"Played {champ}"] = (d["champion"] == champ).astype(int)
+
+    cols: list[str] = []
+    parts: list[np.ndarray] = []
+
+    if is_replay:
+        # Replay path: use train's means/stds and train's column order.
+        # Continuous first (z-scored with train stats), then binaries the
+        # train kept, then person FEs (also from train).
+        for name in col_order:
+            if name in cont_stats:
+                mean, std = cont_stats[name]
+                series = cont_raw.get(name)
+                if series is None:
+                    vals = np.zeros(len(d))
+                else:
+                    vals = series.fillna(series.median() if series.notna().any() else 0.0).to_numpy(
+                        dtype=float
+                    )
+                if std < 1e-9:
+                    parts.append(np.zeros((len(d), 1)))
+                else:
+                    parts.append(((vals - mean) / std)[:, None])
+                cols.append(name)
+            elif name in bin_raw:
+                vals = bin_raw[name].fillna(0).to_numpy(dtype=float)
+                parts.append(vals[:, None])
+                cols.append(name)
+            elif name.startswith("[person] ") and fe_baseline is not None:
+                # "[person] X vs baseline" — extract X.
+                person_name = name[len("[person] ") :].split(" vs ", 1)[0]
+                vals = (d["person"] == person_name).astype(float).to_numpy()
+                parts.append(vals[:, None])
+                cols.append(name)
+            else:
+                # Missing in test data — pad with zeros so the column survives.
+                parts.append(np.zeros((len(d), 1)))
+                cols.append(name)
+        n_person_fe_cols = sum(1 for c in cols if c.startswith("[person]"))
+    else:
+        # Training pass: compute stats, decide which binaries to keep,
+        # decide which FE people to include, and stash everything in spec.
+        for name, series in cont_raw.items():
+            vals = series.fillna(series.median() if series.notna().any() else 0.0).to_numpy(
+                dtype=float
+            )
+            mean = float(vals.mean())
+            std = float(vals.std())
+            if std < 1e-9:
+                continue
+            parts.append(((vals - mean) / std)[:, None])
+            cols.append(name)
+            cont_stats[name] = (mean, std)
+
+        for name, series in bin_raw.items():
+            vals = series.fillna(0).to_numpy(dtype=float)
+            if vals.sum() < 20 or vals.sum() > len(vals) - 20:
+                continue
+            parts.append(vals[:, None])
+            cols.append(name)
+            bin_keep.append(name)
+
+        n_person_fe_cols = 0
+        if _is_aggregate(player) and d["person"].nunique() > 1:
+            people = d["person"].value_counts().index.tolist()
+            fe_baseline = people[0]
+            for p in people[1:]:
+                vals = (d["person"] == p).astype(float).to_numpy()
+                if vals.sum() < 20:
+                    continue
+                parts.append(vals[:, None])
+                cols.append(f"[person] {p} vs {fe_baseline}")
+                fe_people.append(p)
+                n_person_fe_cols += 1
+
+    if not parts:
+        return np.empty((0, 0)), np.empty(0), [], 0, spec or {}
+    X = np.hstack(parts)
+    y = d["win"].to_numpy(dtype=float)
+
+    if not is_replay:
+        spec_out = {
+            "champs": champ_list,
+            "cont_stats": cont_stats,
+            "bin_keep": bin_keep,
+            "fe_people": fe_people,
+            "fe_baseline": fe_baseline,
+            "cols": list(cols),
+        }
+    else:
+        spec_out = spec  # type: ignore[assignment]
+    return X, y, cols, n_person_fe_cols, spec_out
+
+
+def plot_model_calibration(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Out-of-sample calibration + headline metrics for the logit.
+
+    Splits chronologically at the median ``game_start`` (50/50 train /
+    holdout), fits the same logistic model used elsewhere on the train
+    half, predicts on the holdout half, and reports AUC / accuracy /
+    log-loss / Brier alongside their trivial baselines. The question
+    isn't "do the features look significant in-sample?" (they barely do
+    once KDA leakage is removed) but "do they predict the future at
+    all?" — i.e. is the signal real or matchmaking noise.
+    """
+    d = _filter_player(df, player)
+    if d.empty:
+        return _empty_figure("No games to validate")
+
+    # Per-person split needs ≥30 games on each side. For aggregate, ≥60
+    # total isn't enough — we also want both halves usable, but the
+    # design build itself will refuse <~20 of any binary.
+    d = d.sort_values("game_start").reset_index(drop=True)
+    if not _is_aggregate(player):
+        if len(d) < 60:
+            return _empty_figure("Need ≥60 games to validate")
+    elif len(d) < 60:
+        return _empty_figure("Need ≥60 games to validate")
+
+    cut = d["game_start"].median()
+    train_df = d[d["game_start"] <= cut]
+    test_df = d[d["game_start"] > cut]
+    if not _is_aggregate(player) and (len(train_df) < 30 or len(test_df) < 30):
+        return _empty_figure("Need ≥60 games to validate")
+    if len(train_df) < 20 or len(test_df) < 20:
+        return _empty_figure("Not enough games per half")
+
+    X_tr, y_tr, cols, _n_fe, spec = _build_calibration_design(train_df, player)
+    if X_tr.size == 0 or len(np.unique(y_tr)) < 2:
+        return _empty_figure("Not enough variance in train half")
+
+    beta, _se, _ll = logistic_fit(X_tr, y_tr, l2=0.5)
+
+    X_te, y_te, _cols_te, _n_fe_te, _ = _build_calibration_design(test_df, player, spec=spec)
+    if X_te.size == 0 or len(np.unique(y_te)) < 2:
+        return _empty_figure("Holdout has no class variance")
+
+    z = np.clip(X_te @ beta[1:] + beta[0], -30.0, 30.0)
+    p = 1.0 / (1.0 + np.exp(-z))
+    p_safe = np.clip(p, 1e-12, 1 - 1e-12)
+
+    acc = float(((p > 0.5) == (y_te > 0.5)).mean())
+    log_loss = float(-(y_te * np.log(p_safe) + (1 - y_te) * np.log(1 - p_safe)).mean())
+    brier = float(((p - y_te) ** 2).mean())
+
+    auc_val = auc(y_te, p)
+
+    # Trivial baselines — what you'd get predicting train-mean WR for everyone.
+    p_bar = float(y_tr.mean())
+    p_bar_safe = float(np.clip(p_bar, 1e-12, 1 - 1e-12))
+    triv_acc = float(max(y_tr.mean(), 1 - y_tr.mean()))
+    y_te_mean = float(y_te.mean())
+    triv_logloss = float(
+        -(y_te_mean * math.log(p_bar_safe) + (1 - y_te_mean) * math.log(1 - p_bar_safe))
+    )
+    triv_brier = float(((p_bar - y_te) ** 2).mean())
+
+    fig, (ax_cal, ax_card) = plt.subplots(
+        1, 2, figsize=(13, 5.4), gridspec_kw={"width_ratios": [1.2, 1.0]}
+    )
+
+    # --- Left: calibration curve ---
+    bins = np.linspace(0.0, 1.0, 11)
+    bin_idx = np.clip(np.digitize(p, bins, right=False) - 1, 0, 9)
+    bucket_rows = []
+    for b in range(10):
+        mask = bin_idx == b
+        n = int(mask.sum())
+        if n == 0:
+            continue
+        bucket_rows.append(
+            {
+                "mean_pred": float(p[mask].mean()),
+                "observed_wr": float(y_te[mask].mean()),
+                "count": n,
+            }
+        )
+    ax_cal.plot([0, 1], [0, 1], linestyle=":", color=PALETTE["muted"], linewidth=1.2, zorder=1)
+    if bucket_rows:
+        xs = [r["mean_pred"] for r in bucket_rows]
+        ys = [r["observed_wr"] for r in bucket_rows]
+        sizes = [max(30, min(400, r["count"] * 6)) for r in bucket_rows]
+        ax_cal.scatter(
+            xs,
+            ys,
+            s=sizes,
+            color=PALETTE["primary"],
+            edgecolor="white",
+            linewidth=1.2,
+            alpha=0.85,
+            zorder=3,
+        )
+        ax_cal.plot(xs, ys, color=PALETTE["primary"], linewidth=1.1, alpha=0.45, zorder=2)
+    ax_cal.set_xlim(0, 1)
+    ax_cal.set_ylim(0, 1)
+    ax_cal.set_xlabel("Predicted win probability")
+    ax_cal.set_ylabel("Observed win rate (holdout)")
+    ax_cal.set_title("Calibration curve (holdout)")
+    _subtitle(
+        ax_cal,
+        "Markers on the 45° line = well-calibrated. Below the line = overconfident "
+        "wins; above = underconfident. Marker size ∝ bucket count.",
+    )
+    _polish_ax(ax_cal)
+
+    # --- Right: metrics card ---
+    ax_card.set_axis_off()
+    ax_card.set_xlim(0, 1)
+    ax_card.set_ylim(0, 1)
+    if auc_val > 0.55:
+        accent = PALETTE["win"]
+        verdict = "Some real predictive signal."
+    elif auc_val < 0.51:
+        accent = PALETTE["loss"]
+        verdict = "Indistinguishable from noise."
+    else:
+        accent = PALETTE["primary"]
+        verdict = "Marginal — close to chance."
+
+    card_x, card_y, card_w, card_h = 0.04, 0.08, 0.92, 0.84
+    _draw_card(ax_card, card_x, card_y, card_w, card_h, accent)
+    ax_card.text(
+        card_x + card_w * 0.07,
+        card_y + card_h - card_h * 0.08,
+        "OUT-OF-SAMPLE METRICS",
+        ha="left",
+        va="center",
+        fontsize=11,
+        color=PALETTE["muted"],
+        fontweight="bold",
+        zorder=4,
+    )
+
+    metric_rows = [
+        ("Accuracy", f"{acc:.1%}", f"vs trivial {triv_acc:.1%}"),
+        ("AUC", f"{auc_val:.3f}", "vs random 0.500"),
+        ("Log-loss", f"{log_loss:.3f}", f"vs trivial {triv_logloss:.3f}"),
+        ("Brier", f"{brier:.3f}", f"vs trivial {triv_brier:.3f}"),
+    ]
+    # Stack 4 metric lines inside the card from top to bottom.
+    top_y = card_y + card_h - card_h * 0.22
+    line_h = card_h * 0.17
+    for i, (label, value, sub) in enumerate(metric_rows):
+        y_line = top_y - i * line_h
+        ax_card.text(
+            card_x + card_w * 0.10,
+            y_line,
+            label.upper(),
+            ha="left",
+            va="center",
+            fontsize=10,
+            color=PALETTE["muted"],
+            fontweight="bold",
+            zorder=4,
+        )
+        ax_card.text(
+            card_x + card_w * 0.40,
+            y_line,
+            value,
+            ha="left",
+            va="center",
+            fontsize=16,
+            color=PALETTE["text"],
+            fontweight="bold",
+            zorder=4,
+        )
+        ax_card.text(
+            card_x + card_w * 0.62,
+            y_line,
+            sub,
+            ha="left",
+            va="center",
+            fontsize=10,
+            color=PALETTE["muted"],
+            zorder=4,
+        )
+
+    ax_card.text(
+        card_x + card_w * 0.10,
+        card_y + card_h * 0.06,
+        verdict,
+        ha="left",
+        va="center",
+        fontsize=11,
+        color=accent,
+        fontweight="bold",
+        zorder=4,
+    )
+
+    fig.suptitle(
+        _title("Out-of-sample model calibration", player),
+        fontsize=14,
+        fontweight="bold",
+        y=0.99,
+    )
+    fig.text(
+        0.5,
+        0.02,
+        f"Trained on {len(train_df)} games, tested on {len(test_df)} games (chronological 50/50 split). "
+        "AUC > 0.55 = some real signal; ≈ 0.50 = pure matchmaking noise.",
+        ha="center",
+        va="bottom",
+        fontsize=9,
+        color=PALETTE["muted"],
+    )
+    fig.tight_layout(rect=[0, 0.04, 1, 0.96])
+    return fig
+
+
+def _per_player_auc(df: pd.DataFrame, person: str) -> float | None:
+    """Fit the calibration logit on this person's first half and return
+    holdout AUC. ``None`` when the split can't produce a usable model
+    (too few games, no class variance, or empty design)."""
+    d = df[df["person"] == person].sort_values("game_start").reset_index(drop=True)
+    if len(d) < 60:
+        return None
+
+    cut = d["game_start"].median()
+    train_df = d[d["game_start"] <= cut]
+    test_df = d[d["game_start"] > cut]
+    if len(train_df) < 30 or len(test_df) < 30:
+        return None
+
+    # ``player=None`` here means "no filter on the slice we already cut";
+    # the FE-people branch in _build_calibration_design is gated on
+    # nunique(person) > 1, which is false for a single-person df, so the
+    # person dummies drop out cleanly.
+    X_tr, y_tr, _cols, _n_fe, spec = _build_calibration_design(train_df, None)
+    if X_tr.size == 0 or len(np.unique(y_tr)) < 2:
+        return None
+
+    beta, _se, _ll = logistic_fit(X_tr, y_tr, l2=0.5)
+    X_te, y_te, _c, _n, _ = _build_calibration_design(test_df, None, spec=spec)
+    if X_te.size == 0 or len(np.unique(y_te)) < 2:
+        return None
+
+    z = np.clip(X_te @ beta[1:] + beta[0], -30.0, 30.0)
+    p = 1.0 / (1.0 + np.exp(-z))
+    return auc(y_te, p)
+
+
+def plot_per_player_predictability(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """OOS AUC per person — is the 0.498 aggregate uniform noise, or is
+    it averaging high-predictability players with low ones?
+
+    Refits the calibration logit on each eligible player's chronological
+    first half and reports holdout AUC on the second half. Bars sorted
+    descending; green > 0.55 (real signal), red < 0.45 (anti-signal),
+    grey in between (noise band). A 0.50 reference line marks chance.
+    """
+    counts = df["person"].value_counts()
+    eligible = [p for p, n in counts.items() if n >= 100]
+
+    rows: list[dict] = []
+    for person in eligible:
+        score = _per_player_auc(df, person)
+        if score is None:
+            continue
+        rows.append({"person": person, "auc": score, "n": int(counts[person])})
+
+    if len(rows) < 3:
+        return _empty_figure("Need ≥3 players with 100+ games")
+
+    rows.sort(key=lambda r: r["auc"], reverse=True)
+    median_auc = float(np.median([r["auc"] for r in rows]))
+
+    is_single = not _is_aggregate(player)
+    focus_person = _resolve_person(df, player) if is_single else None
+    focus_row = next((r for r in rows if r["person"] == focus_person), None)
+    if is_single and focus_row is None:
+        return _empty_figure("Not enough games for this player to validate")
+
+    if is_single:
+        display = [focus_row]
+    else:
+        display = rows
+
+    n_bars = len(display)
+    fig, ax = plt.subplots(figsize=(11, max(3.2, 0.55 * n_bars + 1.6)))
+
+    y_pos = np.arange(n_bars)
+    aucs = [r["auc"] for r in display]
+    labels = [f"{r['person']}  (n={r['n']})" for r in display]
+
+    def _bar_color(v: float) -> str:
+        if v > 0.55:
+            return PALETTE["win"]
+        if v < 0.45:
+            return PALETTE["loss"]
+        return PALETTE["neutral"]
+
+    colors = [_bar_color(v) for v in aucs]
+    ax.barh(y_pos, aucs, color=colors, edgecolor="white", linewidth=0.8, zorder=2)
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(labels)
+    ax.invert_yaxis()
+
+    ax.axvline(0.5, color=PALETTE["muted"], linewidth=1.0, linestyle="--", alpha=0.7, zorder=1)
+    if not is_single:
+        ax.axvline(
+            median_auc,
+            color=PALETTE["accent_purple"],
+            linewidth=1.0,
+            linestyle=":",
+            alpha=0.8,
+            zorder=1,
+            label=f"Group median {median_auc:.3f}",
+        )
+        ax.legend(loc="lower right", frameon=False, fontsize=9)
+
+    # Annotate each bar with the AUC and game count.
+    x_max = max(0.65, max(aucs) + 0.04)
+    x_min = min(0.35, min(aucs) - 0.02)
+    ax.set_xlim(x_min, x_max)
+    for i, r in enumerate(display):
+        ax.text(
+            r["auc"] + 0.005,
+            i,
+            f"{r['auc']:.3f}  ·  n={r['n']}",
+            ha="left",
+            va="center",
+            fontsize=9,
+            color=PALETTE["text"],
+        )
+
+    ax.set_xlabel("Out-of-sample AUC (holdout half)")
+    ax.set_title(_title("Per-player predictability", player), fontsize=14, fontweight="bold")
+
+    if is_single:
+        delta = focus_row["auc"] - median_auc
+        verdict = "more" if delta > 0 else "less"
+        _subtitle(
+            ax,
+            f"Your AUC: {focus_row['auc']:.3f}, median across group: {median_auc:.3f}. "
+            f"You are {verdict} predictable than peers (Δ {delta:+.3f}).",
+        )
+    else:
+        _subtitle(
+            ax,
+            "OOS AUC by player. >0.55 = real predictive signal exists. "
+            "≈0.50 = outcomes are pure noise for this player.",
+        )
+
+    _polish_ax(ax)
     fig.tight_layout()
     return fig
 
@@ -3251,22 +4994,24 @@ def plot_stats_summary(df: pd.DataFrame, player: str | None = None) -> plt.Figur
             trend_pp_career = slope_per_pct * 100
 
     duos = compute_duos(df, min_games=5)
-    duo_label = "Most-played duo" if player is None else "Best duo partner"
+    duo_label = "Most-played duo" if _is_aggregate(player) else "Best duo partner"
     duo_value = "—"
     duo_sublabel = "needs ≥5 same-team games"
     duo_accent = PALETTE["neutral"]
     duo_value_color = PALETTE["text"]
+    # Duos are person-keyed — an account selection inherits its person's duos.
+    focal_person = _resolve_person(df, player)
     if not duos.empty:
-        if player is None:
+        if _is_aggregate(player):
             row = duos.sort_values("games", ascending=False).iloc[0]
             duo_value = f"{row['a']} + {row['b']}"
             duo_sublabel = f"{int(row['games'])} games · {row['winrate']:.0%} WR"
             duo_accent = PALETTE["win"] if row["winrate"] >= 0.5 else PALETTE["loss"]
-        else:
-            partners = duos[(duos["a"] == player) | (duos["b"] == player)].copy()
+        elif focal_person is not None:
+            partners = duos[(duos["a"] == focal_person) | (duos["b"] == focal_person)].copy()
             if not partners.empty:
                 partners["partner"] = partners.apply(
-                    lambda r: r["b"] if r["a"] == player else r["a"], axis=1
+                    lambda r: r["b"] if r["a"] == focal_person else r["a"], axis=1
                 )
                 row = partners.sort_values("winrate", ascending=False).iloc[0]
                 duo_value = str(row["partner"])
@@ -3282,11 +5027,11 @@ def plot_stats_summary(df: pd.DataFrame, player: str | None = None) -> plt.Figur
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
 
-    title_who = player or "all players"
+    title_who = _display_label(player) or "all players"
     fig.suptitle(f"Stats summary — {title_who}", fontsize=18, fontweight="bold", y=0.965)
 
-    n_people = df["person"].nunique() if player is None else 1
-    if player is None:
+    n_people = df["person"].nunique() if _is_aggregate(player) else 1
+    if _is_aggregate(player):
         sub_text = (
             f"{games:,} games across {n_people} tracked people. "
             "Each card shows the aggregate headline; values are macro-averaged where applicable."
@@ -3466,6 +5211,147 @@ def plot_stats_summary(df: pd.DataFrame, player: str | None = None) -> plt.Figur
     return fig
 
 
+TIER_ORDER = [
+    "IRON",
+    "BRONZE",
+    "SILVER",
+    "GOLD",
+    "PLATINUM",
+    "EMERALD",
+    "DIAMOND",
+    "MASTER",
+    "GRANDMASTER",
+    "CHALLENGER",
+]
+
+
+def plot_tier_winrate(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Per-tier WR — does the player's edge survive when the competition gets harder?
+
+    Joins match_stats outcomes with league_history's tier at game-start.
+    Aggregate view: macro-averages per-person WR per tier across players
+    who have ≥20 games in that tier. Single-person view: their tier WR
+    with Wilson 95% CIs. Empty tiers (never reached) are skipped.
+    """
+    try:
+        ranks = load_rank_history(DEFAULT_DB)
+    except Exception as exc:
+        return _empty_figure(f"Could not load rank history: {exc!r}")
+    if ranks.empty:
+        return _empty_figure("No rank history available")
+
+    d = _filter_player(df, player)
+    if d.empty:
+        return _empty_figure("No matches for the selection")
+
+    stamped = compute_tier_at_match(d, ranks)
+    stamped = stamped[stamped["tier"].isin(TIER_ORDER)]
+    if stamped.empty:
+        return _empty_figure("No matches overlap rank history")
+
+    min_per_tier = 20
+    if _is_aggregate(player):
+        # Per-person WR per tier, then macro-mean across people with
+        # ≥20 games at that tier. Macro keeps a heavy Emerald grinder
+        # from drowning out the rest of the cohort's Emerald signal.
+        per_person = (
+            stamped.groupby(["tier", "person"])
+            .agg(games=("win", "size"), wins=("win", "sum"))
+            .reset_index()
+        )
+        per_person = per_person[per_person["games"] >= min_per_tier]
+        if per_person.empty:
+            return _empty_figure(f"No tier has ≥{min_per_tier} games for any player")
+        per_person["wr"] = per_person["wins"] / per_person["games"]
+        agg = (
+            per_person.groupby("tier")
+            .agg(
+                winrate=("wr", "mean"),
+                std=("wr", "std"),
+                n_people=("person", "nunique"),
+                games=("games", "sum"),
+            )
+            .reset_index()
+        )
+        agg["ci_lo"] = (agg["winrate"] - agg["std"].fillna(0)).clip(lower=0)
+        agg["ci_hi"] = (agg["winrate"] + agg["std"].fillna(0)).clip(upper=1)
+        subtitle_extra = (
+            f"Macro-mean across {agg['n_people'].max()} players "
+            f"(each weighted equally; ≥{min_per_tier} games per tier per player)."
+        )
+    else:
+        # Single player — Wilson CI on pooled tier wr.
+        agg = stamped.groupby("tier").agg(games=("win", "size"), wins=("win", "sum")).reset_index()
+        agg = agg[agg["games"] >= min_per_tier]
+        if agg.empty:
+            return _empty_figure(f"No tier with ≥{min_per_tier} games for this player")
+        agg["winrate"] = agg["wins"] / agg["games"]
+        cis = [wilson_ci(int(w), int(n)) for w, n in zip(agg["wins"], agg["games"], strict=False)]
+        agg["ci_lo"] = [c[0] for c in cis]
+        agg["ci_hi"] = [c[1] for c in cis]
+        agg["n_people"] = 1
+        subtitle_extra = "Whiskers = Wilson 95% CI."
+
+    # Order tiers top→bottom (Challenger at top). Reverse TIER_ORDER so
+    # the highest tier sits at the top row when matplotlib draws ascending y.
+    rank_pos = {t: i for i, t in enumerate(TIER_ORDER)}
+    agg["order"] = agg["tier"].map(rank_pos)
+    agg = agg.sort_values("order").reset_index(drop=True)
+
+    n_tiers = len(agg)
+    fig_h = max(3.5, n_tiers * 0.55 + 1.2)
+    fig, ax = plt.subplots(figsize=(11, fig_h))
+
+    y = np.arange(n_tiers)
+    means = agg["winrate"].to_numpy()
+    lo = agg["ci_lo"].to_numpy()
+    hi = agg["ci_hi"].to_numpy()
+    counts = agg["games"].to_numpy()
+
+    # Sample-weighted alpha so a tier built on 30 games visually recedes
+    # behind a tier built on 800. sqrt softens the contrast so the small
+    # bars stay readable.
+    max_n = max(counts.max(), 1)
+    alphas = np.clip(0.35 + 0.65 * np.sqrt(counts / max_n), 0.35, 1.0)
+    colours = [(*plt.matplotlib.colors.to_rgb(PALETTE["primary"]), a) for a in alphas]
+
+    ax.barh(y, means, color=colours, height=0.7)
+    ax.errorbar(
+        means,
+        y,
+        xerr=[means - lo, hi - means],
+        **WHISKER_STYLE,
+    )
+    ax.axvline(0.5, color=PALETTE["muted"], linewidth=0.8, linestyle=(0, (4, 4)), alpha=0.55)
+    ax.set_yticks(y)
+    ax.set_yticklabels([t.title() for t in agg["tier"]], color=PALETTE["text"])
+    ax.invert_yaxis()  # Challenger on top, Iron on bottom
+    ax.set_xlim(0, 1)
+    ax.set_xlabel("Win rate")
+    ax.set_title(_title("Win rate by rank at match time", player))
+    _subtitle(
+        ax,
+        "Higher tier = harder competition. Drops typically signal you're near your "
+        f"skill ceiling. {subtitle_extra}",
+    )
+    for yi, (wr, hi_i, n) in enumerate(zip(means, hi, counts, strict=False)):
+        # Anchor past the whisker tip so the percentage/n label doesn't
+        # collide with the error-bar line at high-CI tiers.
+        anchor_x = min(max(float(wr) + 0.02, float(hi_i) + 0.01), 0.97)
+        ax.annotate(
+            f"{wr:.0%}  ·  n={int(n)}",
+            xy=(anchor_x, yi),
+            xytext=(6, 0),
+            textcoords="offset points",
+            va="center",
+            fontsize=9,
+            color=PALETTE["text"],
+        )
+    _polish_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
 def summary_table(df: pd.DataFrame) -> pd.DataFrame:
     """Compact per-person summary: games, win rate, mean KDA, mean duration,
     favourite champion."""
@@ -3484,6 +5370,7788 @@ def summary_table(df: pd.DataFrame) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows).sort_values("games", ascending=False).reset_index(drop=True)
+
+
+def plot_match_highlights(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Six record-holding individual matches as a card grid.
+
+    Per-player view: the player's own highlights (best KDA win, most
+    kills, worst loss, longest match, shortest win, most recent ranked).
+    Aggregate view: the same six categories taken across every tracked
+    person, with the owning player named in each sublabel.
+
+    The grid layout mirrors ``plot_stats_summary`` and ``plot_actions_card``
+    (3x2 cards) so the dashboard tile style stays consistent.
+    """
+    d = _filter_player(df, player)
+    if d.empty:
+        return _empty_figure("No games yet.")
+
+    is_agg = _is_aggregate(player)
+
+    def _fmt_date(ts) -> str:
+        return pd.Timestamp(ts).strftime("%Y-%m-%d")
+
+    def _fmt_duration(secs) -> str:
+        mins, rem = divmod(int(secs), 60)
+        return f"{mins}:{rem:02d}"
+
+    def _outcome(win) -> str:
+        return "W" if int(win) == 1 else "L"
+
+    def _owner(row) -> str:
+        # Aggregate sublabels name the owning person so ownership is
+        # obvious without reading the chart title.
+        return f"  ·  {row['person']}" if is_agg else ""
+
+    wins = d[d["win"] == 1]
+    losses = d[d["win"] == 0]
+
+    # --- Tile 1: best KDA win ------------------------------------------------
+    if not wins.empty:
+        row = wins.loc[wins["kda"].idxmax()]
+        kda1_value = f"KDA {row['kills']}/{row['deaths']}/{row['assists']}"
+        kda1_sub = f"{row['champion']}  ·  {_fmt_date(row['game_start'])}{_owner(row)}"
+        kda1_accent = PALETTE["win"]
+        kda1_color = PALETTE["win"]
+    else:
+        kda1_value = "—"
+        kda1_sub = "no wins yet"
+        kda1_accent = PALETTE["neutral"]
+        kda1_color = PALETTE["muted"]
+
+    # --- Tile 2: most kills --------------------------------------------------
+    row = d.loc[d["kills"].idxmax()]
+    kills_value = f"{int(row['kills'])} kills"
+    kills_sub = (
+        f"{row['champion']}  ·  {_fmt_date(row['game_start'])}  ·  "
+        f"{_outcome(row['win'])}{_owner(row)}"
+    )
+    kills_accent = PALETTE["primary"]
+    kills_color = PALETTE["primary"]
+
+    # --- Tile 3: worst game (most deaths in a loss) --------------------------
+    if not losses.empty:
+        row = losses.loc[losses["deaths"].idxmax()]
+        worst_value = f"{int(row['deaths'])} deaths"
+        worst_sub = f"{row['champion']}  ·  {_fmt_date(row['game_start'])}{_owner(row)}"
+        worst_accent = PALETTE["loss"]
+        worst_color = PALETTE["loss"]
+    else:
+        worst_value = "—"
+        worst_sub = "no losses yet"
+        worst_accent = PALETTE["neutral"]
+        worst_color = PALETTE["muted"]
+
+    # --- Tile 4: longest match -----------------------------------------------
+    row = d.loc[d["duration_sec"].idxmax()]
+    long_value = _fmt_duration(row["duration_sec"])
+    long_sub = (
+        f"{row['champion']}  ·  {_fmt_date(row['game_start'])}  ·  "
+        f"{_outcome(row['win'])}{_owner(row)}"
+    )
+    long_accent = PALETTE["accent_teal"]
+    long_color = PALETTE["accent_teal"]
+
+    # --- Tile 5: shortest WIN ------------------------------------------------
+    if not wins.empty:
+        row = wins.loc[wins["duration_sec"].idxmin()]
+        short_value = _fmt_duration(row["duration_sec"])
+        short_sub = f"{row['champion']}  ·  {_fmt_date(row['game_start'])}{_owner(row)}"
+        short_accent = PALETTE["accent_orange"]
+        short_color = PALETTE["accent_orange"]
+    else:
+        short_value = "—"
+        short_sub = "no wins yet"
+        short_accent = PALETTE["neutral"]
+        short_color = PALETTE["muted"]
+
+    # --- Tile 6: most recent ranked -----------------------------------------
+    # match_stats is ranked-only by design, so the newest row is the
+    # latest ranked match without further filtering.
+    row = d.loc[d["game_start"].idxmax()]
+    recent_value = str(row["champion"])
+    recent_sub = (
+        f"KDA {row['kills']}/{row['deaths']}/{row['assists']}  ·  "
+        f"{_fmt_date(row['game_start'])}  ·  {_outcome(row['win'])}{_owner(row)}"
+    )
+    recent_accent = PALETTE["neutral"]
+    recent_color = PALETTE["text"]
+
+    # --- Render --------------------------------------------------------------
+    fig = plt.figure(figsize=(13, 6.6))
+    ax = fig.add_subplot(111)
+    ax.set_axis_off()
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+
+    title_who = _display_label(player) or "all players"
+    fig.suptitle(f"Match highlights — {title_who}", fontsize=18, fontweight="bold", y=0.965)
+    if is_agg:
+        n_people = df["person"].nunique()
+        sub_text = (
+            f"Record-holding matches across {n_people} tracked people. "
+            "Each card names the owning player."
+        )
+    else:
+        sub_text = "Record-holding individual matches for this player."
+    fig.text(
+        0.5,
+        0.905,
+        sub_text,
+        ha="center",
+        fontsize=10,
+        color=PALETTE["muted"],
+        style="italic",
+    )
+
+    margin_x, margin_y = 0.035, 0.04
+    gap_x, gap_y = 0.022, 0.035
+    n_cols, n_rows = 3, 2
+    grid_top = 0.86
+    grid_bottom = margin_y
+    card_w = (1 - 2 * margin_x - (n_cols - 1) * gap_x) / n_cols
+    card_h = (grid_top - grid_bottom - (n_rows - 1) * gap_y) / n_rows
+
+    def cell(col: int, row_i: int) -> tuple[float, float]:
+        x = margin_x + col * (card_w + gap_x)
+        y = grid_top - card_h - row_i * (card_h + gap_y)
+        return x, y
+
+    def tile(col, row_i, label_text, value, sublabel, accent, value_color):
+        x, y = cell(col, row_i)
+        _draw_card(ax, x, y, card_w, card_h, accent=accent)
+        _card_text(
+            ax,
+            x,
+            y,
+            card_w,
+            card_h,
+            label=label_text,
+            value=value,
+            sublabel=sublabel,
+            value_color=value_color,
+        )
+
+    tile(0, 0, "Best KDA win", kda1_value, kda1_sub, kda1_accent, kda1_color)
+    tile(1, 0, "Most kills", kills_value, kills_sub, kills_accent, kills_color)
+    tile(2, 0, "Worst game", worst_value, worst_sub, worst_accent, worst_color)
+    tile(0, 1, "Longest match", long_value, long_sub, long_accent, long_color)
+    tile(1, 1, "Shortest win", short_value, short_sub, short_accent, short_color)
+    tile(
+        2,
+        1,
+        "Most recent ranked",
+        recent_value,
+        recent_sub,
+        recent_accent,
+        recent_color,
+    )
+
+    return fig
+
+
+# --- 27. Recent sessions ----------------------------------------------------
+
+
+def plot_recent_sessions(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Per-person report card: newest 10 sessions in a list view.
+
+    Each row is one session — date, games played, win-rate, top champion
+    of the session, and the chronological W/L sequence drawn as small
+    colored squares. Aggregate ("all players") view is skipped because a
+    cross-person session list doesn't tell a coherent story.
+    """
+    from matplotlib.patches import Rectangle
+
+    if _is_aggregate(player):
+        return _empty_figure("Pick a player from the dropdown — sessions are per-person.")
+
+    d = _filter_player(df, player)
+    if d.empty or "session_id" not in d.columns:
+        return _empty_figure("No games yet.")
+
+    sessions = (
+        d.groupby("session_id")
+        .agg(
+            start_time=("game_start", "min"),
+            end_time=("game_start", "max"),
+            games=("win", "size"),
+            wins=("win", "sum"),
+            top_champ=("champion", lambda s: s.mode().iloc[0]),
+            top_champ_n=("champion", lambda s: s.value_counts().iloc[0]),
+        )
+        .reset_index()
+    )
+    sessions["wr"] = sessions["wins"] / sessions["games"]
+    total_sessions = len(sessions)
+    sessions = sessions.sort_values("start_time", ascending=False).head(10)
+
+    # Chronological W/L tape per session for the squares column.
+    sequences = {
+        sid: d[d["session_id"] == sid].sort_values("game_start")["win"].astype(int).tolist()
+        for sid in sessions["session_id"]
+    }
+
+    n = len(sessions)
+    fig, ax = plt.subplots(figsize=(13, max(4.5, 0.55 * n + 1.5)))
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, n)
+    ax.set_axis_off()
+
+    col_date = 0.03
+    col_games = 0.22
+    col_wr = 0.32
+    col_champ = 0.52
+    col_seq = 0.72
+
+    for i, (_, sess) in enumerate(sessions.iterrows()):
+        y = n - 1 - i + 0.5
+        ax.text(
+            col_date,
+            y,
+            pd.Timestamp(sess["start_time"]).strftime("%a %d %b, %H:%M"),
+            ha="left",
+            va="center",
+            fontsize=10,
+            color=PALETTE["text"],
+        )
+        n_games_sess = int(sess["games"])
+        ax.text(
+            col_games,
+            y,
+            f"{n_games_sess} game" + ("s" if n_games_sess != 1 else ""),
+            ha="left",
+            va="center",
+            fontsize=10,
+            color=PALETTE["muted"],
+        )
+        if sess["wr"] > 0.5:
+            wr_color = PALETTE["win"]
+        elif sess["wr"] < 0.5:
+            wr_color = PALETTE["loss"]
+        else:
+            wr_color = PALETTE["text"]
+        ax.text(
+            col_wr,
+            y,
+            f"{sess['wr']:.0%} WR",
+            ha="left",
+            va="center",
+            fontsize=11,
+            fontweight="bold",
+            color=wr_color,
+        )
+        ax.text(
+            col_champ,
+            y,
+            f"{sess['top_champ']} x{int(sess['top_champ_n'])}",
+            ha="left",
+            va="center",
+            fontsize=10,
+            color=PALETTE["text"],
+        )
+        seq = sequences[sess["session_id"]]
+        sq_w = min(0.022, (1 - col_seq - 0.02) / max(1, len(seq)))
+        for j, won in enumerate(seq):
+            rect = Rectangle(
+                (col_seq + j * sq_w * 1.15, y - 0.15),
+                sq_w,
+                0.3,
+                facecolor=PALETTE["win"] if won == 1 else PALETTE["loss"],
+                edgecolor="white",
+                linewidth=0.4,
+            )
+            ax.add_patch(rect)
+        if i < n - 1:
+            ax.axhline(y - 0.5, color=PALETTE["spine"], linewidth=0.6, alpha=0.6)
+
+    fig.suptitle(
+        _title("Recent sessions", player),
+        fontsize=16,
+        fontweight="bold",
+        y=0.98,
+    )
+    fig.text(
+        0.5,
+        0.935,
+        f"Newest {n} sessions of {total_sessions} total.",
+        ha="center",
+        va="top",
+        fontsize=10,
+        color=PALETTE["muted"],
+        style="italic",
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.90))
+    return fig
+
+
+# --- 28. Playstyle clusters (k-means + PCA) ---------------------------------
+
+
+def kmeans_simple(
+    X: np.ndarray,
+    k: int = 3,
+    n_init: int = 10,
+    max_iter: int = 100,
+    seed: int = 0,
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """Numpy k-means with k-means++ init and multiple restarts.
+
+    Returns (labels, centroids, inertia). Inertia is the sum of squared
+    distances of each point to its assigned centroid.
+    """
+    rng = np.random.default_rng(seed)
+    n = X.shape[0]
+    best_inertia = np.inf
+    best_labels: np.ndarray | None = None
+    best_centroids: np.ndarray | None = None
+    for _trial in range(n_init):
+        # k-means++ init
+        centroids = X[rng.integers(n)].reshape(1, -1)
+        for _ in range(k - 1):
+            dist = np.min(((X[:, None] - centroids[None]) ** 2).sum(-1), axis=1)
+            total = dist.sum()
+            if total <= 0:
+                next_idx = int(rng.integers(n))
+            else:
+                probs = dist / total
+                next_idx = int(rng.choice(n, p=probs))
+            centroids = np.vstack([centroids, X[next_idx]])
+        # Lloyd iterations
+        labels = np.zeros(n, dtype=int)
+        for _ in range(max_iter):
+            dist = ((X[:, None] - centroids[None]) ** 2).sum(-1)
+            labels = dist.argmin(axis=1)
+            new_centroids = np.array(
+                [X[labels == j].mean(0) if (labels == j).any() else centroids[j] for j in range(k)]
+            )
+            if np.allclose(new_centroids, centroids):
+                centroids = new_centroids
+                break
+            centroids = new_centroids
+        inertia = float(((X - centroids[labels]) ** 2).sum())
+        if inertia < best_inertia:
+            best_inertia = inertia
+            best_labels = labels
+            best_centroids = centroids
+    assert best_labels is not None and best_centroids is not None
+    return best_labels, best_centroids, best_inertia
+
+
+def pca_2d(X: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Project X (n, d) to (n, 2) via top-2 principal components.
+
+    Returns (projected, components, variance_ratio).
+    """
+    X_centered = X - X.mean(0)
+    cov = np.cov(X_centered.T)
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    # eigh returns ascending; take top 2 in descending order
+    top2 = eigvecs[:, -2:][:, ::-1]
+    total = float(eigvals.sum())
+    var_ratio = (eigvals[-2:][::-1] / total) if total > 0 else np.array([0.0, 0.0])
+    return X_centered @ top2, top2, var_ratio
+
+
+def _shannon_entropy(counts: pd.Series) -> float:
+    """Shannon entropy of a count distribution (in bits)."""
+    total = counts.sum()
+    if total <= 0:
+        return 0.0
+    p = counts.values / total
+    p = p[p > 0]
+    return float(-(p * np.log2(p)).sum())
+
+
+def _loss_streak_propensity(wins: pd.Series) -> float:
+    """Fraction of a player's games that fall inside a loss-run of length >= 3.
+
+    Labels each maximal run of consecutive losses with its length, then
+    asks what share of all games belong to a run with length >= 3.
+    """
+    arr = wins.astype(int).values
+    n = len(arr)
+    if n == 0:
+        return 0.0
+    run_len = np.zeros(n, dtype=int)
+    current = 0
+    starts: list[int] = []
+    for i, w in enumerate(arr):
+        if w == 0:
+            if current == 0:
+                starts.append(i)
+            current += 1
+            run_len[i] = current
+        else:
+            current = 0
+    # Backfill so every game in the run carries the full run length
+    in_run = np.zeros(n, dtype=bool)
+    for s in starts:
+        e = s
+        while e < n and arr[e] == 0:
+            e += 1
+        if (e - s) >= 3:
+            in_run[s:e] = True
+    return float(in_run.mean())
+
+
+def plot_playstyle_clusters(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """K-means playstyle archetypes over the friend group.
+
+    Builds a per-player feature vector (KDA, deaths, duration, champ
+    diversity, time-of-day, session shape, loss-streak propensity),
+    z-scores it, runs numpy k-means (k=3, k-means++ init, multi-restart),
+    then projects players into a 2D PCA scatter coloured by cluster. The
+    aim is to surface natural archetypes ("late-night spam grinders"
+    vs "early-evening one-trick steady players") that none of the
+    per-player charts can show.
+    """
+    if not _is_aggregate(player):
+        return _empty_figure(
+            "Clustering is a group-level chart - pick 'All players' from the dropdown."
+        )
+
+    if df.empty:
+        return _empty_figure("No games to cluster.")
+
+    feature_names = [
+        "avg_kda",
+        "avg_kills",
+        "avg_deaths",
+        "avg_duration_min",
+        "champ_diversity",
+        "top_champ_concentration",
+        "prime_time_share",
+        "weekend_share",
+        "avg_session_length",
+        "loss_streak_propensity",
+    ]
+
+    rows: list[dict] = []
+    for person, g in df.groupby("person"):
+        if len(g) < 100:
+            continue
+        champ_counts = g["champion"].value_counts()
+        top_champ_n = int(champ_counts.iloc[0]) if not champ_counts.empty else 0
+        if "session_id" in g.columns:
+            sess_sizes = g.groupby("session_id").size()
+            avg_session = float(sess_sizes.mean())
+        else:
+            avg_session = float("nan")
+        rows.append(
+            {
+                "person": person,
+                "avg_kda": float(g["kda"].mean()),
+                "avg_kills": float(g["kills"].mean()),
+                "avg_deaths": float(g["deaths"].mean()),
+                "avg_duration_min": float(g["duration_min"].mean()),
+                "champ_diversity": _shannon_entropy(champ_counts),
+                "top_champ_concentration": top_champ_n / len(g),
+                "prime_time_share": float(g["hour"].between(19, 23).mean()),
+                "weekend_share": float(g["dow"].isin([5, 6]).mean()),
+                "avg_session_length": avg_session,
+                "loss_streak_propensity": _loss_streak_propensity(
+                    g.sort_values("game_start")["win"]
+                ),
+            }
+        )
+
+    if len(rows) < 3:
+        return _empty_figure("Need at least 3 players with 100+ games to cluster.")
+
+    feat_df = pd.DataFrame(rows).set_index("person")
+    feat_df = feat_df.dropna()
+    if len(feat_df) < 3:
+        return _empty_figure("Need at least 3 players with 100+ games to cluster.")
+
+    raw = feat_df[feature_names].values.astype(float)
+    mean = raw.mean(0)
+    std = raw.std(0)
+    safe_std = np.where(std == 0, 1.0, std)
+    X_z = (raw - mean) / safe_std
+
+    k = min(3, len(feat_df))
+    labels, centroids, _inertia = kmeans_simple(X_z, k=k, n_init=20, seed=0)
+
+    pca_pts, _components, var_ratio = pca_2d(X_z)
+    centroid_pca = (centroids - X_z.mean(0)) @ _components
+
+    cluster_colors = [
+        PALETTE["primary"],
+        PALETTE["accent_orange"],
+        PALETTE["accent_teal"],
+        PALETTE["accent_purple"],
+    ]
+
+    fig, ax = plt.subplots(figsize=(12, 7.5))
+
+    # Per-cluster distinguishing features (top-2 by |mean z-score|).
+    feature_labels = {
+        "avg_kda": "KDA",
+        "avg_kills": "kills",
+        "avg_deaths": "deaths",
+        "avg_duration_min": "game length",
+        "champ_diversity": "champ variety",
+        "top_champ_concentration": "main-champ focus",
+        "prime_time_share": "prime-time play",
+        "weekend_share": "weekend play",
+        "avg_session_length": "session length",
+        "loss_streak_propensity": "loss-streak streakiness",
+    }
+    cluster_descriptions: list[str] = []
+    for c in range(k):
+        mask = labels == c
+        members = feat_df.index[mask].tolist()
+        if not members:
+            cluster_descriptions.append(f"Cluster {chr(65 + c)} (empty)")
+            continue
+        cluster_z = X_z[mask].mean(0)
+        # Two largest absolute deviations from group mean (z-score is
+        # already a deviation from the overall mean, which is 0).
+        top_idx = np.argsort(np.abs(cluster_z))[::-1][:2]
+        descriptors = []
+        for idx in top_idx:
+            direction = "high" if cluster_z[idx] >= 0 else "low"
+            descriptors.append(f"{direction} {feature_labels[feature_names[idx]]}")
+        cluster_descriptions.append(
+            f"Cluster {chr(65 + c)} (n={len(members)}): " + ", ".join(descriptors)
+        )
+
+    # Scatter points coloured by cluster
+    for c in range(k):
+        mask = labels == c
+        if not mask.any():
+            continue
+        ax.scatter(
+            pca_pts[mask, 0],
+            pca_pts[mask, 1],
+            s=180,
+            color=cluster_colors[c % len(cluster_colors)],
+            edgecolor="white",
+            linewidth=1.2,
+            alpha=0.9,
+            label=f"Cluster {chr(65 + c)}",
+            zorder=3,
+        )
+
+    # Labels next to each point
+    for i, name in enumerate(feat_df.index):
+        ax.annotate(
+            str(name),
+            (pca_pts[i, 0], pca_pts[i, 1]),
+            xytext=(7, 4),
+            textcoords="offset points",
+            fontsize=10,
+            color=PALETTE["text"],
+            zorder=4,
+        )
+
+    # Centroid X markers
+    for c in range(k):
+        ax.scatter(
+            centroid_pca[c, 0],
+            centroid_pca[c, 1],
+            marker="x",
+            s=220,
+            color=cluster_colors[c % len(cluster_colors)],
+            linewidth=3,
+            zorder=5,
+        )
+        ax.annotate(
+            f"Cluster {chr(65 + c)}",
+            (centroid_pca[c, 0], centroid_pca[c, 1]),
+            xytext=(10, -14),
+            textcoords="offset points",
+            fontsize=10,
+            fontweight="bold",
+            color=cluster_colors[c % len(cluster_colors)],
+            zorder=6,
+            bbox={
+                "facecolor": "white",
+                "alpha": 0.85,
+                "edgecolor": "none",
+                "pad": 1.5,
+            },
+        )
+
+    ax.axhline(0, color=PALETTE["grid"], linewidth=0.8, zorder=1)
+    ax.axvline(0, color=PALETTE["grid"], linewidth=0.8, zorder=1)
+    ax.set_xlabel(f"PC1 ({var_ratio[0] * 100:.0f}% var)")
+    ax.set_ylabel(f"PC2 ({var_ratio[1] * 100:.0f}% var)")
+    ax.legend(loc="best")
+    _polish_ax(ax)
+
+    var_total = float((var_ratio[0] + var_ratio[1]) * 100)
+    subtitle = f"PC1 + PC2 = {var_total:.0f}% of variance  |  " + "  |  ".join(cluster_descriptions)
+    fig.suptitle(
+        f"Playstyle clusters ({len(feat_df)} players, k={k})",
+        fontsize=16,
+        fontweight="bold",
+        y=0.98,
+    )
+    fig.text(
+        0.5,
+        0.93,
+        subtitle,
+        ha="center",
+        fontsize=9,
+        color=PALETTE["muted"],
+        style="italic",
+        wrap=True,
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.91))
+    return fig
+
+
+def plot_champion_freshness(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Per-champion "how long since I last played this?" for a focal player.
+
+    Champion mastery decays. The bot is full of players who insist they
+    "still know" a pick they haven't touched in 4 months — this chart
+    surfaces that gap explicitly. Bars are coloured by warmth bucket so
+    a glance reads "what's warm, what's medium, what's rusty".
+
+    ``today`` is anchored on the latest game in the dataframe (not
+    wall-clock), so reruns against a frozen snapshot produce identical
+    output regardless of when the chart is rendered.
+    """
+    if _is_aggregate(player):
+        return _empty_figure("Champion freshness is per-person. Pick a player from the dropdown.")
+
+    d = _filter_player(df, player)
+    if d.empty:
+        return _empty_figure("No games to analyse")
+
+    today = df["game_start"].max()
+    champ_stats = d.groupby("champion").agg(
+        games_total=("win", "size"),
+        last_played=("game_start", "max"),
+    )
+    champ_stats = champ_stats[champ_stats["games_total"] >= 5]
+    if champ_stats.empty:
+        return _empty_figure("No champions with >=5 games")
+
+    champ_stats["days_since"] = (today - champ_stats["last_played"]).dt.days.astype(int)
+
+    # Keep the 20 most-played, then sort so freshest is at the top of the
+    # horizontal chart (small days_since at top → ascending sort + invert_yaxis).
+    champ_stats = champ_stats.sort_values("games_total", ascending=False).head(20)
+    champ_stats = champ_stats.sort_values("days_since", ascending=True)
+
+    def warmth_colour(days: int) -> str:
+        if days <= 30:
+            return PALETTE["win"]
+        if days <= 90:
+            return PALETTE["accent_orange"]
+        return PALETTE["loss"]
+
+    colours = [warmth_colour(int(d)) for d in champ_stats["days_since"]]
+
+    fig_h = max(4.6, len(champ_stats) * 0.42)
+    fig, ax = plt.subplots(figsize=(13, fig_h))
+    y = np.arange(len(champ_stats))
+    ax.barh(y, champ_stats["days_since"], color=colours, height=0.7)
+    ax.set_yticks(y)
+    ax.set_yticklabels(champ_stats.index)
+    ax.invert_yaxis()
+    ax.set_xlabel(f"Days since last played (snapshot: {today.date().isoformat()})")
+    ax.set_title(_title("Champion freshness — days since last played", player))
+    _subtitle(
+        ax,
+        "Green = played in last 30 days (warm). "
+        "Orange = 30-90 days. Red = >90 days (rusty). "
+        "Top 20 most-played champions (min 5 games).",
+    )
+    _polish_ax(ax)
+
+    max_days = float(champ_stats["days_since"].max())
+    # Pad right so the n=NN tail of the annotation doesn't run off the axes.
+    ax.set_xlim(0, max(30.0, max_days) * 1.25)
+
+    for yi, (_, r) in enumerate(champ_stats.iterrows()):
+        days = int(r["days_since"])
+        n = int(r["games_total"])
+        last = r["last_played"].date().isoformat()
+        label = f"{days}d ago  ·  n={n}  ·  last: {last}"
+        ax.annotate(
+            label,
+            xy=(r["days_since"], yi),
+            xytext=(6, 0),
+            textcoords="offset points",
+            va="center",
+            ha="left",
+            fontsize=9,
+            color=PALETTE["text"],
+        )
+
+    fig.tight_layout()
+    return fig
+
+
+def plot_role_winrate(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Win rate split by inferred champion role.
+
+    Role is a heuristic from CHAMPION_ROLES — champions that flex get
+    their more common role. Rows with an unmapped champion (role
+    "UNKNOWN") are skipped.
+
+    Per-person: bars are coloured against the player's overall baseline
+    so a glance reads "which roles am I outperforming my own average on?".
+    Aggregate: macro-mean across players with >=30 games in that role.
+    """
+    d = df[df["role"].isin(ROLE_ORDER)]
+    if d.empty:
+        return _empty_figure("No matches with a mapped role")
+
+    if _is_aggregate(player):
+        per_person = (
+            d.groupby(["role", "person"])
+            .agg(games=("win", "size"), wins=("win", "sum"))
+            .reset_index()
+        )
+        # Macro across people with a credible sample at that role — a
+        # single 60% Zac main shouldn't swing the cohort JUNGLE WR.
+        per_person = per_person[per_person["games"] >= 30]
+        if per_person.empty:
+            return _empty_figure("No role has >=30 games for any player")
+        per_person["wr"] = per_person["wins"] / per_person["games"]
+        agg = (
+            per_person.groupby("role")
+            .agg(
+                winrate=("wr", "mean"),
+                std=("wr", "std"),
+                n_people=("person", "nunique"),
+                games=("games", "sum"),
+            )
+            .reset_index()
+        )
+        agg["ci_lo"] = (agg["winrate"] - agg["std"].fillna(0)).clip(lower=0)
+        agg["ci_hi"] = (agg["winrate"] + agg["std"].fillna(0)).clip(upper=1)
+        # Cohort baseline = macro-mean of per-person overall WR (people
+        # with >=30 mapped games), matching the per-role aggregation rule.
+        per_person_overall = (
+            d.groupby("person").agg(games=("win", "size"), wins=("win", "sum")).query("games >= 30")
+        )
+        baseline = (
+            (per_person_overall["wins"] / per_person_overall["games"]).mean()
+            if not per_person_overall.empty
+            else 0.5
+        )
+        subtitle = (
+            "Macro-mean per-role WR across players with >=30 games at that role. "
+            "Compare to the cohort baseline (dashed)."
+        )
+    else:
+        d_p = _filter_player(d, player)
+        if d_p.empty:
+            return _empty_figure("No matches for the selection")
+        agg = d_p.groupby("role").agg(games=("win", "size"), wins=("win", "sum")).reset_index()
+        agg = agg[agg["games"] >= 10]
+        if agg.empty:
+            return _empty_figure("No role with >=10 games for this player")
+        agg["winrate"] = agg["wins"] / agg["games"]
+        cis = [wilson_ci(int(w), int(n)) for w, n in zip(agg["wins"], agg["games"], strict=False)]
+        agg["ci_lo"] = [c[0] for c in cis]
+        agg["ci_hi"] = [c[1] for c in cis]
+        baseline = float(d_p["win"].mean())
+        subtitle = "Per-role WR with Wilson 95% CI. Compare to your overall baseline (dashed)."
+
+    role_pos = {r: i for i, r in enumerate(ROLE_ORDER)}
+    agg["order"] = agg["role"].map(role_pos)
+    agg = agg.sort_values("order").reset_index(drop=True)
+
+    means = agg["winrate"].to_numpy()
+    lo = agg["ci_lo"].to_numpy()
+    hi = agg["ci_hi"].to_numpy()
+    counts = agg["games"].to_numpy()
+
+    # Colour each bar against the focal baseline so the chart answers
+    # "where am I above/below my own average?" at a glance. 5pp deadband
+    # keeps tiny noise-level deltas neutral.
+    def role_colour(wr: float) -> str:
+        if wr > baseline + 0.05:
+            return PALETTE["win"]
+        if wr < baseline - 0.05:
+            return PALETTE["loss"]
+        return PALETTE["neutral"]
+
+    colours = [role_colour(float(wr)) for wr in means]
+
+    fig, ax = plt.subplots(figsize=(11, 5.2))
+    x = np.arange(len(agg))
+    ax.bar(x, means, color=colours, width=0.65, edgecolor="white", linewidth=0.6)
+    ax.errorbar(x, means, yerr=[means - lo, hi - means], **WHISKER_STYLE)
+
+    ax.axhline(
+        baseline,
+        color=PALETTE["muted"],
+        linewidth=1.0,
+        linestyle=(0, (4, 4)),
+        alpha=0.7,
+        label=f"baseline {baseline:.0%}",
+    )
+    ax.set_xticks(x)
+    ax.set_xticklabels(agg["role"].tolist())
+    ax.set_ylim(0, 1)
+    ax.set_ylabel("Win rate")
+    ax.set_title(_title("Win rate by role", player))
+    _subtitle(ax, subtitle)
+    ax.legend(loc="upper right")
+
+    for xi, (wr, n, hi_i) in enumerate(zip(means, counts, hi, strict=False)):
+        # Anchor above the whisker top, and never within 1.5pp of the
+        # baseline dashed line — otherwise the annotation crashes into the
+        # baseline when bar height ≈ baseline.
+        anchor_y = max(float(hi_i), float(wr))
+        if abs(anchor_y - baseline) < 0.015:
+            anchor_y = baseline + 0.015
+        ax.annotate(
+            f"{wr:.0%}  ·  n={int(n)}",
+            xy=(xi, anchor_y),
+            xytext=(0, 8),
+            textcoords="offset points",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+            color=PALETTE["text"],
+        )
+
+    _polish_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
+def plot_player_role_matrix(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Player x role WR heatmap, coloured by each row's gap to that
+    player's own overall WR.
+
+    A flat heatmap of role WRs would be dominated by the fact that some
+    players are just better than others. Re-centring each row on the
+    player's personal baseline pulls out the role-specific story: who
+    over-performs on jungle relative to their own mean, who tanks on
+    support, etc.
+
+    Aggregate-only: per-person view returns an empty figure pointing the
+    reader back to the dropdown.
+    """
+    if not _is_aggregate(player):
+        return _empty_figure("Aggregate view only - pick 'All' from the dropdown")
+
+    mapped = df[df["role"].isin(ROLE_ORDER)]
+    if mapped.empty:
+        return _empty_figure("No matches with a mapped role")
+
+    # Per-player totals come from mapped games only — the same basis the
+    # cells and baselines use, so the n shown beside the row matches the
+    # n the baseline was computed from.
+    totals = mapped.groupby("person").agg(games=("win", "size"), wins=("win", "sum")).reset_index()
+    totals = totals[totals["games"] >= 100]
+    if totals.empty:
+        return _empty_figure("No player has >=100 mapped games")
+    totals["wr"] = totals["wins"] / totals["games"]
+    totals = totals.sort_values("games", ascending=False).head(10).reset_index(drop=True)
+    players = totals["person"].tolist()
+
+    cell = (
+        mapped[mapped["person"].isin(players)]
+        .groupby(["person", "role"])
+        .agg(games=("win", "size"), wins=("win", "sum"))
+        .reset_index()
+    )
+    cell["wr"] = cell["wins"] / cell["games"]
+
+    n_players = len(players)
+    n_roles = len(ROLE_ORDER)
+    wr_grid = np.full((n_players, n_roles), np.nan)
+    games_grid = np.zeros((n_players, n_roles), dtype=int)
+    delta_grid = np.full((n_players, n_roles), np.nan)
+
+    baseline_by_person = dict(zip(totals["person"], totals["wr"], strict=False))
+    for _, row in cell.iterrows():
+        pi = players.index(row["person"])
+        ri = ROLE_ORDER.index(row["role"])
+        games_grid[pi, ri] = int(row["games"])
+        if row["games"] >= 15:
+            wr_grid[pi, ri] = float(row["wr"])
+            delta_grid[pi, ri] = float(row["wr"]) - baseline_by_person[row["person"]]
+
+    # Colour scale: clip delta to +/-10pp, map to RdYlGn so the strongest
+    # over-/under-performers anchor the extremes. Anything inside the band
+    # interpolates linearly. set_bad paints low-n cells grey via NaN.
+    import matplotlib as mpl
+
+    cmap = mpl.colormaps.get_cmap("RdYlGn").copy()
+    cmap.set_bad(color="#dcdcdc")
+    norm = mpl.colors.Normalize(vmin=-0.10, vmax=0.10)
+    # delta_grid carries NaN where games < 15, so masking is automatic.
+    colour_data = np.clip(delta_grid, -0.10, 0.10)
+
+    fig, (ax, cax) = plt.subplots(
+        1, 2, figsize=(11.5, 0.55 * n_players + 2.5), gridspec_kw={"width_ratios": [22, 1]}
+    )
+    im = ax.imshow(colour_data, cmap=cmap, norm=norm, aspect="auto")
+
+    ax.set_xticks(np.arange(n_roles))
+    ax.set_xticklabels(ROLE_ORDER)
+    ax.set_yticks(np.arange(n_players))
+    # Bake the personal baseline into the y-tick label — keeps the layout
+    # simple (no extra axes to fight tight_layout) and puts the reference
+    # number physically next to the row it belongs to.
+    ax.set_yticklabels(
+        [
+            f"{_display_label(p) or p}\n{baseline_by_person[p]:.0%} (n={int(totals.loc[i, 'games'])})"
+            for i, p in enumerate(players)
+        ],
+        fontsize=9,
+    )
+
+    for pi in range(n_players):
+        for ri in range(n_roles):
+            n = games_grid[pi, ri]
+            if n < 15 or np.isnan(wr_grid[pi, ri]):
+                ax.text(
+                    ri,
+                    pi,
+                    "-",
+                    ha="center",
+                    va="center",
+                    fontsize=11,
+                    color=PALETTE["muted"],
+                )
+                continue
+            wr = wr_grid[pi, ri]
+            d = delta_grid[pi, ri]
+            # Near-baseline cells sit in the yellow zone of RdYlGn — dark
+            # text reads, white text disappears. Outside ~4pp the cmap
+            # darkens and white wins.
+            txt_colour = PALETTE["text"] if abs(d) < 0.04 else "white"
+            ax.text(
+                ri,
+                pi,
+                f"{wr:.0%}\nn={n}",
+                ha="center",
+                va="center",
+                fontsize=9,
+                color=txt_colour,
+            )
+
+    ax.set_xticks(np.arange(n_roles + 1) - 0.5, minor=True)
+    ax.set_yticks(np.arange(n_players + 1) - 0.5, minor=True)
+    ax.grid(which="minor", color="white", linewidth=2)
+    ax.tick_params(which="minor", length=0)
+    ax.tick_params(which="major", length=0)
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+
+    ax.set_title("Role winrate vs personal baseline")
+    _subtitle(
+        ax,
+        "Each cell coloured by gap to player's overall WR "
+        "(red below, green above, +/-10pp). Cells with <15 games shown grey.",
+    )
+
+    cbar = fig.colorbar(im, cax=cax)
+    cbar.set_label("Delta vs personal baseline (pp)")
+    cbar.set_ticks([-0.10, -0.05, 0.0, 0.05, 0.10])
+    cbar.ax.set_yticklabels(["-10", "-5", "0", "+5", "+10"])
+
+    fig.tight_layout()
+    return fig
+
+
+# --- 32. Tilt by gap since previous game ----------------------------------
+
+# Bin edges in minutes for the tilt-by-gap chart. Distinct from the
+# load_matches gap_bucket bins — this set zooms in on the short-gap region
+# (sub-5m rage-queue, 5-15m re-queue) where the tilt hypothesis lives, and
+# stretches out to a multi-day break so the "tilt is gone" baseline is
+# visible on the same axis.
+_TILT_GAP_BINS_MIN = [0.0, 5.0, 15.0, 30.0, 60.0, 180.0, 1440.0, np.inf]
+_TILT_GAP_LABELS = ["<5m", "5-15m", "15-30m", "30-60m", "1-3h", "3-24h", ">24h"]
+
+
+def plot_tilt_by_gap(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """WR by inter-game gap, split by whether the previous game was a win
+    or a loss. The "tilt" hypothesis predicts the after-loss line dips at
+    short gaps and converges to the after-win line as the gap grows.
+
+    Aggregate mode macro-averages per-person WRs (each person weighted
+    equally) and bootstraps a 95% CI across people. Per-person mode uses
+    a Wilson CI on the binomial outcome — bootstrap adds nothing for a
+    single proportion.
+    """
+    d_all = _filter_player(df, player)
+    if d_all.empty:
+        return _empty_figure("No games to plot")
+
+    # Sort by (person, game_start) so the shift below picks up the right
+    # previous game even when the caller hands us a multi-person df.
+    d = d_all.sort_values(["person", "game_start"]).copy()
+    d["prev_win"] = d.groupby("person")["win"].shift(1)
+    d = d.dropna(subset=["prev_win", "gap_since_prev_min"])
+    if d.empty:
+        return _empty_figure("Not enough consecutive games to plot")
+
+    d["prev_outcome"] = np.where(d["prev_win"] >= 0.5, "win", "loss")
+    d["gap_clamped"] = d["gap_since_prev_min"].clip(lower=0.0)
+    d["tilt_bucket"] = pd.cut(
+        d["gap_clamped"],
+        bins=_TILT_GAP_BINS_MIN,
+        labels=_TILT_GAP_LABELS,
+        right=False,
+        ordered=True,
+    )
+    d = d.dropna(subset=["tilt_bucket"])
+    if d.empty:
+        return _empty_figure("No games inside the gap buckets")
+
+    is_aggregate_mode = _is_aggregate(player)
+    rng = np.random.default_rng(40)
+    n_boot = 2000
+    min_per_bucket = 8
+
+    # Wide-form per (prev_outcome, bucket): WR, n, ci_lo, ci_hi.
+    rows: list[dict] = []
+    if is_aggregate_mode:
+        # Per-person WR per cell, drop sparse cells, then macro-average and
+        # bootstrap across the surviving per-person WRs.
+        per_person = (
+            d.groupby(["prev_outcome", "tilt_bucket", "person"], observed=True)
+            .agg(games=("win", "size"), wins=("win", "sum"))
+            .reset_index()
+        )
+        per_person = per_person[per_person["games"] >= min_per_bucket]
+        per_person["wr"] = per_person["wins"] / per_person["games"]
+
+        for prev_outcome in ("loss", "win"):
+            for bucket in _TILT_GAP_LABELS:
+                cell = per_person[
+                    (per_person["prev_outcome"] == prev_outcome)
+                    & (per_person["tilt_bucket"] == bucket)
+                ]
+                if cell.empty:
+                    continue
+                wrs = cell["wr"].to_numpy()
+                if wrs.size < 2:
+                    ci_lo = ci_hi = np.nan
+                else:
+                    boot = rng.choice(wrs, size=(n_boot, wrs.size), replace=True).mean(axis=1)
+                    ci_lo = float(np.quantile(boot, 0.025))
+                    ci_hi = float(np.quantile(boot, 0.975))
+                rows.append(
+                    {
+                        "prev_outcome": prev_outcome,
+                        "bucket": bucket,
+                        "wr": float(wrs.mean()),
+                        "n": int(cell["games"].sum()),
+                        "n_people": int(wrs.size),
+                        "ci_lo": ci_lo,
+                        "ci_hi": ci_hi,
+                    }
+                )
+    else:
+        # Single person: Wilson 95% CI on the binomial.
+        cell = (
+            d.groupby(["prev_outcome", "tilt_bucket"], observed=True)
+            .agg(games=("win", "size"), wins=("win", "sum"))
+            .reset_index()
+        )
+        cell = cell[cell["games"] >= min_per_bucket]
+        for _, row in cell.iterrows():
+            lo, hi = wilson_ci(int(row["wins"]), int(row["games"]))
+            rows.append(
+                {
+                    "prev_outcome": row["prev_outcome"],
+                    "bucket": str(row["tilt_bucket"]),
+                    "wr": float(row["wins"]) / float(row["games"]),
+                    "n": int(row["games"]),
+                    "n_people": 1,
+                    "ci_lo": lo,
+                    "ci_hi": hi,
+                }
+            )
+
+    if not rows:
+        return _empty_figure("No buckets had >=8 samples")
+
+    series = pd.DataFrame(rows)
+
+    # X positions: integer index into the bucket label list so missing
+    # buckets leave the right visual gap.
+    bucket_to_x = {label: i for i, label in enumerate(_TILT_GAP_LABELS)}
+
+    # Baseline: macro-averaged overall WR for aggregate mode, per-person
+    # overall WR otherwise.
+    if is_aggregate_mode:
+        per_person_overall = d.groupby("person")["win"].mean()
+        baseline_wr = float(per_person_overall.mean())
+        baseline_label = f"macro-average overall WR {baseline_wr:.0%}"
+    else:
+        baseline_wr = float(d["win"].mean())
+        baseline_label = f"overall WR {baseline_wr:.0%}"
+
+    fig, ax = plt.subplots(figsize=(11, 5.0))
+
+    series_styles = {
+        "loss": {"colour": PALETTE["loss"], "label": "After loss"},
+        "win": {"colour": PALETTE["win"], "label": "After win"},
+    }
+    for prev_outcome in ("loss", "win"):
+        sub = series[series["prev_outcome"] == prev_outcome].copy()
+        if sub.empty:
+            continue
+        sub = sub.sort_values("bucket", key=lambda s: s.map(bucket_to_x))
+        xs = sub["bucket"].map(bucket_to_x).to_numpy()
+        ys = sub["wr"].to_numpy()
+        colour = series_styles[prev_outcome]["colour"]
+        ax.plot(
+            xs,
+            ys,
+            color=colour,
+            marker="o",
+            markersize=6,
+            linewidth=2.2,
+            label=series_styles[prev_outcome]["label"],
+        )
+        # Ribbon only where CI is defined (>=2 people in aggregate, always
+        # in per-person via Wilson).
+        ci_ok = sub["ci_lo"].notna() & sub["ci_hi"].notna()
+        if ci_ok.any():
+            ax.fill_between(
+                xs[ci_ok.to_numpy()],
+                sub.loc[ci_ok, "ci_lo"].to_numpy(),
+                sub.loc[ci_ok, "ci_hi"].to_numpy(),
+                color=colour,
+                alpha=0.18,
+                linewidth=0,
+            )
+        # n=... annotation under each point; loss series sits below the
+        # marker, win series above, so labels don't collide when the two
+        # lines cross. Push labels far enough out that the OTHER series'
+        # marker at the same x doesn't sit on the text glyphs.
+        y_offset = -18 if prev_outcome == "loss" else 14
+        va = "top" if prev_outcome == "loss" else "bottom"
+        for xi, yi, ni in zip(xs, ys, sub["n"].to_numpy(), strict=False):
+            ax.annotate(
+                f"n={int(ni)}",
+                xy=(xi, yi),
+                xytext=(0, y_offset),
+                textcoords="offset points",
+                ha="center",
+                va=va,
+                fontsize=8,
+                color=colour,
+                zorder=5,
+            )
+
+    _baseline(ax, y=baseline_wr, label=baseline_label)
+
+    ax.set_xticks(list(range(len(_TILT_GAP_LABELS))))
+    ax.set_xticklabels(_TILT_GAP_LABELS)
+    ax.set_xlabel("Gap since previous game")
+    ax.set_ylabel("Win rate")
+    ax.set_ylim(0.0, 1.0)
+
+    if is_aggregate_mode:
+        ax.set_title("Tilt analysis - does replaying right after a loss hurt?")
+        _subtitle(
+            ax,
+            "Macro-averaged WR by gap since previous game, split by previous outcome. "
+            "Tilt hypothesis: after-loss line dips at short gaps. "
+            "Ribbons = bootstrap 95% CI across players (B=2000); per-person cells need >=8 games.",
+        )
+    else:
+        name = _display_label(player) or ""
+        ax.set_title(f"Tilt analysis - {name}")
+        _subtitle(
+            ax,
+            "Your WR by gap since previous game, split by previous outcome. "
+            "Tilt hypothesis: after-loss line dips at short gaps. "
+            "Ribbons = Wilson 95% CI; buckets need >=8 games.",
+        )
+
+    ax.legend(loc="lower right", fontsize=9)
+    _polish_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
+# --- 33. Win rate by position within a play session -----------------------
+
+# Position labels for the X axis. Pool everything >=7 into "7+" so a long
+# tail of marathon-session positions (8th, 9th, 10th game...) doesn't
+# explode the chart with small-n buckets.
+_SESSION_POS_CAP = 7
+_SESSION_POS_LABELS = ["1", "2", "3", "4", "5", "6", "7+"]
+# Per-person cell needs at least this many games to contribute to a
+# bucket. Two thresholds because aggregate also needs enough contributors.
+_SESSION_POS_MIN_PER_PERSON = 10
+_SESSION_POS_MIN_PEOPLE = 3
+# Per-person mode keeps a position if it has at least this many games.
+_SESSION_POS_MIN_PER_BUCKET = 8
+
+
+def plot_session_position_wr(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """WR by game-position-within-session. Tests the warm-up hypothesis
+    (WR climbs from game 1 to 2) against the stamina-decay hypothesis
+    (WR drops as the session grinds on).
+
+    Sessions come from ``load_matches`` (gap-threshold split). Aggregate
+    mode macro-averages per-person WRs and bootstraps a 95% CI across
+    people. Per-person mode uses Wilson 95% CI on the binomial.
+    """
+    d_all = _filter_player(df, player)
+    if d_all.empty or "session_game_idx" not in d_all.columns:
+        return _empty_figure("No games to plot")
+
+    d = d_all.copy()
+    # session_game_idx is already 1-indexed; clip to the cap to pool the
+    # long tail into "7+". This also makes "sessions of length 1
+    # contribute only to position 1" automatic — they only ever produce a
+    # single row with idx=1.
+    d["pos"] = d["session_game_idx"].clip(upper=_SESSION_POS_CAP).astype(int)
+    d = d.dropna(subset=["win", "pos"])
+    if d.empty:
+        return _empty_figure("Not enough session data to plot")
+
+    is_aggregate_mode = _is_aggregate(player)
+    rng = np.random.default_rng(41)
+    n_boot = 2000
+
+    rows: list[dict] = []
+    if is_aggregate_mode:
+        # Per-person WR per position, drop sparse cells, then macro-average
+        # and bootstrap across the surviving per-person WRs.
+        per_person = (
+            d.groupby(["pos", "person"], observed=True)
+            .agg(games=("win", "size"), wins=("win", "sum"))
+            .reset_index()
+        )
+        per_person = per_person[per_person["games"] >= _SESSION_POS_MIN_PER_PERSON]
+        per_person["wr"] = per_person["wins"] / per_person["games"]
+
+        for pos in range(1, _SESSION_POS_CAP + 1):
+            cell = per_person[per_person["pos"] == pos]
+            if len(cell) < _SESSION_POS_MIN_PEOPLE:
+                continue
+            wrs = cell["wr"].to_numpy()
+            boot = rng.choice(wrs, size=(n_boot, wrs.size), replace=True).mean(axis=1)
+            rows.append(
+                {
+                    "pos": pos,
+                    "wr": float(wrs.mean()),
+                    "n": int(cell["games"].sum()),
+                    "n_people": int(wrs.size),
+                    "ci_lo": float(np.quantile(boot, 0.025)),
+                    "ci_hi": float(np.quantile(boot, 0.975)),
+                }
+            )
+    else:
+        cell = (
+            d.groupby("pos", observed=True)
+            .agg(games=("win", "size"), wins=("win", "sum"))
+            .reset_index()
+        )
+        cell = cell[cell["games"] >= _SESSION_POS_MIN_PER_BUCKET]
+        for _, row in cell.iterrows():
+            lo, hi = wilson_ci(int(row["wins"]), int(row["games"]))
+            rows.append(
+                {
+                    "pos": int(row["pos"]),
+                    "wr": float(row["wins"]) / float(row["games"]),
+                    "n": int(row["games"]),
+                    "n_people": 1,
+                    "ci_lo": lo,
+                    "ci_hi": hi,
+                }
+            )
+
+    if not rows:
+        return _empty_figure("No session positions met the minimum sample threshold")
+
+    series = pd.DataFrame(rows).sort_values("pos").reset_index(drop=True)
+
+    # Baseline: macro-averaged overall WR for aggregate mode, player's
+    # overall WR otherwise.
+    if is_aggregate_mode:
+        per_person_overall = d.groupby("person")["win"].mean()
+        baseline_wr = float(per_person_overall.mean())
+        baseline_label = f"macro-average overall WR {baseline_wr:.0%}"
+    else:
+        baseline_wr = float(d["win"].mean())
+        baseline_label = f"overall WR {baseline_wr:.0%}"
+
+    fig, ax = plt.subplots(figsize=(10, 5.0))
+
+    xs = (series["pos"] - 1).to_numpy()
+    ys = series["wr"].to_numpy()
+    colour = PALETTE["primary"]
+
+    ax.plot(
+        xs,
+        ys,
+        color=colour,
+        marker="o",
+        markersize=7,
+        linewidth=2.2,
+    )
+    ax.fill_between(
+        xs,
+        series["ci_lo"].to_numpy(),
+        series["ci_hi"].to_numpy(),
+        color=colour,
+        alpha=0.18,
+        linewidth=0,
+    )
+
+    # n=... annotation above each marker; consistent placement since this
+    # is a single-series chart with no collision risk.
+    for xi, yi, ni in zip(xs, ys, series["n"].to_numpy(), strict=False):
+        ax.annotate(
+            f"n={int(ni)}",
+            xy=(xi, yi),
+            xytext=(0, 10),
+            textcoords="offset points",
+            ha="center",
+            va="bottom",
+            fontsize=8,
+            color=PALETTE["muted"],
+        )
+
+    _baseline(ax, y=baseline_wr, label=baseline_label)
+
+    ax.set_xticks(list(range(_SESSION_POS_CAP)))
+    ax.set_xticklabels(_SESSION_POS_LABELS)
+    ax.set_xlabel("Game position within session")
+    ax.set_ylabel("Win rate")
+    ax.set_ylim(0.0, 1.0)
+
+    subtitle = (
+        f"Each game's position within a play session (sessions split when gap >"
+        f"{SESSION_GAP_MIN}min). Tests whether you warm up or fatigue as you play longer."
+    )
+
+    if is_aggregate_mode:
+        ax.set_title("Session-position WR - warm-up or stamina decay?")
+    else:
+        name = _display_label(player) or ""
+        ax.set_title(f"Session-position WR - {name}")
+    _subtitle(ax, subtitle)
+
+    ax.legend(loc="lower right", fontsize=9)
+    _polish_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
+_IMPROVEMENT_MIN_GAMES = 200
+_IMPROVEMENT_ROLLING_WINDOW = 50
+
+
+def _fit_improvement_slope(wins: np.ndarray) -> dict | None:
+    """Logistic regression of win on game-index for one player.
+
+    Design is a single column ``i / 100`` so the slope coefficient is in
+    log-odds per 100 games. ``logistic_fit`` adds its own intercept, so
+    ``X`` is shape (n, 1). Returns None when the fit is degenerate
+    (all wins or all losses — no variance to explain).
+    """
+    n = wins.size
+    if n < _IMPROVEMENT_MIN_GAMES:
+        return None
+    if wins.sum() in (0, n):
+        return None
+
+    idx_scaled = (np.arange(n, dtype=float) / 100.0)[:, None]
+    beta, se, _ = logistic_fit(idx_scaled, wins.astype(float), l2=0.5)
+    beta_slope = float(beta[1])
+    se_slope = float(se[1]) if np.isfinite(se[1]) else float("nan")
+    p_bar = float(wins.mean())
+    # Local-derivative conversion: dP/di * 100 = beta * p(1-p) * 100,
+    # evaluated at the player's mean WR. Sign-preserving on the CI bounds
+    # because p(1-p) >= 0.
+    scale = p_bar * (1.0 - p_bar) * 100.0
+    slope_pp = beta_slope * scale
+    if np.isfinite(se_slope) and se_slope > 0:
+        beta_lo = beta_slope - 1.96 * se_slope
+        beta_hi = beta_slope + 1.96 * se_slope
+        ci_lo_pp = beta_lo * scale
+        ci_hi_pp = beta_hi * scale
+        p_value = wald_pvalue(beta_slope, se_slope)
+    else:
+        ci_lo_pp = float("nan")
+        ci_hi_pp = float("nan")
+        p_value = 1.0
+
+    return {
+        "n_games": int(n),
+        "mean_wr": p_bar,
+        "beta": beta_slope,
+        "se": se_slope,
+        "slope_pp": slope_pp,
+        "ci_lo_pp": ci_lo_pp,
+        "ci_hi_pp": ci_hi_pp,
+        "p_value": p_value,
+        "intercept": float(beta[0]),
+    }
+
+
+def plot_improvement_slope(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Per-player WR-over-time slope from a logistic fit on game-index.
+
+    Aggregate: horizontal bar chart of slopes (pp WR change per 100
+    games) with Wald 95% CI whiskers, one bar per person who has at
+    least 200 games. Sign-significant bars get win/loss colour, others
+    are neutral grey.
+
+    Per-person: 50-game rolling WR (solid) overlaid with the dashed
+    fitted-logistic predicted P(win) curve, annotated with slope and
+    Wald p-value.
+    """
+    if _is_aggregate(player):
+        results: list[dict] = []
+        for person, sub in df.groupby("person", observed=True):
+            wins = sub.sort_values("game_start")["win"].to_numpy(dtype=float)
+            fit = _fit_improvement_slope(wins)
+            if fit is None:
+                continue
+            fit["person"] = str(person)
+            results.append(fit)
+
+        if not results:
+            return _empty_figure(
+                f"No player has the {_IMPROVEMENT_MIN_GAMES}+ games needed for a slope estimate"
+            )
+
+        rows = pd.DataFrame(results).sort_values("slope_pp", ascending=True).reset_index(drop=True)
+        y = np.arange(len(rows))
+
+        colours: list[str] = []
+        for _, r in rows.iterrows():
+            lo, hi = r["ci_lo_pp"], r["ci_hi_pp"]
+            if np.isfinite(lo) and np.isfinite(hi) and lo > 0:
+                colours.append(PALETTE["win"])
+            elif np.isfinite(lo) and np.isfinite(hi) and hi < 0:
+                colours.append(PALETTE["loss"])
+            else:
+                colours.append(PALETTE["neutral"])
+
+        fig_h = max(4.6, len(rows) * 0.45)
+        fig, ax = plt.subplots(figsize=(13, fig_h))
+        ax.barh(y, rows["slope_pp"], color=colours, height=0.7)
+
+        # CI whiskers — only draw where the SE was finite.
+        finite_ci = rows[["ci_lo_pp", "ci_hi_pp"]].apply(
+            lambda r: np.isfinite(r["ci_lo_pp"]) and np.isfinite(r["ci_hi_pp"]), axis=1
+        )
+        if finite_ci.any():
+            xerr = np.vstack(
+                [
+                    (rows["slope_pp"] - rows["ci_lo_pp"]).to_numpy(),
+                    (rows["ci_hi_pp"] - rows["slope_pp"]).to_numpy(),
+                ]
+            )
+            xerr[:, ~finite_ci.to_numpy()] = 0.0
+            ax.errorbar(rows["slope_pp"], y, xerr=xerr, **WHISKER_STYLE)
+
+        ax.axvline(0, color=PALETTE["text"], linewidth=0.8, linestyle=(0, (4, 4)))
+        ax.set_yticks(y)
+        ax.set_yticklabels(rows["person"])
+        ax.set_xlabel("Slope (percentage points of WR per 100 games)")
+        ax.set_title("Improvement slope - pp WR change per 100 games")
+        _subtitle(
+            ax,
+            "Logistic regression of win on game-index, slope reported at each "
+            "player's mean WR. CI from Wald. Positive = trending up over dataset window.",
+        )
+        _polish_ax(ax)
+
+        # Leave enough horizontal headroom for the per-bar annotation that
+        # sits just beyond each CI whisker (label is ~10pp wide visually).
+        max_abs = max(
+            8.0,
+            float(np.nanmax(np.abs(rows[["ci_lo_pp", "ci_hi_pp", "slope_pp"]].to_numpy()))) + 10.0,
+        )
+        ax.set_xlim(-max_abs, max_abs)
+
+        for yi, (_, r) in enumerate(rows.iterrows()):
+            label = f"{r['slope_pp']:+.1f}pp / 100g  (beta p={r['p_value']:.3f})"
+            sign_pad = 1 if r["slope_pp"] >= 0 else -1
+            anchor = r["ci_hi_pp"] if r["slope_pp"] >= 0 else r["ci_lo_pp"]
+            if not np.isfinite(anchor):
+                anchor = r["slope_pp"]
+            ax.annotate(
+                label,
+                xy=(anchor, yi),
+                xytext=(6 * sign_pad, 0),
+                textcoords="offset points",
+                va="center",
+                ha="left" if r["slope_pp"] >= 0 else "right",
+                fontsize=9,
+                color=PALETTE["text"],
+            )
+
+        fig.tight_layout()
+        return fig
+
+    # --- per-person trajectory ----------------------------------------------
+    person = _resolve_person(df, player)
+    if person is None:
+        return _empty_figure("No games to plot")
+    sub = df[df["person"] == person].sort_values("game_start").reset_index(drop=True)
+    n = len(sub)
+    if n < _IMPROVEMENT_MIN_GAMES:
+        return _empty_figure(
+            f"Need >={_IMPROVEMENT_MIN_GAMES} games for slope estimate ({n} games)"
+        )
+
+    wins = sub["win"].to_numpy(dtype=float)
+    fit = _fit_improvement_slope(wins)
+    if fit is None:
+        return _empty_figure(f"Cannot fit slope - degenerate outcomes ({n} games)")
+
+    idx = np.arange(n, dtype=float)
+    rolling = sub["win"].rolling(window=_IMPROVEMENT_ROLLING_WINDOW, min_periods=10).mean()
+
+    # Predicted P(win) at evenly-spaced indices for the dashed overlay.
+    smooth_idx = np.linspace(0.0, n - 1, num=min(400, n))
+    z = fit["intercept"] + fit["beta"] * (smooth_idx / 100.0)
+    z = np.clip(z, -30.0, 30.0)
+    fit_curve = 1.0 / (1.0 + np.exp(-z))
+
+    fig, ax = plt.subplots(figsize=(13, 4.6))
+    ax.plot(
+        idx,
+        rolling,
+        color=PALETTE["primary"],
+        linewidth=2.0,
+        label=f"Rolling {_IMPROVEMENT_ROLLING_WINDOW}-game WR",
+    )
+    ax.plot(
+        smooth_idx,
+        fit_curve,
+        color=PALETTE["accent_orange"],
+        linewidth=1.8,
+        linestyle=(0, (5, 4)),
+        label="Logistic fit",
+    )
+    _baseline(ax)
+    ax.set_ylim(0.0, 1.05)
+    ax.set_xlabel("Game index (0 = oldest)")
+    ax.set_ylabel("Win rate")
+    name = _display_label(player) or person
+    ax.set_title(f"Improvement trajectory - {name}")
+    if np.isfinite(fit["ci_lo_pp"]) and np.isfinite(fit["ci_hi_pp"]):
+        ci_txt = f" [95% CI {fit['ci_lo_pp']:+.1f}, {fit['ci_hi_pp']:+.1f}]"
+    else:
+        ci_txt = ""
+    _subtitle(
+        ax,
+        f"{_IMPROVEMENT_ROLLING_WINDOW}-game rolling WR (solid) vs logistic fit (dashed). "
+        f"Slope: {fit['slope_pp']:+.1f}pp / 100 games (p={fit['p_value']:.3f}).",
+    )
+
+    annotation = (
+        f"slope {fit['slope_pp']:+.1f}pp / 100g{ci_txt}\n"
+        f"beta p={fit['p_value']:.3f}  ·  n={n}  ·  mean WR {fit['mean_wr']:.0%}"
+    )
+    ax.text(
+        0.99,
+        0.02,
+        annotation,
+        transform=ax.transAxes,
+        ha="right",
+        va="bottom",
+        fontsize=9,
+        color=PALETTE["text"],
+        bbox={
+            "facecolor": "white",
+            "edgecolor": PALETTE["spine"],
+            "boxstyle": "round,pad=0.4",
+            "alpha": 0.9,
+        },
+    )
+    ax.legend(loc="upper left", fontsize=9)
+    _polish_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
+# --- 35. Per-player stat sheet ---------------------------------------------
+
+_STAT_SHEET_MIN_GAMES = 50
+
+# Metric definitions: (label, column in per-person frame, higher_is_better).
+# higher_is_better drives the percentile inversion for "deaths/game" so the
+# annotation always reads "high percentile = good".
+_STAT_SHEET_METRICS: list[tuple[str, str, bool]] = [
+    ("Win rate", "wr", True),
+    ("KDA", "kda", True),
+    ("Kills / game", "kpg", True),
+    ("Deaths / game", "dpg", False),
+    ("Assists / game", "apg", True),
+    ("Avg game duration (min)", "dur_min", True),
+]
+
+
+def _stat_sheet_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """One row per person with the six stat-sheet metrics.
+
+    KDA is computed per-game (the existing ``df["kda"]`` column already
+    floors deaths at 1) then averaged — matches the rest of the codebase's
+    "per-game KDA, then mean" convention.
+    """
+    grp = df.groupby("person", observed=True)
+    out = grp.agg(
+        games=("match_id", "size"),
+        wr=("win", "mean"),
+        kda=("kda", "mean"),
+        kpg=("kills", "mean"),
+        dpg=("deaths", "mean"),
+        apg=("assists", "mean"),
+        dur_min=("duration_min", "mean"),
+    )
+    return out[out["games"] >= _STAT_SHEET_MIN_GAMES].reset_index()
+
+
+def _stat_sheet_format(metric_col: str, value: float) -> str:
+    """Format a metric value the same way it appears on each subplot."""
+    if metric_col == "wr":
+        return f"{value:.0%}"
+    return f"{value:.1f}"
+
+
+def plot_stat_sheet(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Per-player "stat sheet" — where each player ranks across the group.
+
+    Aggregate: 2x3 grid of horizontal strip plots, one per metric, with a
+    dot per qualifying player, a median rule, and labels on the lowest
+    and highest values.
+
+    Per-person: same grid with the focal player's dot highlighted and a
+    "You: VALUE (PCT pct)" annotation in each subplot. Percentiles are
+    inverted for Deaths/game so "low = good" reads as a high score.
+    """
+    frame = _stat_sheet_frame(df)
+
+    if _is_aggregate(player):
+        if len(frame) < 3:
+            return _empty_figure("Need >=3 players with >=50 games")
+        focal = None
+        focal_row = None
+    else:
+        person = _resolve_person(df, player)
+        n_games = int((df["person"] == person).sum()) if person is not None else 0
+        if person is None or person not in set(frame["person"]):
+            return _empty_figure(f"Need >=50 games for stat sheet ({n_games} games)")
+        focal = person
+        focal_row = frame[frame["person"] == person].iloc[0]
+
+    fig, axes = plt.subplots(2, 3, figsize=(12, 7))
+    flat_axes = axes.flatten()
+
+    for ax, (label, col, higher_better) in zip(flat_axes, _STAT_SHEET_METRICS, strict=False):
+        values = frame[col].to_numpy(dtype=float)
+        names = frame["person"].tolist()
+        median = float(np.median(values))
+
+        if focal is None:
+            # Aggregate: every dot in the primary colour at moderate alpha.
+            ax.scatter(
+                values,
+                np.zeros_like(values),
+                s=70,
+                color=PALETTE["primary"],
+                alpha=0.75,
+                edgecolors="white",
+                linewidths=0.8,
+                zorder=3,
+            )
+            # Label outermost low/high so the spread is readable at a glance.
+            lo_idx = int(np.argmin(values))
+            hi_idx = int(np.argmax(values))
+            ax.annotate(
+                names[hi_idx],
+                xy=(values[hi_idx], 0),
+                xytext=(0, 9),
+                textcoords="offset points",
+                ha="center",
+                va="bottom",
+                fontsize=8,
+                color=PALETTE["text"],
+            )
+            if hi_idx != lo_idx:
+                ax.annotate(
+                    names[lo_idx],
+                    xy=(values[lo_idx], 0),
+                    xytext=(0, -10),
+                    textcoords="offset points",
+                    ha="center",
+                    va="top",
+                    fontsize=8,
+                    color=PALETTE["text"],
+                )
+        else:
+            # Per-person: focal in primary, others desaturated grey.
+            is_focal = frame["person"].to_numpy() == focal
+            ax.scatter(
+                values[~is_focal],
+                np.zeros(int((~is_focal).sum())),
+                s=55,
+                color=PALETTE["neutral"],
+                alpha=0.55,
+                edgecolors="white",
+                linewidths=0.6,
+                zorder=2,
+            )
+            ax.scatter(
+                values[is_focal],
+                np.zeros(int(is_focal.sum())),
+                s=120,
+                color=PALETTE["primary"],
+                edgecolors="white",
+                linewidths=1.2,
+                zorder=4,
+            )
+
+            focal_value = float(focal_row[col])
+            # Average-rank percentile: lowest value -> 0, highest -> 100.
+            ranks = pd.Series(values).rank(method="average")
+            n = len(values)
+            if n > 1:
+                pct = (ranks.iloc[int(np.where(is_focal)[0][0])] - 1) / (n - 1) * 100.0
+            else:
+                pct = 50.0
+            if not higher_better:
+                pct = 100.0 - pct
+            pct_int = int(round(pct))
+            # English ordinal suffix: 11/12/13 are special "th"; otherwise
+            # 1/2/3 take st/nd/rd. Keeps "22nd / 33rd / 53rd" from reading
+            # as "22th / 33th / 53th".
+            if 10 <= (pct_int % 100) <= 20:
+                ord_suffix = "th"
+            else:
+                ord_suffix = {1: "st", 2: "nd", 3: "rd"}.get(pct_int % 10, "th")
+            ax.text(
+                0.5,
+                0.92,
+                f"You: {_stat_sheet_format(col, focal_value)} ({pct_int}{ord_suffix} pct)",
+                transform=ax.transAxes,
+                ha="center",
+                va="top",
+                fontsize=9,
+                color=PALETTE["text"],
+                bbox={
+                    "facecolor": "white",
+                    "edgecolor": PALETTE["spine"],
+                    "boxstyle": "round,pad=0.3",
+                    "alpha": 0.9,
+                },
+            )
+
+        # Median vertical, matched to the dashed muted style used elsewhere.
+        ax.axvline(
+            median,
+            color=PALETTE["muted"],
+            linewidth=0.9,
+            linestyle=(0, (4, 4)),
+            alpha=0.7,
+            zorder=1,
+        )
+
+        ax.set_yticks([])
+        ax.set_ylim(-0.6, 0.6)
+        # Pad horizontal range so the outermost labels don't clip.
+        v_min, v_max = float(np.min(values)), float(np.max(values))
+        span = v_max - v_min if v_max > v_min else max(abs(v_max), 1.0)
+        pad = span * 0.15 if span > 0 else 0.5
+        ax.set_xlim(v_min - pad, v_max + pad)
+        if col == "wr":
+            ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _pos: f"{v:.0%}"))
+        ax.set_title(label, fontsize=11, pad=6)
+        _polish_ax(ax)
+
+    if focal is None:
+        suptitle = "Player stat sheet - friend group distributions"
+        subtitle = "Each dot is one player. Median marked. Outliers labelled."
+    else:
+        display_name = _display_label(player) or focal
+        suptitle = f"Stat sheet - {display_name}"
+        subtitle = "Your position on each metric vs the friend group. Higher percentile = better."
+
+    fig.suptitle(suptitle, fontsize=16, fontweight="bold", y=0.99)
+    fig.text(
+        0.5,
+        0.945,
+        subtitle,
+        ha="center",
+        va="top",
+        fontsize=10,
+        color=PALETTE["muted"],
+        style="italic",
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.92))
+    return fig
+
+
+# --- 36. Game pace - early stomper vs late scaler --------------------------
+
+_PACE_MIN_GAMES = 50
+
+# 5-minute duration bins from 15 to 50 min for the per-person WR-by-bin panel.
+# Games outside [15, 50) are folded into the edge bins so they don't
+# silently disappear via pd.cut returning NaN.
+_PACE_BIN_EDGES = [15, 20, 25, 30, 35, 40, 45, 50]
+_PACE_BIN_LABELS = ["15-20", "20-25", "25-30", "30-35", "35-40", "40-45", "45-50"]
+
+# Shared bin edges for the overlaid win/loss duration histograms — both
+# distributions must use the same bins or the overlay misleads.
+_PACE_HIST_EDGES = np.arange(10, 56, 2)
+
+
+def _welch_t(a: np.ndarray, b: np.ndarray) -> tuple[float, float]:
+    """Welch's two-sample t-test, returns (mean_a - mean_b, two-sided p).
+
+    Uses the Welch-Satterthwaite df and a normal-tail p-value approximation
+    (erfc) — accurate enough for the n>=20-per-group regime this function
+    sees and keeps us off scipy. Degenerate cases (n<2 in either group,
+    zero variance in both) return p=1.0.
+    """
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    n1, n2 = len(a), len(b)
+    if n1 < 2 or n2 < 2:
+        return (float("nan"), 1.0)
+    m1, m2 = float(np.mean(a)), float(np.mean(b))
+    s1, s2 = float(np.var(a, ddof=1)), float(np.var(b, ddof=1))
+    diff = m1 - m2
+    se2 = s1 / n1 + s2 / n2
+    if se2 <= 0:
+        return (diff, 1.0)
+    t = diff / math.sqrt(se2)
+    p = math.erfc(abs(t) / math.sqrt(2.0))
+    return (diff, float(p))
+
+
+def plot_game_pace(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Are wins shorter than losses (stomper) or longer (late scaler)?
+
+    Aggregate: horizontal bar per player of ``avg_win_dur - avg_loss_dur``
+    in minutes, sorted ascending. Negative bars are clear stompers (their
+    wins end fast), positive bars are scalers. Welch's t p-value annotates
+    each bar.
+
+    Per-person: top panel overlays win/loss duration histograms with mean
+    markers. Bottom panel shows WR per 5-minute duration bin with Wilson
+    95% CIs - descriptive only, since duration is partly an outcome (stomps
+    end fast).
+    """
+    if _is_aggregate(player):
+        rows: list[dict] = []
+        for person, sub in df.groupby("person", observed=True):
+            if len(sub) < _PACE_MIN_GAMES:
+                continue
+            wins = sub.loc[sub["win"] == 1, "duration_min"].to_numpy()
+            losses = sub.loc[sub["win"] == 0, "duration_min"].to_numpy()
+            if len(wins) < 2 or len(losses) < 2:
+                continue
+            diff, p = _welch_t(wins, losses)
+            rows.append(
+                {
+                    "person": str(person),
+                    "avg_win_dur": float(np.mean(wins)),
+                    "avg_loss_dur": float(np.mean(losses)),
+                    "win_minus_loss": diff,
+                    "p_value": p,
+                    "n": len(sub),
+                }
+            )
+
+        if len(rows) < 3:
+            return _empty_figure("Need >=3 players with >=50 games")
+
+        # Sort descending so the most-negative (stomper) bar lands at the
+        # highest y, which renders at the TOP of a default barh axis.
+        frame = (
+            pd.DataFrame(rows).sort_values("win_minus_loss", ascending=False).reset_index(drop=True)
+        )
+        y = np.arange(len(frame))
+
+        colours: list[str] = []
+        for v in frame["win_minus_loss"]:
+            if v < -1:
+                colours.append(PALETTE["loss"])  # stomper - wins short, losses drag
+            elif v > 1:
+                colours.append(PALETTE["win"])  # scaler - wins long, losses end fast
+            else:
+                colours.append(PALETTE["neutral"])
+
+        fig_h = max(4.2, len(frame) * 0.45)
+        fig, ax = plt.subplots(figsize=(10, fig_h))
+        ax.barh(y, frame["win_minus_loss"], color=colours, height=0.7)
+        ax.axvline(0, color=PALETTE["text"], linewidth=0.8, linestyle=(0, (4, 4)))
+        ax.set_yticks(y)
+        ax.set_yticklabels(frame["person"])
+        ax.set_xlabel("Avg win duration - avg loss duration (min)")
+        ax.set_title("Game-pace style - wins vs losses duration delta")
+        _subtitle(
+            ax,
+            "Negative = stomper (wins short, losses drag). Positive = scaler "
+            "(wins long, losses end fast). Welch's t-test p-value shown.",
+        )
+        _polish_ax(ax)
+
+        # Pad x-range so the right-aligned annotations don't clip.
+        max_abs = max(2.0, float(np.max(np.abs(frame["win_minus_loss"]))) + 1.5)
+        ax.set_xlim(-max_abs, max_abs)
+
+        for yi, (_, r) in enumerate(frame.iterrows()):
+            val = r["win_minus_loss"]
+            label = f"{val:+.1f} min  (p={r['p_value']:.3f})"
+            sign_pad = 1 if val >= 0 else -1
+            ax.annotate(
+                label,
+                xy=(val, yi),
+                xytext=(6 * sign_pad, 0),
+                textcoords="offset points",
+                va="center",
+                ha="left" if val >= 0 else "right",
+                fontsize=9,
+                color=PALETTE["text"],
+            )
+
+        fig.tight_layout()
+        return fig
+
+    # --- per-person ---------------------------------------------------------
+    person = _resolve_person(df, player)
+    if person is None:
+        return _empty_figure("No games to plot")
+    sub = df[df["person"] == person]
+    n = len(sub)
+    if n < _PACE_MIN_GAMES:
+        return _empty_figure(f"Need >=50 games for pace analysis ({n} games)")
+
+    wins = sub.loc[sub["win"] == 1, "duration_min"].to_numpy()
+    losses = sub.loc[sub["win"] == 0, "duration_min"].to_numpy()
+    avg_win = float(np.mean(wins)) if len(wins) else float("nan")
+    avg_loss = float(np.mean(losses)) if len(losses) else float("nan")
+
+    fig, axes = plt.subplots(2, 1, figsize=(10, 7))
+    name = _display_label(player) or person
+
+    # --- top: duration histograms ---
+    ax_top = axes[0]
+    ax_top.hist(
+        wins,
+        bins=_PACE_HIST_EDGES,
+        color=PALETTE["win"],
+        alpha=0.55,
+        label=f"Wins (n={len(wins)})",
+    )
+    ax_top.hist(
+        losses,
+        bins=_PACE_HIST_EDGES,
+        color=PALETTE["loss"],
+        alpha=0.55,
+        label=f"Losses (n={len(losses)})",
+    )
+    # Anchor the avg-line labels to the TOP of the axes so they sit above
+    # the histogram bars instead of crashing into them. Stagger win vs loss
+    # vertically when their averages are close together so the two labels
+    # don't overlap each other.
+    if math.isfinite(avg_win):
+        ax_top.axvline(
+            avg_win,
+            color=PALETTE["win"],
+            linewidth=1.6,
+            linestyle=(0, (5, 4)),
+        )
+        ax_top.annotate(
+            f"win avg {avg_win:.1f}",
+            xy=(avg_win, 1.0),
+            xytext=(4, -4),
+            textcoords="offset points",
+            xycoords=("data", "axes fraction"),
+            fontsize=9,
+            color=PALETTE["win"],
+            va="top",
+        )
+    if math.isfinite(avg_loss):
+        ax_top.axvline(
+            avg_loss,
+            color=PALETTE["loss"],
+            linewidth=1.6,
+            linestyle=(0, (5, 4)),
+        )
+        ax_top.annotate(
+            f"loss avg {avg_loss:.1f}",
+            xy=(avg_loss, 1.0),
+            xytext=(4, -18),
+            textcoords="offset points",
+            xycoords=("data", "axes fraction"),
+            fontsize=9,
+            color=PALETTE["loss"],
+            va="top",
+        )
+    ax_top.set_xlabel("Game duration (min)")
+    ax_top.set_ylabel("Games")
+    ax_top.set_title(f"Game pace - {name}")
+    diff, p = _welch_t(wins, losses)
+    _subtitle(
+        ax_top,
+        "Top: duration distributions of wins vs losses. Bottom: WR by duration bin. "
+        "Note: duration is partly determined by outcome (stomps end fast) - read this "
+        f"as descriptive, not causal. Win-loss delta {diff:+.1f} min (p={p:.3f}).",
+    )
+    ax_top.legend(loc="upper right", fontsize=9)
+    _polish_ax(ax_top)
+
+    # --- bottom: WR by 5-min duration bin (15-50 min) ---
+    # Fold games <15 into the first bin and games >=50 into the last so
+    # they aren't silently dropped by pd.cut returning NaN.
+    dur_clipped = sub["duration_min"].clip(
+        lower=_PACE_BIN_EDGES[0], upper=_PACE_BIN_EDGES[-1] - 0.01
+    )
+    binned = pd.cut(dur_clipped, bins=_PACE_BIN_EDGES, labels=_PACE_BIN_LABELS, right=False)
+    pace = (
+        pd.DataFrame({"bin": binned, "win": sub["win"].to_numpy()})
+        .groupby("bin", observed=False)["win"]
+        .agg(["count", "sum", "mean"])
+        .rename(columns={"count": "games", "sum": "wins_n", "mean": "winrate"})
+        .reset_index()
+    )
+    # Wilson CI per bin - bin can legitimately have 0 games, in which case
+    # we skip drawing the bar but keep the x-tick.
+    cis = [
+        wilson_ci(int(w), int(g)) if g > 0 else (float("nan"), float("nan"))
+        for w, g in zip(pace["wins_n"], pace["games"], strict=False)
+    ]
+    lo = np.array([c[0] for c in cis])
+    hi = np.array([c[1] for c in cis])
+    means = pace["winrate"].to_numpy(dtype=float)
+
+    ax_bot = axes[1]
+    x = np.arange(len(pace))
+    has_data = pace["games"].to_numpy() > 0
+    ax_bot.bar(
+        x[has_data],
+        means[has_data],
+        color=PALETTE["primary"],
+        width=0.7,
+    )
+    if has_data.any():
+        yerr = np.vstack(
+            [
+                means - lo,
+                hi - means,
+            ]
+        )
+        yerr[:, ~has_data] = 0.0
+        ax_bot.errorbar(x, means, yerr=yerr, **WHISKER_STYLE)
+    _baseline(ax_bot)
+    ax_bot.set_xticks(x)
+    ax_bot.set_xticklabels(pace["bin"])
+    ax_bot.set_ylim(0, 1.1)
+    ax_bot.set_xlabel("Game duration bin (min)")
+    ax_bot.set_ylabel("Win rate")
+    ax_bot.set_title("Win rate by duration bin")
+    _subtitle(ax_bot, "Bars = pooled WR in bin; whiskers = Wilson 95% CI; n labelled per bin.")
+    _annotate_bars(ax_bot, x, means, pace["games"])
+    _polish_ax(ax_bot)
+
+    fig.tight_layout()
+    return fig
+
+
+def plot_shrunk_champ_rankings(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Top champions ranked by Bayesian-shrunk WR.
+
+    Answers "is this 65% WR real or just sample-size noise?". Raw WRs on
+    thin samples get pulled toward a baseline (personal WR for per-person,
+    group WR for aggregate) by a Beta prior. The shrunken bar is what
+    matters; the raw bar shows the pre-shrinkage WR so the size of the
+    correction is visible.
+    """
+    if _is_aggregate(player):
+        baseline_wr = float(df["win"].mean())
+        min_games = 30
+        prior_n = 50.0
+        title = "Top champions in the friend group - shrunken WR"
+        subtitle = (
+            "Combined wins/games across all players. Bayesian shrinkage "
+            "(prior_n=50) pulls thin samples toward group baseline."
+        )
+        baseline_label = f"group baseline ({baseline_wr:.0%})"
+        g = df.groupby("champion")["win"].agg(["count", "sum"])
+        g = g.rename(columns={"count": "games", "sum": "wins"})
+        g = g[g["games"] >= min_games]
+        if g.empty:
+            return _empty_figure(f"No champion has enough games (>={min_games})")
+    else:
+        d = _filter_player(df, player)
+        if len(d) < 50:
+            return _empty_figure(f"Need >=50 games for shrunk rankings ({len(d)} games)")
+        baseline_wr = float(d["win"].mean())
+        min_games = 5
+        prior_n = 30.0
+        name = _display_label(player) or "this player"
+        title = f"Top champions by shrunken WR - {name}"
+        subtitle = (
+            "Bayesian shrinkage with personal-baseline prior (prior_n=30). "
+            "Raw bar shows pre-shrinkage WR - shrinkage pulls small samples "
+            "toward your baseline so you see real signal."
+        )
+        baseline_label = f"{name}'s baseline ({baseline_wr:.0%})"
+        g = d.groupby("champion")["win"].agg(["count", "sum"])
+        g = g.rename(columns={"count": "games", "sum": "wins"})
+        g = g[g["games"] >= min_games]
+        if g.empty:
+            return _empty_figure(f"No champion has enough games (>={min_games})")
+
+    g["raw_wr"] = g["wins"] / g["games"]
+    g["shrunk_wr"] = [
+        bayesian_shrunk_wr(int(w), int(n), baseline_wr, prior_n)
+        for w, n in zip(g["wins"], g["games"], strict=False)
+    ]
+    # Top 15 by shrunken WR. Reversed so highest-WR row plots at the top
+    # of the horizontal bar chart (barh y=0 is at the bottom).
+    top = g.sort_values("shrunk_wr", ascending=False).head(15)
+    top = top.iloc[::-1]
+
+    fig, ax = plt.subplots(figsize=(10, 8))
+    y = np.arange(len(top))
+
+    colours = []
+    for shrunk in top["shrunk_wr"]:
+        if shrunk > baseline_wr + 0.03:
+            colours.append(PALETTE["win"])
+        elif shrunk < baseline_wr - 0.03:
+            colours.append(PALETTE["loss"])
+        else:
+            colours.append(PALETTE["neutral"])
+
+    ax.barh(y, top["shrunk_wr"], color=colours, height=0.72, label="Shrunken WR")
+    # Raw WR as a small marker on the same row — shows the pre-shrinkage value.
+    ax.scatter(
+        top["raw_wr"],
+        y,
+        marker="|",
+        s=140,
+        color=PALETTE["text"],
+        linewidths=1.6,
+        zorder=3,
+        label="Raw WR",
+    )
+    ax.axvline(
+        baseline_wr,
+        color=PALETTE["muted"],
+        linestyle="--",
+        linewidth=1.0,
+        label=baseline_label,
+    )
+
+    ax.set_yticks(y)
+    ax.set_yticklabels(
+        [f"{champ}  (n={int(n)})" for champ, n in zip(top.index, top["games"], strict=False)]
+    )
+    ax.set_xlabel("Win rate")
+    ax.set_xlim(0, max(1.0, float(top["shrunk_wr"].max()) + 0.18))
+    ax.set_title(title)
+    _subtitle(ax, subtitle)
+    ax.legend(loc="lower right", framealpha=0.85, fontsize=9)
+
+    # Inline annotation past the raw-WR marker showing raw -> shrunk so
+    # the correction magnitude stays visible without bloating the y-tick
+    # text. Anchor at max(raw, shrunk) so the text always clears both the
+    # bar tip and the raw "|" marker.
+    for yi, raw, shr in zip(y, top["raw_wr"], top["shrunk_wr"], strict=False):
+        ax.annotate(
+            f"raw {raw:.0%} -> shrunk {shr:.0%}",
+            xy=(max(float(shr), float(raw)), yi),
+            xytext=(10, 0),
+            textcoords="offset points",
+            va="center",
+            ha="left",
+            fontsize=8.5,
+            color=PALETTE["muted"],
+        )
+
+    _polish_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
+def _pearson_r_with_p(x: np.ndarray, y: np.ndarray) -> tuple[float, float]:
+    """Pearson correlation + 2-sided p-value via t -> normal approximation.
+
+    Returns (nan, nan) when n < 3 or the variance is too small for the t
+    statistic to be defined (perfect correlation, zero variance, etc.).
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    n = len(x)
+    if n < 3:
+        return float("nan"), float("nan")
+    xm = x - x.mean()
+    ym = y - y.mean()
+    denom = float(np.sqrt((xm * xm).sum() * (ym * ym).sum()))
+    if denom <= 1e-12:
+        return float("nan"), float("nan")
+    r = float((xm * ym).sum() / denom)
+    r = max(-1.0, min(1.0, r))
+    if 1.0 - r * r <= 1e-12:
+        return r, 0.0
+    t = r * math.sqrt((n - 2) / (1.0 - r * r))
+    # 2-sided p via standard-normal approximation to the t distribution.
+    p = 2.0 * (1.0 - 0.5 * (1.0 + math.erf(abs(t) / math.sqrt(2.0))))
+    return r, float(p)
+
+
+def plot_champ_pool_concentration(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Champion pool concentration via Shannon entropy / effective N.
+
+    Effective N = exp(H) where H is Shannon entropy (nats) of the pick
+    distribution. Identifies one-tricks (low N) vs flex players (high N).
+    Per-person view is a Pareto chart of pick frequency; aggregate view
+    compares everyone's effective N and tests whether pool size correlates
+    with WR.
+    """
+    if _is_aggregate(player):
+        per_person = df.groupby("person").agg(games=("win", "size"), wins=("win", "sum"))
+        per_person = per_person[per_person["games"] >= 50]
+        if len(per_person) < 3:
+            return _empty_figure("Need >=3 players with >=50 games")
+
+        rows = []
+        for person in per_person.index:
+            d = df[df["person"] == person]
+            counts = d["champion"].value_counts()
+            total = int(counts.sum())
+            p = counts.values / total
+            p = p[p > 0]
+            h = float(-(p * np.log(p)).sum())
+            eff_n = float(np.exp(h))
+            top3 = float(counts.head(3).sum()) / total
+            rows.append(
+                {
+                    "person": person,
+                    "eff_n": eff_n,
+                    "distinct": int((counts > 0).sum()),
+                    "top3_frac": top3,
+                    "wr": float(per_person.loc[person, "wins"])
+                    / float(per_person.loc[person, "games"]),
+                    "games": int(per_person.loc[person, "games"]),
+                }
+            )
+
+        agg = pd.DataFrame(rows).sort_values("eff_n", ascending=True)
+
+        fig, axes = plt.subplots(2, 1, figsize=(10, 9))
+
+        # Top panel: horizontal bar chart of eff_N.
+        y_pos = np.arange(len(agg))
+        axes[0].barh(y_pos, agg["eff_n"].values, color=PALETTE["primary"], height=0.7, alpha=0.85)
+        axes[0].set_yticks(y_pos)
+        axes[0].set_yticklabels(
+            [
+                f"{p}  eff_N={en:.1f}  distinct={k}  top3={t3:.0%}"
+                for p, en, k, t3 in zip(
+                    agg["person"], agg["eff_n"], agg["distinct"], agg["top3_frac"], strict=False
+                )
+            ]
+        )
+        median_eff = float(agg["eff_n"].median())
+        axes[0].axvline(
+            median_eff,
+            color=PALETTE["muted"],
+            linestyle="--",
+            linewidth=1.0,
+            label=f"median ({median_eff:.1f})",
+        )
+        axes[0].set_xlabel("Effective number of champions  (exp(Shannon entropy))")
+        axes[0].set_title("Champion pool concentration - one-tricks vs flex")
+        _subtitle(
+            axes[0],
+            "Top: effective number of champions (= exp(Shannon entropy)). "
+            "Higher = wider pool. Lower = one-trick.",
+        )
+        axes[0].legend(loc="lower right", framealpha=0.85, fontsize=9)
+        _polish_ax(axes[0])
+
+        # Bottom panel: scatter of eff_N vs WR with regression line.
+        x = agg["eff_n"].values
+        y = agg["wr"].values
+        axes[1].scatter(x, y, s=70, color=PALETTE["primary"], alpha=0.85, zorder=3)
+        # Player name labels — slight x-offset so they sit beside the dot.
+        x_span = float(x.max() - x.min()) if x.max() > x.min() else 1.0
+        x_offset = 0.012 * x_span
+        for xi, yi, name in zip(x, y, agg["person"], strict=False):
+            axes[1].annotate(
+                str(name),
+                xy=(xi, yi),
+                xytext=(xi + x_offset, yi),
+                fontsize=9,
+                color=PALETTE["text"],
+                va="center",
+            )
+        # Least-squares fit line spanning the observed x range.
+        if len(x) >= 2 and x.std() > 1e-9:
+            slope, intercept = np.polyfit(x, y, 1)
+            xs = np.array([x.min(), x.max()])
+            axes[1].plot(
+                xs,
+                slope * xs + intercept,
+                color=PALETTE["accent_orange"],
+                linewidth=1.4,
+                alpha=0.8,
+                label="least-squares fit",
+            )
+            axes[1].legend(loc="lower right", framealpha=0.85, fontsize=9)
+        r, p_val = _pearson_r_with_p(x, y)
+        axes[1].set_xlabel("Effective number of champions")
+        axes[1].set_ylabel("Win rate")
+        axes[1].set_title("Pool size vs win rate")
+        if np.isnan(r):
+            sub = "Not enough data to compute Pearson correlation."
+        else:
+            sub = f"Pearson r={r:.2f}, p={p_val:.3f}. Does pool size correlate with WR?"
+        _subtitle(axes[1], sub)
+        _polish_ax(axes[1])
+
+        fig.tight_layout()
+        return fig
+
+    # --- per-person view ---------------------------------------------------
+    d = _filter_player(df, player)
+    n = len(d)
+    if n < 50:
+        return _empty_figure(f"Need >=50 games for pool analysis ({n} games)")
+
+    counts = d["champion"].value_counts()
+    total = int(counts.sum())
+    probs = counts.values / total
+    probs = probs[probs > 0]
+    h = float(-(probs * np.log(probs)).sum())
+    eff_n = float(np.exp(h))
+    k_distinct = int((counts > 0).sum())
+    top3_pct = float(counts.head(3).sum()) / total
+    top10_pct = float(counts.head(10).sum()) / total
+
+    top = counts.head(30)
+    cum_frac = top.cumsum().values / total
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+    x_pos = np.arange(len(top))
+    ax.bar(x_pos, top.values, color=PALETTE["primary"], alpha=0.85, width=0.78)
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels(top.index, rotation=45, ha="right", fontsize=9)
+    ax.set_ylabel("Games on champion")
+    name = _display_label(player) or "this player"
+    ax.set_title(f"Champion pool - {name}")
+    _subtitle(
+        ax,
+        f"Effective N = {eff_n:.1f}, distinct = {k_distinct}, "
+        f"top3 cover {top3_pct:.0%}, top10 cover {top10_pct:.0%}.",
+    )
+    _polish_ax(ax)
+
+    ax2 = ax.twinx()
+    ax2.plot(
+        x_pos,
+        cum_frac,
+        color=PALETTE["accent_orange"],
+        linewidth=1.6,
+        marker="o",
+        markersize=3.5,
+        label="cumulative share",
+    )
+    ax2.set_ylim(0, 1.02)
+    ax2.set_ylabel("Cumulative share of games")
+    ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
+    ax2.grid(False)
+    ax2.spines["top"].set_visible(False)
+
+    # Annotate threshold crossings. With heavy concentration these can fall
+    # on adjacent bars, so y-stagger keeps the labels readable.
+    y_offsets = [0.08, 0.16, 0.24]
+    for threshold, y_off in zip((0.5, 0.8, 1.0), y_offsets, strict=False):
+        hit = np.where(cum_frac >= threshold - 1e-9)[0]
+        if len(hit) == 0:
+            continue
+        idx = int(hit[0])
+        ax2.axvline(idx, color=PALETTE["muted"], linewidth=0.7, linestyle=":", alpha=0.7)
+        ax2.annotate(
+            f"{threshold:.0%} at {top.index[idx]}",
+            xy=(idx, cum_frac[idx]),
+            xytext=(idx + 0.4, min(1.0, cum_frac[idx]) - y_off),
+            fontsize=9,
+            color=PALETTE["muted"],
+            arrowprops={
+                "arrowstyle": "-",
+                "color": PALETTE["muted"],
+                "linewidth": 0.7,
+                "alpha": 0.6,
+            },
+        )
+
+    fig.tight_layout()
+    return fig
+
+
+# --- 39. Champion mastery learning curve -----------------------------------
+
+_MASTERY_BUCKET_EDGES = [1, 11, 21, 51, np.inf]
+_MASTERY_BUCKET_LABELS = ["1-10", "11-20", "21-50", "51+"]
+_MASTERY_MIN_GAMES_PER_PAIR = 30
+_MASTERY_MIN_GAMES_PER_BUCKET = 5
+
+
+def _mastery_pair_buckets(df: pd.DataFrame) -> pd.DataFrame:
+    """Per-(person, champion) game-on-champ index and bucket assignment.
+
+    Re-cumcounts on ``(person, champion)`` rather than reusing the
+    prebuilt ``nth_on_champ`` (which is per-Riot-account — a player
+    with two smurfs would otherwise restart their Zac counter on each).
+    Returns rows of qualifying pairs only (>= MIN_GAMES_PER_PAIR games).
+    """
+    d = df[["person", "champion", "game_start", "win"]].copy()
+    d = d.sort_values(["person", "champion", "game_start"]).reset_index(drop=True)
+    d["nth"] = d.groupby(["person", "champion"]).cumcount() + 1
+
+    games_per_pair = d.groupby(["person", "champion"])["win"].transform("size")
+    d = d[games_per_pair >= _MASTERY_MIN_GAMES_PER_PAIR].copy()
+    if d.empty:
+        return d
+
+    d["bucket"] = pd.cut(
+        d["nth"],
+        bins=_MASTERY_BUCKET_EDGES,
+        labels=_MASTERY_BUCKET_LABELS,
+        right=False,
+        ordered=True,
+    )
+    return d
+
+
+def _mastery_pair_bucket_wr(d: pd.DataFrame) -> pd.DataFrame:
+    """Per-(person, champion, bucket) WR for buckets with >=5 games."""
+    grp = d.groupby(["person", "champion", "bucket"], observed=True).agg(
+        games=("win", "size"), wins=("win", "sum")
+    )
+    grp = grp[grp["games"] >= _MASTERY_MIN_GAMES_PER_BUCKET].reset_index()
+    grp["wr"] = grp["wins"] / grp["games"]
+    return grp
+
+
+def _mastery_bootstrap_ci(values: np.ndarray, n_boot: int = 1000) -> tuple[float, float]:
+    """2.5 / 97.5 percentile of resampled means. Returns (lo, hi)."""
+    if len(values) == 0:
+        return (np.nan, np.nan)
+    rng = np.random.default_rng(20240524)
+    n = len(values)
+    means = np.empty(n_boot)
+    for i in range(n_boot):
+        sample = rng.choice(values, size=n, replace=True)
+        means[i] = sample.mean()
+    return (float(np.percentile(means, 2.5)), float(np.percentile(means, 97.5)))
+
+
+def plot_champion_mastery(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Champion mastery learning curve — does WR improve with reps?
+
+    For each (person, champion) pair with >=30 games we sort by game
+    start, label each game 1, 2, 3, ... and bucket by play count
+    (1-10, 11-20, 21-50, 51+). Per bucket we compute that pair's WR
+    on that champ (>=5 games per bucket to count). Aggregate is the
+    macro mean of those per-pair WR values per bucket.
+    """
+    pair_rows = _mastery_pair_buckets(df)
+    if _is_aggregate(player):
+        if pair_rows.empty:
+            return _empty_figure("Need >=5 (player, champion) pairs with >=30 games")
+        return _plot_mastery_aggregate(pair_rows)
+
+    label = _display_label(player) or "this player"
+    person = _resolve_person(df, player)
+    if person is None:
+        return _empty_figure(f"No champion with >=30 games for {label}")
+    person_rows = pair_rows[pair_rows["person"] == person]
+    if person_rows.empty:
+        return _empty_figure(f"No champion with >=30 games for {label}")
+    return _plot_mastery_per_person(person_rows, label, player)
+
+
+def _plot_mastery_aggregate(pair_rows: pd.DataFrame) -> plt.Figure:
+    bucket_wr = _mastery_pair_bucket_wr(pair_rows)
+
+    n_pairs_total = bucket_wr[["person", "champion"]].drop_duplicates().shape[0]
+    if n_pairs_total < 5:
+        return _empty_figure("Need >=5 (player, champion) pairs with >=30 games")
+
+    per_bucket = (
+        bucket_wr.groupby("bucket", observed=True)
+        .agg(
+            wr=("wr", "mean"),
+            n_pairs=("wr", "size"),
+            n_games=("games", "sum"),
+        )
+        .reindex(_MASTERY_BUCKET_LABELS)
+    )
+
+    cis: list[tuple[float, float]] = []
+    for bucket in _MASTERY_BUCKET_LABELS:
+        vals = bucket_wr.loc[bucket_wr["bucket"] == bucket, "wr"].to_numpy()
+        cis.append(_mastery_bootstrap_ci(vals))
+    per_bucket["ci_lo"] = [c[0] for c in cis]
+    per_bucket["ci_hi"] = [c[1] for c in cis]
+
+    global_macro = float(bucket_wr["wr"].mean())
+
+    # Paired test: pairs with data in BOTH "first 10" AND ("21-50" or "51+").
+    first = bucket_wr[bucket_wr["bucket"] == "1-10"].set_index(["person", "champion"])
+    late = bucket_wr[bucket_wr["bucket"].isin(["21-50", "51+"])]
+    # Macro WR over pooled "21+" games per pair (weighted by games inside the pair).
+    late_agg = late.groupby(["person", "champion"]).apply(
+        lambda g: pd.Series({"wr_late": g["wins"].sum() / g["games"].sum()})
+    )
+    paired = first[["wr"]].rename(columns={"wr": "wr_early"}).join(late_agg, how="inner")
+    paired_diff = (paired["wr_late"] - paired["wr_early"]).to_numpy()
+    n_paired = len(paired_diff)
+    if n_paired >= 2:
+        mean_diff = float(paired_diff.mean())
+        diff_ci = _mastery_bootstrap_ci(paired_diff)
+        paired_summary = (
+            f"Paired late-minus-early WR: {mean_diff:+.1%} "
+            f"[{diff_ci[0]:+.1%}, {diff_ci[1]:+.1%}], n_pairs={n_paired}."
+        )
+    else:
+        paired_summary = "Not enough pairs spanning early and late buckets for a paired test."
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    x = np.arange(len(_MASTERY_BUCKET_LABELS))
+    means = per_bucket["wr"].to_numpy()
+    lo = per_bucket["ci_lo"].to_numpy()
+    hi = per_bucket["ci_hi"].to_numpy()
+    err_lo = np.where(np.isnan(means), 0.0, means - lo)
+    err_hi = np.where(np.isnan(means), 0.0, hi - means)
+    bar_means = np.where(np.isnan(means), 0.0, means)
+
+    ax.bar(
+        x,
+        bar_means,
+        color=PALETTE["primary"],
+        width=0.62,
+        zorder=2,
+    )
+    ax.errorbar(
+        x,
+        bar_means,
+        yerr=[err_lo, err_hi],
+        fmt="none",
+        ecolor=PALETTE["muted"],
+        elinewidth=1.0,
+        capsize=4,
+        alpha=0.7,
+        zorder=3,
+    )
+
+    _baseline(ax, y=global_macro, label=f"Global macro WR ({global_macro:.0%})")
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"Games {b}" for b in _MASTERY_BUCKET_LABELS])
+    ax.set_ylabel("Macro-averaged win rate")
+    ax.set_xlabel("Game-on-champion bucket")
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
+    top_hi = float(np.nanmax(np.where(np.isnan(hi), 0.0, hi))) if len(hi) else 0.6
+    ax.set_ylim(0, max(0.85, top_hi + 0.08))
+
+    ax.set_title("Champion mastery - does WR improve with practice?")
+    _subtitle(
+        ax,
+        "Macro-averaged across all (player, champion) pairs with >=30 games. "
+        "Each (pair, bucket) contributes one WR value to the mean. " + paired_summary,
+    )
+
+    for xi, bucket in enumerate(_MASTERY_BUCKET_LABELS):
+        wr = per_bucket.loc[bucket, "wr"]
+        n_pairs = per_bucket.loc[bucket, "n_pairs"]
+        n_games = per_bucket.loc[bucket, "n_games"]
+        if pd.isna(wr):
+            ax.annotate(
+                "no data",
+                xy=(xi, 0.02),
+                ha="center",
+                va="bottom",
+                fontsize=9,
+                color=PALETTE["muted"],
+            )
+            continue
+        ax.annotate(
+            f"{wr:.0%}  pairs={int(n_pairs)}  games={int(n_games)}",
+            xy=(xi, float(wr)),
+            xytext=(0, 6),
+            textcoords="offset points",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+            color=PALETTE["text"],
+        )
+
+    ax.legend(loc="upper left", fontsize=9)
+    _polish_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
+def _plot_mastery_per_person(
+    person_rows: pd.DataFrame, label: str, player: str | None
+) -> plt.Figure:
+    bucket_wr = _mastery_pair_bucket_wr(person_rows)
+    if bucket_wr.empty:
+        return _empty_figure(f"No champion with >=30 games for {label}")
+
+    # Order champions by total qualifying games desc — colour cycle gets
+    # assigned to the most-played first so the busiest curves dominate.
+    champs_by_games = (
+        bucket_wr.groupby("champion")["games"].sum().sort_values(ascending=False).index.tolist()
+    )
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+    x_pos = {b: i for i, b in enumerate(_MASTERY_BUCKET_LABELS)}
+
+    # Track end-of-line label positions so we can nudge collisions.
+    end_labels: list[tuple[float, float, str, str]] = []  # (x, y, name, colour)
+    for idx, champ in enumerate(champs_by_games):
+        sub = bucket_wr[bucket_wr["champion"] == champ].sort_values("bucket")
+        xs = [x_pos[b] for b in sub["bucket"]]
+        ys = sub["wr"].to_numpy()
+        colour = SERIES_CYCLE[idx % len(SERIES_CYCLE)]
+        ax.plot(
+            xs,
+            ys,
+            color=colour,
+            linewidth=2.0,
+            marker="o",
+            markersize=5,
+            alpha=0.9,
+            label=champ,
+        )
+        end_labels.append((float(xs[-1]), float(ys[-1]), champ, colour))
+
+    _baseline(ax, y=0.5, label="50%")
+    ax.set_xticks(list(x_pos.values()))
+    ax.set_xticklabels([f"Games {b}" for b in _MASTERY_BUCKET_LABELS])
+    ax.set_ylim(0, 1.0)
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
+    ax.set_xlabel("Game-on-champion bucket")
+    ax.set_ylabel("Win rate")
+    ax.set_title(_title("Mastery curves", player))
+    _subtitle(ax, "WR by play-count bucket for your most-played champions (>=30 games each).")
+
+    # Pad right so end-of-line annotations don't fall off the axes.
+    ax.set_xlim(-0.4, len(_MASTERY_BUCKET_LABELS) - 1 + 0.9)
+
+    # Greedy y-nudge: sort by y, push the next one down if it overlaps.
+    # The annotation's anchor stays at the true (x_end, y_end); only the
+    # text label position is shifted in data coordinates with a thin
+    # leader line so the reader can still match label -> endpoint.
+    end_labels.sort(key=lambda t: t[1], reverse=True)
+    last_y = float("inf")
+    min_gap = 0.04
+    for x_end, y_end, name, colour in end_labels:
+        text_y = min(y_end, last_y - min_gap)
+        last_y = text_y
+        needs_leader = abs(text_y - y_end) > 1e-3
+        ax.annotate(
+            name,
+            xy=(x_end, y_end),
+            xytext=(x_end + 0.08, text_y),
+            textcoords="data",
+            ha="left",
+            va="center",
+            fontsize=9,
+            color=colour,
+            arrowprops=(
+                {
+                    "arrowstyle": "-",
+                    "color": colour,
+                    "linewidth": 0.6,
+                    "alpha": 0.5,
+                }
+                if needs_leader
+                else None
+            ),
+        )
+
+    _polish_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
+# --- 40. Champion rust effect ----------------------------------------------
+
+_RUST_BUCKET_EDGES = [0, 1, 3, 7, 30, 90, np.inf]
+_RUST_BUCKET_LABELS = ["<1d", "1-3d", "3-7d", "7-30d", "30-90d", ">90d"]
+_RUST_MIN_GAMES_PER_PAIR = 10
+_RUST_MIN_SAMPLES_PER_BUCKET = 3
+_RUST_MIN_GAMES_PER_PERSON = 100
+
+
+def _rust_pair_buckets(df: pd.DataFrame) -> pd.DataFrame:
+    """Per-game rust_days + bucket for (person, champion) pairs with >=10 games.
+
+    Sort by (person, champion, game_start) then shift to get the previous
+    game on THAT champion for THAT person. The first game on a champion
+    has no rust (NaN) and is dropped.
+    """
+    d = df[["person", "champion", "game_start", "win"]].copy()
+    d = d.sort_values(["person", "champion", "game_start"]).reset_index(drop=True)
+
+    games_per_pair = d.groupby(["person", "champion"])["win"].transform("size")
+    d = d[games_per_pair >= _RUST_MIN_GAMES_PER_PAIR].copy()
+    if d.empty:
+        return d
+
+    prev = d.groupby(["person", "champion"])["game_start"].shift(1)
+    d["rust_days"] = (d["game_start"] - prev) / pd.Timedelta(days=1)
+    d = d.dropna(subset=["rust_days"]).copy()
+    if d.empty:
+        return d
+
+    d["bucket"] = pd.cut(
+        d["rust_days"],
+        bins=_RUST_BUCKET_EDGES,
+        labels=_RUST_BUCKET_LABELS,
+        right=False,
+        ordered=True,
+    )
+    return d
+
+
+def _rust_pair_bucket_wr(d: pd.DataFrame) -> pd.DataFrame:
+    """Per-(person, champion, bucket) WR, restricted to cells with >=3 samples."""
+    grp = d.groupby(["person", "champion", "bucket"], observed=True).agg(
+        games=("win", "size"), wins=("win", "sum")
+    )
+    grp = grp[grp["games"] >= _RUST_MIN_SAMPLES_PER_BUCKET].reset_index()
+    grp["wr"] = grp["wins"] / grp["games"]
+    return grp
+
+
+def _rust_bootstrap_ci(values: np.ndarray, n_boot: int = 1000) -> tuple[float, float]:
+    """2.5 / 97.5 percentile of resampled means. Returns (lo, hi)."""
+    if len(values) == 0:
+        return (np.nan, np.nan)
+    rng = np.random.default_rng(20260524)
+    n = len(values)
+    means = np.empty(n_boot)
+    for i in range(n_boot):
+        sample = rng.choice(values, size=n, replace=True)
+        means[i] = sample.mean()
+    return (float(np.percentile(means, 2.5)), float(np.percentile(means, 97.5)))
+
+
+def plot_champion_rust(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Champion rust effect — does time-off-a-champion hurt WR?
+
+    For each (person, champion) pair with >=10 games we compute the gap
+    since the previous game on that champion, bucket it, and roll up WR
+    per bucket. Aggregate is the macro mean of (pair, bucket) WRs across
+    pairs with >=3 samples in that bucket. Per-person view pools games
+    across all the focal player's champions and uses Wilson CIs.
+    """
+    pair_rows = _rust_pair_buckets(df)
+    if _is_aggregate(player):
+        if pair_rows.empty:
+            return _empty_figure("Need >=5 (player, champion) pairs with >=10 games")
+        return _plot_rust_aggregate(pair_rows)
+
+    label = _display_label(player) or "this player"
+    person = _resolve_person(df, player)
+    if person is None:
+        return _empty_figure(f"No games for {label}")
+    person_total_games = int((df["person"] == person).sum())
+    if person_total_games < _RUST_MIN_GAMES_PER_PERSON:
+        return _empty_figure(f"Need >=100 games for rust analysis ({person_total_games} games)")
+    person_rows = pair_rows[pair_rows["person"] == person]
+    if person_rows.empty:
+        return _empty_figure(f"No champion with >=10 games for {label}")
+    return _plot_rust_per_person(person_rows, label, player)
+
+
+def _plot_rust_aggregate(pair_rows: pd.DataFrame) -> plt.Figure:
+    bucket_wr = _rust_pair_bucket_wr(pair_rows)
+
+    n_pairs_total = bucket_wr[["person", "champion"]].drop_duplicates().shape[0]
+    if n_pairs_total < 5:
+        return _empty_figure("Need >=5 (player, champion) pairs with >=10 games")
+
+    per_bucket = (
+        bucket_wr.groupby("bucket", observed=True)
+        .agg(
+            wr=("wr", "mean"),
+            n_pairs=("wr", "size"),
+            n_games=("games", "sum"),
+        )
+        .reindex(_RUST_BUCKET_LABELS)
+    )
+
+    cis: list[tuple[float, float]] = []
+    for bucket in _RUST_BUCKET_LABELS:
+        vals = bucket_wr.loc[bucket_wr["bucket"] == bucket, "wr"].to_numpy()
+        cis.append(_rust_bootstrap_ci(vals))
+    per_bucket["ci_lo"] = [c[0] for c in cis]
+    per_bucket["ci_hi"] = [c[1] for c in cis]
+
+    global_macro = float(bucket_wr["wr"].mean())
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    x = np.arange(len(_RUST_BUCKET_LABELS))
+    means = per_bucket["wr"].to_numpy(dtype=float)
+    lo = per_bucket["ci_lo"].to_numpy(dtype=float)
+    hi = per_bucket["ci_hi"].to_numpy(dtype=float)
+    valid = ~np.isnan(means)
+
+    ax.plot(
+        x[valid],
+        means[valid],
+        color=PALETTE["primary"],
+        linewidth=2.0,
+        marker="o",
+        markersize=7,
+        zorder=3,
+    )
+    err_lo = np.where(np.isnan(means), 0.0, means - lo)
+    err_hi = np.where(np.isnan(means), 0.0, hi - means)
+    ax.errorbar(
+        x[valid],
+        means[valid],
+        yerr=[err_lo[valid], err_hi[valid]],
+        **WHISKER_STYLE,
+        zorder=2,
+    )
+
+    _baseline(ax, y=global_macro, label=f"Overall macro WR ({global_macro:.0%})")
+    ax.set_xticks(x)
+    ax.set_xticklabels(_RUST_BUCKET_LABELS)
+    ax.set_xlabel("Days since you last played this champion")
+    ax.set_ylabel("Macro-averaged win rate")
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
+    if np.any(valid):
+        top_hi = float(np.nanmax(hi[valid]))
+        bot_lo = float(np.nanmin(lo[valid]))
+    else:
+        top_hi, bot_lo = 0.6, 0.4
+    ax.set_ylim(max(0.0, bot_lo - 0.08), min(1.0, top_hi + 0.10))
+
+    ax.set_title("Champion rust - does time-off-a-champion hurt WR?")
+    _subtitle(
+        ax,
+        "Macro-averaged WR by days since you last played the same champion. "
+        "Each (player, champion) pair with >=10 games contributes; "
+        "per-bucket cells need >=3 samples to enter the mean.",
+    )
+
+    for xi, bucket in enumerate(_RUST_BUCKET_LABELS):
+        wr = per_bucket.loc[bucket, "wr"]
+        n_pairs = per_bucket.loc[bucket, "n_pairs"]
+        if pd.isna(wr):
+            ax.annotate(
+                "no data",
+                xy=(xi, ax.get_ylim()[0] + 0.01),
+                ha="center",
+                va="bottom",
+                fontsize=9,
+                color=PALETTE["muted"],
+            )
+            continue
+        ax.annotate(
+            f"n={int(n_pairs)}",
+            xy=(xi, float(wr)),
+            xytext=(0, 8),
+            textcoords="offset points",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+            color=PALETTE["text"],
+        )
+
+    ax.legend(loc="upper right", fontsize=9)
+    _polish_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
+def _plot_rust_per_person(person_rows: pd.DataFrame, label: str, player: str | None) -> plt.Figure:
+    # Pool across all of this person's qualifying champions; one WR per
+    # bucket via wins / games (Wilson CI on the binomial proportion).
+    per_bucket = (
+        person_rows.groupby("bucket", observed=True)
+        .agg(games=("win", "size"), wins=("win", "sum"))
+        .reindex(_RUST_BUCKET_LABELS)
+        .fillna(0)
+        .astype(int)
+    )
+    per_bucket["wr"] = np.where(
+        per_bucket["games"] > 0, per_bucket["wins"] / per_bucket["games"], np.nan
+    )
+
+    cis = [
+        wilson_ci(int(w), int(g)) if g > 0 else (float("nan"), float("nan"))
+        for w, g in zip(per_bucket["wins"], per_bucket["games"], strict=False)
+    ]
+    per_bucket["ci_lo"] = [c[0] for c in cis]
+    per_bucket["ci_hi"] = [c[1] for c in cis]
+
+    total_wins = int(per_bucket["wins"].sum())
+    total_games = int(per_bucket["games"].sum())
+    overall = total_wins / total_games if total_games > 0 else float("nan")
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    x = np.arange(len(_RUST_BUCKET_LABELS))
+    means = per_bucket["wr"].to_numpy(dtype=float)
+    lo = per_bucket["ci_lo"].to_numpy(dtype=float)
+    hi = per_bucket["ci_hi"].to_numpy(dtype=float)
+    valid = ~np.isnan(means)
+
+    ax.plot(
+        x[valid],
+        means[valid],
+        color=PALETTE["primary"],
+        linewidth=2.0,
+        marker="o",
+        markersize=7,
+        zorder=3,
+    )
+    err_lo = np.where(np.isnan(means), 0.0, means - lo)
+    err_hi = np.where(np.isnan(means), 0.0, hi - means)
+    ax.errorbar(
+        x[valid],
+        means[valid],
+        yerr=[err_lo[valid], err_hi[valid]],
+        **WHISKER_STYLE,
+        zorder=2,
+    )
+
+    if not np.isnan(overall):
+        _baseline(ax, y=overall, label=f"Personal WR ({overall:.0%})")
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(_RUST_BUCKET_LABELS)
+    ax.set_xlabel("Days since you last played this champion")
+    ax.set_ylabel("Win rate")
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
+    if np.any(valid):
+        top_hi = float(np.nanmax(hi[valid]))
+        bot_lo = float(np.nanmin(lo[valid]))
+    else:
+        top_hi, bot_lo = 0.6, 0.4
+    ax.set_ylim(max(0.0, bot_lo - 0.08), min(1.0, top_hi + 0.10))
+
+    ax.set_title(_title("Champion rust", player))
+    _subtitle(ax, "Your WR by days since last playing the same champion.")
+
+    for xi, bucket in enumerate(_RUST_BUCKET_LABELS):
+        wr = per_bucket.loc[bucket, "wr"]
+        n = int(per_bucket.loc[bucket, "games"])
+        if pd.isna(wr):
+            ax.annotate(
+                "no data",
+                xy=(xi, ax.get_ylim()[0] + 0.01),
+                ha="center",
+                va="bottom",
+                fontsize=9,
+                color=PALETTE["muted"],
+            )
+            continue
+        ax.annotate(
+            f"n={n}",
+            xy=(xi, float(wr)),
+            xytext=(0, 8),
+            textcoords="offset points",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+            color=PALETTE["text"],
+        )
+
+    ax.legend(loc="upper right", fontsize=9)
+    _polish_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
+# --- DOW x time-of-day WR heatmap -----------------------------------------
+
+
+#: Order matters for the 4-column heatmap layout.
+_HOUR_BUCKET_LABELS = [
+    "Morning (5-12)",
+    "Afternoon (12-18)",
+    "Evening (18-22)",
+    "Night (22-5)",
+]
+
+
+def _hour_bucket(hour: int) -> str:
+    """Map 0-23 hour-of-day to one of the four named buckets.
+
+    Night wraps midnight (22, 23, 0, 1, 2, 3, 4) so ``pd.cut`` won't fit;
+    a tiny lookup is clearer than a ranged categorical with a join.
+    """
+    if 5 <= hour < 12:
+        return "Morning (5-12)"
+    if 12 <= hour < 18:
+        return "Afternoon (12-18)"
+    if 18 <= hour < 22:
+        return "Evening (18-22)"
+    return "Night (22-5)"
+
+
+def plot_dow_hour_heatmap(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Win-rate heatmap on the day-of-week x time-of-day grid.
+
+    Coarser bucketing than the 24x7 hour heatmap so each cell has enough
+    samples to colour confidently. Aggregate cells need >=30 games AND
+    >=3 contributing players; per-person cells need >=15 games. Colour
+    encodes the gap to the relevant baseline (overall macro WR for
+    aggregate, personal overall WR for the per-person view), clipped at
+    +/- 10pp and mapped on RdYlGn so red is below baseline and green
+    above.
+    """
+    d = _filter_player(df, player).copy()
+    if d.empty:
+        return _empty_figure("No games to plot")
+
+    is_aggregate = _is_aggregate(player)
+    label = _display_label(player)
+
+    if not is_aggregate:
+        person_total = len(d)
+        if person_total < 100:
+            return _empty_figure(f"Need >=100 games for heatmap ({person_total} games)")
+
+    d["hour_bucket"] = d["hour"].map(_hour_bucket)
+    d["hour_bucket"] = pd.Categorical(
+        d["hour_bucket"], categories=_HOUR_BUCKET_LABELS, ordered=True
+    )
+
+    n_rows = len(DOW_LABELS)
+    n_cols = len(_HOUR_BUCKET_LABELS)
+    wr_grid = np.full((n_rows, n_cols), np.nan)
+    n_grid = np.zeros((n_rows, n_cols), dtype=int)
+    qualified = np.zeros((n_rows, n_cols), dtype=bool)
+
+    if is_aggregate:
+        per_person_cell = (
+            d.groupby(["dow", "hour_bucket", "person"], observed=True)
+            .agg(games=("win", "size"), wins=("win", "sum"))
+            .reset_index()
+        )
+        per_person_cell["wr"] = per_person_cell["wins"] / per_person_cell["games"]
+        cells = (
+            per_person_cell.groupby(["dow", "hour_bucket"], observed=True)
+            .agg(
+                wr=("wr", "mean"),
+                n_games=("games", "sum"),
+                n_players=("person", "nunique"),
+            )
+            .reset_index()
+        )
+        # Overall baseline: macro-average across people of their pooled WR.
+        per_person_overall = d.groupby("person")["win"].mean()
+        baseline = float(per_person_overall.mean())
+
+        for _, row in cells.iterrows():
+            r = int(row["dow"])
+            c = _HOUR_BUCKET_LABELS.index(str(row["hour_bucket"]))
+            n_grid[r, c] = int(row["n_games"])
+            if int(row["n_games"]) >= 30 and int(row["n_players"]) >= 3:
+                wr_grid[r, c] = float(row["wr"])
+                qualified[r, c] = True
+
+        if not qualified.any():
+            return _empty_figure("Not enough games for any cell")
+
+        title = "When does the group win? - DOW x time heatmap"
+        subtitle = (
+            "Macro-averaged WR per cell, coloured by gap to overall WR. "
+            "Cells with <30 games or <3 contributing players shown grey."
+        )
+    else:
+        cells = (
+            d.groupby(["dow", "hour_bucket"], observed=True)
+            .agg(games=("win", "size"), wins=("win", "sum"))
+            .reset_index()
+        )
+        cells["wr"] = cells["wins"] / cells["games"]
+        baseline = float(d["win"].mean())
+
+        for _, row in cells.iterrows():
+            r = int(row["dow"])
+            c = _HOUR_BUCKET_LABELS.index(str(row["hour_bucket"]))
+            n_grid[r, c] = int(row["games"])
+            if int(row["games"]) >= 15:
+                wr_grid[r, c] = float(row["wr"])
+                qualified[r, c] = True
+
+        title = f"When does {label} win? - DOW x time heatmap"
+        subtitle = (
+            "WR per cell, coloured by gap to your overall WR. " "Cells with <15 games shown grey."
+        )
+
+    # Delta in percentage points, clipped at +/- 10pp.
+    delta_pp = (wr_grid - baseline) * 100.0
+    delta_clipped = np.clip(delta_pp, -10.0, 10.0)
+
+    fig, ax = plt.subplots(figsize=(8, 7))
+    cmap = plt.get_cmap("RdYlGn").copy()
+    cmap.set_bad(color="#d9d9d9")
+
+    masked = np.ma.array(delta_clipped, mask=~qualified)
+    im = ax.imshow(
+        masked,
+        aspect="auto",
+        cmap=cmap,
+        vmin=-10.0,
+        vmax=10.0,
+        origin="upper",
+    )
+
+    ax.set_xticks(range(n_cols))
+    ax.set_xticklabels(_HOUR_BUCKET_LABELS, rotation=20, ha="right")
+    ax.set_yticks(range(n_rows))
+    ax.set_yticklabels(DOW_LABELS)
+    ax.set_xlabel("Time of day (local)")
+    ax.set_ylabel("Day of week")
+    ax.set_title(title)
+    _subtitle(ax, subtitle)
+    ax.grid(False)
+    ax.tick_params(axis="both", which="both", length=0)
+
+    for r in range(n_rows):
+        for c in range(n_cols):
+            if qualified[r, c]:
+                # Text colour: black on the lighter middle of the cmap,
+                # white at the extremes where the cmap goes saturated.
+                intensity = abs(delta_clipped[r, c])
+                txt_color = "white" if intensity >= 7.5 else PALETTE["text"]
+                ax.text(
+                    c,
+                    r,
+                    f"{wr_grid[r, c]:.0%}\nn={n_grid[r, c]}",
+                    ha="center",
+                    va="center",
+                    fontsize=8,
+                    color=txt_color,
+                )
+            else:
+                ax.text(
+                    c,
+                    r,
+                    "-",
+                    ha="center",
+                    va="center",
+                    fontsize=12,
+                    color=PALETTE["muted"],
+                )
+
+    cbar = fig.colorbar(im, ax=ax, label="Delta vs baseline (pp)", shrink=0.85, pad=0.03)
+    cbar.outline.set_visible(False)
+    cbar.ax.axhline(0.0, color=PALETTE["muted"], linewidth=0.8, alpha=0.6)
+
+    fig.tight_layout()
+    return fig
+
+
+# --- 42. Same-champion behaviour after win vs after loss -------------------
+
+_SAME_CHAMP_MIN_GAMES = 100
+_SAME_CHAMP_BOOT = 2000
+
+
+def _same_champ_per_player(df: pd.DataFrame) -> pd.DataFrame:
+    """For each game, label whether the previous game (same person) used the
+    same champion, and what the outcome of that previous game was. Returns
+    per-person conditional proportions and sample sizes.
+    """
+    d = df.sort_values(["person", "game_start"]).reset_index(drop=True)
+    d = d.assign(
+        prev_champion=d.groupby("person")["champion"].shift(1),
+        prev_win=d.groupby("person")["win"].shift(1),
+    )
+    d = d.dropna(subset=["prev_win"]).copy()
+    d["prev_win"] = d["prev_win"].astype(int)
+    d["same_champion"] = (d["champion"] == d["prev_champion"]).astype(int)
+
+    rows = []
+    for person, g in d.groupby("person", sort=False):
+        total = len(g)
+        wins = g[g["prev_win"] == 1]
+        losses = g[g["prev_win"] == 0]
+        n_w, n_l = len(wins), len(losses)
+        rows.append(
+            {
+                "person": person,
+                "total_games": total,
+                "n_after_win": n_w,
+                "n_after_loss": n_l,
+                "same_after_win": int(wins["same_champion"].sum()),
+                "same_after_loss": int(losses["same_champion"].sum()),
+                "p_same_win": float(wins["same_champion"].mean()) if n_w > 0 else float("nan"),
+                "p_same_loss": float(losses["same_champion"].mean()) if n_l > 0 else float("nan"),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _chi_square_2x2_p(a: int, b: int, c: int, d_: int) -> float:
+    """Pearson chi-square p-value for a 2x2 contingency table, df=1.
+
+    Returns NaN when any expected cell is 0 (test undefined).
+    The df=1 survival function reduces to erfc(sqrt(chi2/2)).
+    """
+    n = a + b + c + d_
+    if n == 0:
+        return float("nan")
+    row1, row2 = a + b, c + d_
+    col1, col2 = a + c, b + d_
+    if row1 == 0 or row2 == 0 or col1 == 0 or col2 == 0:
+        return float("nan")
+    chi2 = 0.0
+    for obs, (r, col) in zip(
+        (a, b, c, d_),
+        ((row1, col1), (row1, col2), (row2, col1), (row2, col2)),
+        strict=True,
+    ):
+        exp = r * col / n
+        chi2 += (obs - exp) ** 2 / exp
+    return math.erfc(math.sqrt(chi2 / 2.0))
+
+
+def _paired_bootstrap_diff_ci(
+    p_win: np.ndarray, p_loss: np.ndarray, n_boot: int = _SAME_CHAMP_BOOT
+) -> tuple[float, float, float]:
+    """Paired bootstrap (resample players with replacement) for the macro
+    mean difference P(same|win) - P(same|loss). Returns (mean_diff, lo, hi).
+    """
+    n = len(p_win)
+    if n == 0:
+        return (float("nan"), float("nan"), float("nan"))
+    rng = np.random.default_rng(20260524)
+    diffs = np.empty(n_boot)
+    for i in range(n_boot):
+        idx = rng.integers(0, n, size=n)
+        diffs[i] = p_win[idx].mean() - p_loss[idx].mean()
+    return (
+        float(p_win.mean() - p_loss.mean()),
+        float(np.percentile(diffs, 2.5)),
+        float(np.percentile(diffs, 97.5)),
+    )
+
+
+def plot_same_champ_behavior(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Same-champion behaviour conditional on previous-game outcome.
+
+    Aggregate view: per-player P(same|win) vs P(same|loss), horizontal grouped
+    bars sorted by total games descending. A summary row at the top shows
+    the macro mean of each conditional with a paired-bootstrap 95% CI on the
+    win-minus-loss difference.
+
+    Per-person view: two-bar chart with Wilson 95% CIs and a chi-square
+    p-value on the 2x2 same/different x prev-win/prev-loss table.
+    """
+    per_player = _same_champ_per_player(df)
+
+    if _is_aggregate(player):
+        qualifying = per_player[
+            (per_player["total_games"] >= _SAME_CHAMP_MIN_GAMES)
+            & (per_player["n_after_win"] > 0)
+            & (per_player["n_after_loss"] > 0)
+        ].copy()
+        if len(qualifying) < 3:
+            return _empty_figure("Need >=3 players with >=100 games")
+        return _plot_same_champ_aggregate(qualifying)
+
+    label = _display_label(player) or "this player"
+    person = _resolve_person(df, player)
+    if person is None:
+        return _empty_figure(f"No games for {label}")
+    row = per_player[per_player["person"] == person]
+    if row.empty:
+        return _empty_figure(f"No games for {label}")
+    total = int(row["total_games"].iloc[0])
+    if total < _SAME_CHAMP_MIN_GAMES:
+        return _empty_figure(f"Need >=100 games ({total} games)")
+    return _plot_same_champ_per_person(row.iloc[0], label)
+
+
+def _plot_same_champ_aggregate(qualifying: pd.DataFrame) -> plt.Figure:
+    qualifying = qualifying.sort_values("total_games", ascending=False).reset_index(drop=True)
+    p_win = qualifying["p_same_win"].to_numpy()
+    p_loss = qualifying["p_same_loss"].to_numpy()
+    mean_diff, lo, hi = _paired_bootstrap_diff_ci(p_win, p_loss)
+    macro_win = float(p_win.mean())
+    macro_loss = float(p_loss.mean())
+
+    if mean_diff > 0 and lo > 0:
+        verdict = "ride hot champs"
+    elif mean_diff < 0 and hi < 0:
+        verdict = "comfort-pick after losses"
+    else:
+        verdict = "no detectable difference"
+
+    # One y slot per player + one for the macro summary row at the top.
+    n = len(qualifying)
+    y_players = np.arange(n) + 1  # 1..n
+    y_macro = 0
+    bar_h = 0.36
+
+    fig, ax = plt.subplots(figsize=(10, 7))
+    ax.barh(
+        y_players - bar_h / 2,
+        p_win,
+        height=bar_h,
+        color=PALETTE["primary"],
+        label="P(same | prev win)",
+        zorder=2,
+    )
+    ax.barh(
+        y_players + bar_h / 2,
+        p_loss,
+        height=bar_h,
+        color=PALETTE["loss"],
+        label="P(same | prev loss)",
+        zorder=2,
+    )
+    # Macro summary row at top.
+    ax.barh(y_macro - bar_h / 2, macro_win, height=bar_h, color=PALETTE["primary"], alpha=0.55)
+    ax.barh(y_macro + bar_h / 2, macro_loss, height=bar_h, color=PALETTE["loss"], alpha=0.55)
+    ax.axhline(0.5, color=PALETTE["spine"], linewidth=0.8, alpha=0.6)
+
+    for i, (_, row) in enumerate(qualifying.iterrows()):
+        ax.text(
+            row["p_same_win"] + 0.005,
+            y_players[i] - bar_h / 2,
+            f"{row['p_same_win']:.0%} (n={int(row['n_after_win'])})",
+            va="center",
+            ha="left",
+            fontsize=8,
+            color=PALETTE["text"],
+        )
+        ax.text(
+            row["p_same_loss"] + 0.005,
+            y_players[i] + bar_h / 2,
+            f"{row['p_same_loss']:.0%} (n={int(row['n_after_loss'])})",
+            va="center",
+            ha="left",
+            fontsize=8,
+            color=PALETTE["text"],
+        )
+    ax.text(
+        macro_win + 0.005,
+        y_macro - bar_h / 2,
+        f"{macro_win:.0%} macro",
+        va="center",
+        ha="left",
+        fontsize=8,
+        color=PALETTE["text"],
+        fontweight="bold",
+    )
+    ax.text(
+        macro_loss + 0.005,
+        y_macro + bar_h / 2,
+        f"{macro_loss:.0%} macro",
+        va="center",
+        ha="left",
+        fontsize=8,
+        color=PALETTE["text"],
+        fontweight="bold",
+    )
+
+    yticks = [y_macro, *list(y_players)]
+    yticklabels = ["MACRO MEAN", *[str(p) for p in qualifying["person"].tolist()]]
+    ax.set_yticks(yticks)
+    ax.set_yticklabels(yticklabels)
+    ax.invert_yaxis()
+    ax.set_xlim(0, max(0.8, float(max(p_win.max(), p_loss.max(), macro_win, macro_loss)) + 0.15))
+    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
+    ax.set_xlabel("P(next-game champion same as previous game)")
+    ax.legend(loc="lower right", frameon=False)
+
+    ax.set_title("Same champion after win vs after loss")
+    _subtitle(
+        ax,
+        "P(same champion next game | prev win) vs P(same | prev loss). "
+        f"Macro diff (win-loss) = {mean_diff:+.1%} [95% CI {lo:+.1%}, {hi:+.1%}]; "
+        f"verdict: {verdict}.",
+    )
+    _polish_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
+def _plot_same_champ_per_person(row: pd.Series, label: str) -> plt.Figure:
+    n_w = int(row["n_after_win"])
+    n_l = int(row["n_after_loss"])
+    same_w = int(row["same_after_win"])
+    same_l = int(row["same_after_loss"])
+    p_w = float(row["p_same_win"]) if n_w > 0 else float("nan")
+    p_l = float(row["p_same_loss"]) if n_l > 0 else float("nan")
+
+    ci_w = wilson_ci(same_w, n_w) if n_w > 0 else (float("nan"), float("nan"))
+    ci_l = wilson_ci(same_l, n_l) if n_l > 0 else (float("nan"), float("nan"))
+
+    # 2x2: rows = prev outcome, cols = (same, different)
+    p_val = _chi_square_2x2_p(same_w, n_w - same_w, same_l, n_l - same_l)
+    if math.isnan(p_val):
+        p_text = "p=n/a"
+        interp = "insufficient data for chi-square test"
+    else:
+        p_text = f"p={p_val:.3f}"
+        if p_val < 0.05:
+            if (p_w - p_l) > 0:
+                interp = "rides hot champs (significant)"
+            else:
+                interp = "comfort-picks after losses (significant)"
+        else:
+            interp = "no significant difference"
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    x = np.arange(2)
+    means = np.array([p_w if not math.isnan(p_w) else 0.0, p_l if not math.isnan(p_l) else 0.0])
+    colours = [PALETTE["primary"], PALETTE["loss"]]
+    ax.bar(x, means, color=colours, width=0.55, zorder=2)
+
+    err_lo = np.array(
+        [
+            (p_w - ci_w[0]) if not math.isnan(p_w) else 0.0,
+            (p_l - ci_l[0]) if not math.isnan(p_l) else 0.0,
+        ]
+    )
+    err_hi = np.array(
+        [
+            (ci_w[1] - p_w) if not math.isnan(p_w) else 0.0,
+            (ci_l[1] - p_l) if not math.isnan(p_l) else 0.0,
+        ]
+    )
+    ax.errorbar(x, means, yerr=[err_lo, err_hi], **WHISKER_STYLE, zorder=3)
+
+    # Anchor labels past the whisker top so they don't sit on the error bar.
+    label_ys = means + err_hi + 0.02
+    for i, (mean, n, label_y) in enumerate(zip(means, (n_w, n_l), label_ys, strict=True)):
+        ax.text(
+            i,
+            label_y,
+            f"{mean:.0%}\nn={n}",
+            ha="center",
+            va="bottom",
+            fontsize=10,
+            color=PALETTE["text"],
+        )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(["After win", "After loss"])
+    ax.set_ylabel("P(same champion next game)")
+    ax.set_ylim(0, max(0.6, float(label_ys.max()) + 0.15))
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
+
+    ax.set_title(f"Same-champion behavior - {label}")
+    _subtitle(
+        ax,
+        f"P(same|win)={p_w:.0%} (n={n_w}), P(same|loss)={p_l:.0%} (n={n_l}). "
+        f"Chi-square {p_text} - {interp}.",
+    )
+    _polish_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
+# --- 43. Ride payoff (does riding hot champs actually pay off?) ------------
+
+_RIDE_MIN_GAMES = 100
+_RIDE_MIN_COHORT = 10
+_RIDE_BOOT = 2000
+
+
+def _ride_per_player_cohorts(df: pd.DataFrame) -> pd.DataFrame:
+    """For each game with a previous game on record, label it into one of
+    four cohorts (prev_outcome x same_champion) and aggregate WR per
+    person per cohort. Returns one row per (person, cohort) with wins/n.
+    """
+    d = df.sort_values(["person", "game_start"]).reset_index(drop=True)
+    d = d.assign(
+        prev_champion=d.groupby("person")["champion"].shift(1),
+        prev_win=d.groupby("person")["win"].shift(1),
+    )
+    d = d.dropna(subset=["prev_win"]).copy()
+    d["prev_win"] = d["prev_win"].astype(int)
+    d["same_champion"] = (d["champion"] == d["prev_champion"]).astype(int)
+    # Cohort letter: A=prev_win+same, B=prev_win+diff, C=prev_loss+same,
+    # D=prev_loss+diff. Stored as a categorical for stable ordering.
+    cohort = np.where(
+        d["prev_win"] == 1,
+        np.where(d["same_champion"] == 1, "A", "B"),
+        np.where(d["same_champion"] == 1, "C", "D"),
+    )
+    d["cohort"] = cohort
+
+    grouped = (
+        d.groupby(["person", "cohort"], observed=True)["win"]
+        .agg(["sum", "count"])
+        .rename(columns={"sum": "wins", "count": "n"})
+        .reset_index()
+    )
+    grouped["wr"] = grouped["wins"] / grouped["n"]
+    # Also carry overall total games per person so the caller can apply the
+    # >=100 games threshold without re-grouping.
+    totals = d.groupby("person").size().rename("total_games").reset_index()
+    grouped = grouped.merge(totals, on="person", how="left")
+    return grouped
+
+
+def _ride_cohort_matrix(cohorts: pd.DataFrame) -> pd.DataFrame:
+    """Pivot per-(person, cohort) rows into one row per person with columns
+    wr_A, wr_B, wr_C, wr_D, n_A, n_B, n_C, n_D, total_games. Missing cohort
+    cells become NaN in the WR columns and 0 in the n columns.
+    """
+    wr = cohorts.pivot(index="person", columns="cohort", values="wr")
+    n = cohorts.pivot(index="person", columns="cohort", values="n").fillna(0).astype(int)
+    for letter in ("A", "B", "C", "D"):
+        if letter not in wr.columns:
+            wr[letter] = np.nan
+        if letter not in n.columns:
+            n[letter] = 0
+    wr = wr[["A", "B", "C", "D"]].rename(columns=lambda c: f"wr_{c}")
+    n = n[["A", "B", "C", "D"]].rename(columns=lambda c: f"n_{c}")
+    totals = cohorts.groupby("person")["total_games"].first()
+    out = wr.join(n).join(totals.rename("total_games"))
+    return out.reset_index()
+
+
+def _paired_bootstrap_wr_diff(
+    wr_lhs: np.ndarray,
+    wr_rhs: np.ndarray,
+    n_boot: int = _RIDE_BOOT,
+    seed: int = 20260524,
+) -> tuple[float, float, float]:
+    """Paired bootstrap (resample players with replacement) for the macro
+    mean of per-player WR differences ``wr_lhs - wr_rhs``. Both arrays must
+    be aligned per player and contain no NaNs (caller filters).
+    """
+    n = len(wr_lhs)
+    if n == 0:
+        return (float("nan"), float("nan"), float("nan"))
+    diffs_obs = wr_lhs - wr_rhs
+    rng = np.random.default_rng(seed)
+    boot = np.empty(n_boot)
+    for i in range(n_boot):
+        idx = rng.integers(0, n, size=n)
+        boot[i] = diffs_obs[idx].mean()
+    return (
+        float(diffs_obs.mean()),
+        float(np.percentile(boot, 2.5)),
+        float(np.percentile(boot, 97.5)),
+    )
+
+
+def plot_ride_payoff(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Does riding a hot champion actually pay off?
+
+    Iter 52 showed players ride the same champion ~18pp more after a win.
+    This chart tests whether that behaviour is rewarded: are the WRs
+    higher when you ride hot (cohort A) vs switch off after a win
+    (cohort B), and higher when you comfort-pick after a loss (cohort C)
+    vs try something else (cohort D)?
+
+    Aggregate view: macro mean WR per cohort across players with >=10
+    games in the cohort, with paired-bootstrap 95% CIs on the two
+    differences A-B and C-D.
+
+    Per-person view: that player's WR in each cohort with Wilson 95% CIs
+    and the same two differences.
+    """
+    cohorts = _ride_per_player_cohorts(df)
+
+    if _is_aggregate(player):
+        return _plot_ride_payoff_aggregate(df, cohorts)
+
+    label = _display_label(player) or "this player"
+    person = _resolve_person(df, player)
+    if person is None:
+        return _empty_figure(f"No games for {label}")
+    matrix = _ride_cohort_matrix(cohorts)
+    row = matrix[matrix["person"] == person]
+    if row.empty:
+        return _empty_figure(f"No games for {label}")
+    total = int(row["total_games"].iloc[0])
+    if total < _RIDE_MIN_GAMES:
+        return _empty_figure(f"Need >=100 games ({total} games)")
+    return _plot_ride_payoff_per_person(row.iloc[0], df, person, label)
+
+
+def _plot_ride_payoff_aggregate(df: pd.DataFrame, cohorts: pd.DataFrame) -> plt.Figure:
+    matrix = _ride_cohort_matrix(cohorts)
+    qualifying = matrix[matrix["total_games"] >= _RIDE_MIN_GAMES].copy()
+    if len(qualifying) < 3:
+        return _empty_figure("Need >=3 players with >=100 games")
+
+    # Per-cohort macro means: per-player WR with NaN where n < min_cohort,
+    # then nanmean across players. Pooled n = sum of n in qualifying cells.
+    macro: dict[str, float] = {}
+    pooled_n: dict[str, int] = {}
+    cohort_wr_by_player: dict[str, np.ndarray] = {}
+    for letter in ("A", "B", "C", "D"):
+        wr_col = qualifying[f"wr_{letter}"].astype(float)
+        n_col = qualifying[f"n_{letter}"].astype(int)
+        mask = n_col >= _RIDE_MIN_COHORT
+        wr_valid = wr_col.where(mask)
+        cohort_wr_by_player[letter] = wr_valid.to_numpy()
+        macro[letter] = float(np.nanmean(wr_valid)) if mask.any() else float("nan")
+        pooled_n[letter] = int(n_col[mask].sum())
+
+    # Paired bootstraps: filter independently for the two diffs.
+    def _paired_for(left: str, right: str) -> tuple[float, float, float, int]:
+        left_n = qualifying[f"n_{left}"].astype(int)
+        right_n = qualifying[f"n_{right}"].astype(int)
+        keep = (left_n >= _RIDE_MIN_COHORT) & (right_n >= _RIDE_MIN_COHORT)
+        if keep.sum() < 3:
+            return (float("nan"), float("nan"), float("nan"), int(keep.sum()))
+        lhs = qualifying.loc[keep, f"wr_{left}"].to_numpy(dtype=float)
+        rhs = qualifying.loc[keep, f"wr_{right}"].to_numpy(dtype=float)
+        mean, lo, hi = _paired_bootstrap_wr_diff(lhs, rhs)
+        return (mean, lo, hi, int(keep.sum()))
+
+    ride_mean, ride_lo, ride_hi, ride_n_players = _paired_for("A", "B")
+    comfort_mean, comfort_lo, comfort_hi, comfort_n_players = _paired_for("C", "D")
+
+    # Reference line: overall WR across the qualifying non-first games
+    # (the games actually entering the cohorts).
+    total_n = sum(pooled_n.values())
+    total_wins = 0
+    for letter in ("A", "B", "C", "D"):
+        wr_col = qualifying[f"wr_{letter}"].astype(float)
+        n_col = qualifying[f"n_{letter}"].astype(int)
+        mask = n_col >= _RIDE_MIN_COHORT
+        total_wins += float((wr_col.where(mask) * n_col.where(mask)).sum(skipna=True))
+    overall_wr = total_wins / total_n if total_n > 0 else float("nan")
+
+    title = "Does riding hot champs pay off?"
+    subtitle = (
+        "WR conditional on prev outcome x same-champion. Iter 52 showed players ride "
+        "hot ~18pp more after a win - does the payoff justify it? "
+        f"Ride (A-B) {ride_mean:+.1%} [95% CI {ride_lo:+.1%}, {ride_hi:+.1%}], "
+        f"Comfort (C-D) {comfort_mean:+.1%} [95% CI {comfort_lo:+.1%}, {comfort_hi:+.1%}]."
+    )
+
+    fig = _ride_payoff_figure(
+        macro_a=macro["A"],
+        macro_b=macro["B"],
+        macro_c=macro["C"],
+        macro_d=macro["D"],
+        n_a=pooled_n["A"],
+        n_b=pooled_n["B"],
+        n_c=pooled_n["C"],
+        n_d=pooled_n["D"],
+        ci_a=None,
+        ci_b=None,
+        ci_c=None,
+        ci_d=None,
+        overall_wr=overall_wr,
+        title=title,
+        subtitle=subtitle,
+    )
+    return fig
+
+
+def _plot_ride_payoff_per_person(
+    row: pd.Series, df: pd.DataFrame, person: str, label: str
+) -> plt.Figure:
+    n_a = int(row["n_A"])
+    n_b = int(row["n_B"])
+    n_c = int(row["n_C"])
+    n_d = int(row["n_D"])
+    wr_a = float(row["wr_A"]) if n_a > 0 else float("nan")
+    wr_b = float(row["wr_B"]) if n_b > 0 else float("nan")
+    wr_c = float(row["wr_C"]) if n_c > 0 else float("nan")
+    wr_d = float(row["wr_D"]) if n_d > 0 else float("nan")
+
+    def _ci(wr: float, n: int) -> tuple[float, float] | None:
+        if n <= 0 or math.isnan(wr):
+            return None
+        wins = int(round(wr * n))
+        return wilson_ci(wins, n)
+
+    ci_a = _ci(wr_a, n_a)
+    ci_b = _ci(wr_b, n_b)
+    ci_c = _ci(wr_c, n_c)
+    ci_d = _ci(wr_d, n_d)
+
+    # Overall WR for this person across the non-first games used.
+    overall_wr = (
+        row["wr_A"] * n_a + row["wr_B"] * n_b + row["wr_C"] * n_c + row["wr_D"] * n_d
+    ) / max(1, n_a + n_b + n_c + n_d)
+
+    # Ride / comfort point estimates as differences of two binomial WRs.
+    ride_diff = (wr_a - wr_b) if (n_a > 0 and n_b > 0) else float("nan")
+    comfort_diff = (wr_c - wr_d) if (n_c > 0 and n_d > 0) else float("nan")
+
+    def _diff_ci(wr_l: float, n_l: int, wr_r: float, n_r: int) -> tuple[float, float] | None:
+        if n_l <= 0 or n_r <= 0 or math.isnan(wr_l) or math.isnan(wr_r):
+            return None
+        # Standard error of difference of two independent proportions.
+        var = wr_l * (1 - wr_l) / n_l + wr_r * (1 - wr_r) / n_r
+        if var <= 0:
+            return (wr_l - wr_r, wr_l - wr_r)
+        se = math.sqrt(var)
+        margin = 1.96 * se
+        return (wr_l - wr_r - margin, wr_l - wr_r + margin)
+
+    ride_ci = _diff_ci(wr_a, n_a, wr_b, n_b)
+    comfort_ci = _diff_ci(wr_c, n_c, wr_d, n_d)
+
+    def _fmt_diff(value: float, ci: tuple[float, float] | None) -> str:
+        if math.isnan(value) or ci is None:
+            return "insufficient data"
+        return f"{value:+.1%} [95% CI {ci[0]:+.1%}, {ci[1]:+.1%}]"
+
+    title = f"Riding vs switching - {label}"
+    subtitle = (
+        f"WR conditional on prev outcome x same-champion. "
+        f"Ride (A-B) {_fmt_diff(ride_diff, ride_ci)}, "
+        f"Comfort (C-D) {_fmt_diff(comfort_diff, comfort_ci)}."
+    )
+
+    fig = _ride_payoff_figure(
+        macro_a=wr_a,
+        macro_b=wr_b,
+        macro_c=wr_c,
+        macro_d=wr_d,
+        n_a=n_a,
+        n_b=n_b,
+        n_c=n_c,
+        n_d=n_d,
+        ci_a=ci_a,
+        ci_b=ci_b,
+        ci_c=ci_c,
+        ci_d=ci_d,
+        overall_wr=overall_wr,
+        title=title,
+        subtitle=subtitle,
+    )
+    return fig
+
+
+def _ride_payoff_figure(
+    *,
+    macro_a: float,
+    macro_b: float,
+    macro_c: float,
+    macro_d: float,
+    n_a: int,
+    n_b: int,
+    n_c: int,
+    n_d: int,
+    ci_a: tuple[float, float] | None,
+    ci_b: tuple[float, float] | None,
+    ci_c: tuple[float, float] | None,
+    ci_d: tuple[float, float] | None,
+    overall_wr: float,
+    title: str,
+    subtitle: str,
+) -> plt.Figure:
+    """Shared 2-panel renderer. Left panel = after WIN (cohorts A, B);
+    right panel = after LOSS (cohorts C, D). Pass Wilson CIs to draw
+    whiskers (per-person), or None to skip them (aggregate macro means).
+    """
+    fig, axes = plt.subplots(1, 2, figsize=(10, 6), sharey=True)
+
+    panels = [
+        (
+            axes[0],
+            "After WIN",
+            (macro_a, macro_b),
+            (n_a, n_b),
+            (ci_a, ci_b),
+            (PALETTE["win"], PALETTE["accent_orange"]),
+            ("Same champ\n(ride hot)", "Diff champ\n(switch off)"),
+        ),
+        (
+            axes[1],
+            "After LOSS",
+            (macro_c, macro_d),
+            (n_c, n_d),
+            (ci_c, ci_d),
+            (PALETTE["accent_teal"], PALETTE["loss"]),
+            ("Same champ\n(comfort)", "Diff champ\n(escape cold)"),
+        ),
+    ]
+
+    ymax_cap = 0.0
+    for ax, panel_title, wrs, ns, cis, colours, xlabs in panels:
+        x = np.arange(2)
+        bar_values = np.array([0.0 if math.isnan(v) else v for v in wrs])
+        ax.bar(x, bar_values, color=colours, width=0.55, zorder=2)
+        # Whiskers when CIs are provided (per-person view). Track per-bar
+        # whisker tops so labels can be anchored past them.
+        whisker_tops = list(bar_values)
+        if any(ci is not None for ci in cis):
+            err_lo = []
+            err_hi = []
+            for i_bar, (wr, ci) in enumerate(zip(wrs, cis, strict=True)):
+                if ci is None or math.isnan(wr):
+                    err_lo.append(0.0)
+                    err_hi.append(0.0)
+                else:
+                    err_lo.append(wr - ci[0])
+                    err_hi.append(ci[1] - wr)
+                    whisker_tops[i_bar] = ci[1]
+            ax.errorbar(x, bar_values, yerr=[err_lo, err_hi], **WHISKER_STYLE, zorder=3)
+            for ci in cis:
+                if ci is not None:
+                    ymax_cap = max(ymax_cap, ci[1])
+        for v in wrs:
+            if not math.isnan(v):
+                ymax_cap = max(ymax_cap, v)
+
+        for xi, wr, n, top in zip(x, wrs, ns, whisker_tops, strict=True):
+            if math.isnan(wr) or n == 0:
+                ax.text(
+                    xi,
+                    0.02,
+                    "n/a",
+                    ha="center",
+                    va="bottom",
+                    fontsize=10,
+                    color=PALETTE["muted"],
+                )
+                continue
+            ax.text(
+                xi,
+                float(top) + 0.02,
+                f"{wr:.0%}\nn={n}",
+                ha="center",
+                va="bottom",
+                fontsize=10,
+                color=PALETTE["text"],
+            )
+
+        if not math.isnan(overall_wr):
+            ax.axhline(
+                overall_wr,
+                color=PALETTE["muted"],
+                linewidth=0.8,
+                linestyle=(0, (4, 4)),
+                alpha=0.6,
+                label=f"Overall WR ({overall_wr:.0%})",
+            )
+        ax.set_xticks(x)
+        ax.set_xticklabels(xlabs)
+        ax.set_title(panel_title)
+        ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
+        _polish_ax(ax)
+
+    axes[0].set_ylabel("Win rate")
+    ymax = max(0.75, ymax_cap + 0.18)
+    axes[0].set_ylim(0, ymax)
+    axes[0].legend(loc="upper right", frameon=False, fontsize=9)
+
+    fig.suptitle(title)
+    # Use _subtitle on left axes so subtitle sits under the suptitle area;
+    # but suptitle + per-axes subtitle would collide. Simpler: place the
+    # subtitle as a single figure-level text below the suptitle.
+    # Clear axes titles first so _subtitle on ax[0] doesn't pad the small
+    # panel title. We've already drawn panel titles, so place the caption
+    # at the figure level.
+    fig.text(
+        0.5,
+        0.93,
+        subtitle,
+        ha="center",
+        va="top",
+        fontsize=9.5,
+        color=PALETTE["muted"],
+        style="italic",
+        wrap=True,
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.88))
+    return fig
+
+
+# --- 44. Win-sequence autocorrelation --------------------------------------
+
+# Minimum games for a player's win series to qualify. Below ~200 the
+# Bartlett ±1.96/sqrt(n) band is so wide that lag-k bars rarely cross,
+# which makes the chart misleadingly "all noise".
+_ACF_MIN_GAMES = 200
+
+# Lags we estimate. Beyond ~10 the sample size for the inner sum shrinks
+# noticeably and the cross-player overlap (different career lengths) gets
+# harder to interpret.
+_ACF_MAX_LAG = 10
+
+# Bootstrap iterations for the aggregate per-lag CI ribbon.
+_ACF_BOOTSTRAP = 2000
+
+
+def _win_acf(wins: np.ndarray, max_lag: int = _ACF_MAX_LAG) -> np.ndarray:
+    """Sample autocorrelation r(k) for k=1..max_lag on a binary series.
+
+    Uses the biased (n-denominator) estimator the task spec calls for so
+    the white-noise ±1.96/sqrt(n) Bartlett band is directly comparable.
+    Returns NaN at lag k if the series mean has zero variance (all wins
+    or all losses — the denominator vanishes).
+    """
+    w = np.asarray(wins, dtype=float)
+    n = w.size
+    mean = w.mean()
+    centred = w - mean
+    denom = float((centred * centred).sum())
+    if denom <= 0 or n <= 1:
+        return np.full(max_lag, np.nan)
+    out = np.empty(max_lag)
+    for k in range(1, max_lag + 1):
+        if k >= n:
+            out[k - 1] = np.nan
+            continue
+        out[k - 1] = float((centred[: n - k] * centred[k:]).sum()) / denom
+    return out
+
+
+def _person_win_series(df: pd.DataFrame, person: str) -> np.ndarray:
+    """Chronological 0/1 win sequence for one person across all their
+    accounts, sorted by game_start (the load_matches sort is by person
+    then game_start, but we re-sort defensively in case a caller pre-
+    filtered)."""
+    d = df[df["person"] == person].sort_values("game_start")
+    return d["win"].to_numpy(dtype=float)
+
+
+def plot_win_autocorrelation(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Lag-k autocorrelation of the win/loss sequence — direct momentum
+    test that doesn't condition on a streak.
+
+    Per-person: stem plot of r(k) for k=1..10 against the Bartlett white-
+    noise band ±1.96/sqrt(n). Bars outside the band are evidence that
+    "win at game t" carries information about "win at game t+k".
+
+    Aggregate: macro-average r(k) across players with >=200 games, with
+    bootstrap 95% CIs (B=2000) on the per-player vector. A lag whose CI
+    excludes zero is group-wide non-random structure.
+    """
+    if _is_aggregate(player):
+        return _plot_win_autocorrelation_aggregate(df)
+
+    person = _resolve_person(df, player)
+    label = _display_label(player) or "this player"
+    if person is None:
+        return _empty_figure(f"No games for {label}")
+    wins = _person_win_series(df, person)
+    n = wins.size
+    if n < _ACF_MIN_GAMES:
+        return _empty_figure(f"Need >=200 games for autocorrelation ({n} games)")
+
+    r = _win_acf(wins, _ACF_MAX_LAG)
+    ci = 1.96 / math.sqrt(n)
+    lags = np.arange(1, _ACF_MAX_LAG + 1)
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    markerline, stemlines, baseline = ax.stem(
+        lags,
+        r,
+        linefmt="-",
+        markerfmt="o",
+        basefmt=" ",
+    )
+    plt.setp(stemlines, color=PALETTE["primary"], linewidth=1.8, alpha=0.85)
+    plt.setp(markerline, color=PALETTE["primary"], markersize=6, markeredgecolor="white")
+    plt.setp(baseline, visible=False)
+
+    ax.axhline(0.0, color=PALETTE["spine"], linewidth=1.0)
+    ax.axhline(
+        ci,
+        color=PALETTE["muted"],
+        linewidth=0.9,
+        linestyle=(0, (4, 4)),
+        alpha=0.7,
+        label=f"95% white-noise band (+/- {ci:.3f})",
+    )
+    ax.axhline(
+        -ci,
+        color=PALETTE["muted"],
+        linewidth=0.9,
+        linestyle=(0, (4, 4)),
+        alpha=0.7,
+    )
+
+    # Annotate any lag that escapes the IID band — the whole point of the
+    # chart is "which lags are real signal".
+    for lag, val in zip(lags, r, strict=False):
+        if np.isnan(val):
+            continue
+        if abs(val) > ci:
+            colour = PALETTE["win"] if val > 0 else PALETTE["loss"]
+            ax.annotate(
+                f"{val:+.3f}",
+                xy=(lag, val),
+                xytext=(0, 10 if val > 0 else -14),
+                textcoords="offset points",
+                ha="center",
+                fontsize=9,
+                color=colour,
+                fontweight="bold",
+            )
+
+    ax.set_xticks(lags)
+    ax.set_xlabel("Lag k (games)")
+    ax.set_ylabel("Autocorrelation r(k)")
+    ax.set_title(_title(f"Win autocorrelation - {label}", None))
+    _subtitle(
+        ax,
+        f"Lag-k correlation of win/loss sequence (n={n}). Bars outside "
+        f"+/- {ci:.3f} indicate non-random structure (momentum if positive, "
+        f"mean-reversion if negative).",
+    )
+    # Symmetric y-limits so the +/- band reads visually balanced.
+    ymax = max(0.15, float(np.nanmax(np.abs(r))) * 1.3 if np.isfinite(r).any() else 0.15, ci * 1.6)
+    ax.set_ylim(-ymax, ymax)
+    ax.legend(loc="upper right", frameon=False, fontsize=9)
+    _polish_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
+def _plot_win_autocorrelation_aggregate(df: pd.DataFrame) -> plt.Figure:
+    counts = df.groupby("person").size()
+    qualifying = counts[counts >= _ACF_MIN_GAMES].index.tolist()
+    if len(qualifying) < 3:
+        return _empty_figure("Need >=3 players with >=200 games")
+
+    # Per-player ACF matrix: rows = players, cols = lag 1..max_lag.
+    rows: list[np.ndarray] = []
+    for person in qualifying:
+        wins = _person_win_series(df, person)
+        rows.append(_win_acf(wins, _ACF_MAX_LAG))
+    acf_matrix = np.vstack(rows)
+    n_players = acf_matrix.shape[0]
+
+    macro = np.nanmean(acf_matrix, axis=0)
+
+    # Bootstrap: resample player indices with replacement, take nanmean
+    # per lag, percentile across resamples.
+    rng = np.random.default_rng(0)
+    boot = np.empty((_ACF_BOOTSTRAP, _ACF_MAX_LAG))
+    for b in range(_ACF_BOOTSTRAP):
+        idx = rng.integers(0, n_players, size=n_players)
+        boot[b] = np.nanmean(acf_matrix[idx], axis=0)
+    ci_lo = np.nanpercentile(boot, 2.5, axis=0)
+    ci_hi = np.nanpercentile(boot, 97.5, axis=0)
+
+    lags = np.arange(1, _ACF_MAX_LAG + 1)
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    # Bootstrap ribbon first so the stem sits on top.
+    ax.fill_between(
+        lags,
+        ci_lo,
+        ci_hi,
+        color=PALETTE["primary"],
+        alpha=0.18,
+        linewidth=0,
+        label="Bootstrap 95% CI",
+    )
+
+    markerline, stemlines, baseline = ax.stem(
+        lags,
+        macro,
+        linefmt="-",
+        markerfmt="o",
+        basefmt=" ",
+    )
+    plt.setp(stemlines, color=PALETTE["primary"], linewidth=1.8, alpha=0.9)
+    plt.setp(markerline, color=PALETTE["primary"], markersize=6, markeredgecolor="white")
+    plt.setp(baseline, visible=False)
+
+    ax.axhline(0.0, color=PALETTE["spine"], linewidth=1.0)
+
+    # Lags whose bootstrap CI excludes zero = group-wide signal at that lag.
+    for lag, val, lo, hi in zip(lags, macro, ci_lo, ci_hi, strict=False):
+        if np.isnan(val) or np.isnan(lo) or np.isnan(hi):
+            continue
+        if lo > 0 or hi < 0:
+            colour = PALETTE["win"] if val > 0 else PALETTE["loss"]
+            ax.annotate(
+                f"{val:+.3f}\n[{lo:+.3f}, {hi:+.3f}]",
+                xy=(lag, val),
+                xytext=(0, 14 if val > 0 else -28),
+                textcoords="offset points",
+                ha="center",
+                fontsize=8.5,
+                color=colour,
+                fontweight="bold",
+            )
+
+    ax.set_xticks(lags)
+    ax.set_xlabel("Lag k (games)")
+    ax.set_ylabel("Macro-averaged r(k)")
+    ax.set_title("Win autocorrelation - aggregate")
+    _subtitle(
+        ax,
+        f"Macro-averaged lag-k correlation across {n_players} players "
+        f"(>=200 games each). Bands = bootstrap 95% CI on per-player values; "
+        f"a lag whose CI excludes zero is group-wide momentum or mean-reversion.",
+    )
+    span = max(
+        0.05,
+        float(np.nanmax(np.abs(np.concatenate([macro, ci_lo, ci_hi])))) * 1.35
+        if np.isfinite(np.concatenate([macro, ci_lo, ci_hi])).any()
+        else 0.05,
+    )
+    ax.set_ylim(-span, span)
+    ax.legend(loc="upper right", frameon=False, fontsize=9)
+    _polish_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
+# --- 45. Champion swap cheat sheet -----------------------------------------
+
+
+def _render_swap_panel(
+    ax,
+    rows: list[dict],
+    *,
+    side: str,
+    baseline_wr: float,
+    baseline_label: str,
+) -> None:
+    """Render one BUY or SELL panel of the swap cheat-sheet.
+
+    ``rows`` is already filtered + sorted desc by score; ``side`` is
+    ``"buy"`` or ``"sell"`` and selects the bar colour. Empty ``rows``
+    renders a "No candidates" placeholder so the other panel can still
+    populate normally.
+    """
+    colour = PALETTE["win"] if side == "buy" else PALETTE["loss"]
+    heading = (
+        "BUY: under-played, above baseline"
+        if side == "buy"
+        else "SELL: over-played, below baseline"
+    )
+    ax.set_title(heading)
+
+    if not rows:
+        ax.text(
+            0.5,
+            0.5,
+            "No candidates",
+            ha="center",
+            va="center",
+            color=PALETTE["muted"],
+            fontsize=11,
+            transform=ax.transAxes,
+        )
+        ax.set_xticks([])
+        ax.set_yticks([])
+        _polish_ax(ax)
+        return
+
+    # Reverse so highest-score row plots at the top of the horizontal bar
+    # chart (barh y=0 is at the bottom).
+    rows = list(reversed(rows))
+    y = np.arange(len(rows))
+    shrunk = [r["shrunk_wr"] for r in rows]
+
+    ax.barh(y, shrunk, color=colour, height=0.65, alpha=0.85, edgecolor=colour)
+    ax.axvline(
+        baseline_wr,
+        color=PALETTE["muted"],
+        linestyle="--",
+        linewidth=1.0,
+        label=baseline_label,
+    )
+    ax.set_yticks(y)
+    ax.set_yticklabels([r["champion"] for r in rows])
+    ax.set_xlim(0, 1.0)
+    ax.set_xlabel("Shrunken win rate")
+
+    # Stats annotation immediately to the right of each bar — no overflow
+    # into the neighbouring axes because the x-axis is hard-capped at 1.0.
+    for yi, r in zip(y, rows, strict=False):
+        ax.text(
+            r["shrunk_wr"] + 0.012,
+            yi,
+            f"shrunk={r['shrunk_wr']:.0%}, raw={r['raw_wr']:.0%}  "
+            f"n={int(r['n'])}, freq={r['play_freq']:.0%}",
+            va="center",
+            ha="left",
+            fontsize=8.5,
+            color=PALETTE["text"],
+        )
+
+    ax.legend(loc="lower right", framealpha=0.85, fontsize=9)
+    _polish_ax(ax)
+
+
+def plot_champ_swap_recs(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Champion swap cheat sheet — top BUY (try more) and SELL (try less)
+    recommendations based on Bayesian-shrunk WR and play frequency.
+
+    A "buy" champ is one whose shrunken WR sits clearly above baseline
+    but is under-played; a "sell" champ is over-played with shrunken WR
+    clearly below baseline. The shrinkage matters: it pulls flukey
+    small-sample WRs back toward the player's (or group's) baseline so
+    the recommendations are signal-driven, not noise-driven.
+    """
+    is_agg = _is_aggregate(player)
+
+    if is_agg:
+        total_games = len(df)
+        if total_games < 500:
+            return _empty_figure("Insufficient data")
+        baseline_wr = float(df["win"].mean())
+        prior_n = 50.0
+        min_n_buy = 20
+        min_n_sell = 100
+        top_k = 5
+        g = df.groupby("champion")["win"].agg(["count", "sum"])
+        g = g.rename(columns={"count": "games", "sum": "wins"})
+        # ≥3 game floor before computing shrunk WR (redundant with buy/sell
+        # cutoffs but skips a lot of noise champs).
+        g = g[g["games"] >= 3]
+        title = "Champion swap cheat sheet - group"
+        baseline_label = f"group baseline ({baseline_wr:.0%})"
+        subtitle = (
+            f"BUY: under-played champs with above-baseline shrunken WR. "
+            f"SELL: over-played champs with below-baseline shrunken WR. "
+            f"Baseline = {baseline_wr:.0%}, total = {total_games} games."
+        )
+    else:
+        d = _filter_player(df, player)
+        total_games = len(d)
+        if total_games < 100:
+            return _empty_figure(f"Need >=100 games for swap recs ({total_games} games)")
+        baseline_wr = float(d["win"].mean())
+        prior_n = 30.0
+        min_n_buy = 5
+        min_n_sell = 20
+        top_k = 3
+        g = d.groupby("champion")["win"].agg(["count", "sum"])
+        g = g.rename(columns={"count": "games", "sum": "wins"})
+        g = g[g["games"] >= 3]
+        name = _display_label(player) or "this player"
+        title = f"Champion swap cheat sheet - {name}"
+        baseline_label = f"{name}'s baseline ({baseline_wr:.0%})"
+        subtitle = (
+            f"BUY: under-played champs with above-baseline shrunken WR. "
+            f"SELL: over-played champs with below-baseline shrunken WR. "
+            f"Baseline = {baseline_wr:.0%}, total = {total_games} games."
+        )
+
+    if g.empty:
+        return _empty_figure("No champion has enough games")
+
+    g["raw_wr"] = g["wins"] / g["games"]
+    g["shrunk_wr"] = [
+        bayesian_shrunk_wr(int(w), int(n), baseline_wr, prior_n)
+        for w, n in zip(g["wins"], g["games"], strict=False)
+    ]
+    g["play_freq"] = g["games"] / total_games
+    g["vs_baseline"] = g["shrunk_wr"] - baseline_wr
+
+    # Buy: shrunk clearly above baseline AND enough signal. Both factors of
+    # the score are positive after the filter, so sort desc works directly.
+    buy = g[(g["shrunk_wr"] > baseline_wr + 0.02) & (g["games"] >= min_n_buy)].copy()
+    buy["score"] = buy["vs_baseline"] * (1.0 - buy["play_freq"])
+    buy = buy.sort_values("score", ascending=False).head(top_k)
+
+    # Sell: shrunk clearly below baseline AND we play it a lot.
+    sell = g[(g["shrunk_wr"] < baseline_wr - 0.02) & (g["games"] >= min_n_sell)].copy()
+    sell["score"] = (-sell["vs_baseline"]) * sell["play_freq"]
+    sell = sell.sort_values("score", ascending=False).head(top_k)
+
+    buy_rows = [
+        {
+            "champion": idx,
+            "n": int(row["games"]),
+            "raw_wr": float(row["raw_wr"]),
+            "shrunk_wr": float(row["shrunk_wr"]),
+            "play_freq": float(row["play_freq"]),
+        }
+        for idx, row in buy.iterrows()
+    ]
+    sell_rows = [
+        {
+            "champion": idx,
+            "n": int(row["games"]),
+            "raw_wr": float(row["raw_wr"]),
+            "shrunk_wr": float(row["shrunk_wr"]),
+            "play_freq": float(row["play_freq"]),
+        }
+        for idx, row in sell.iterrows()
+    ]
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    _render_swap_panel(
+        axes[0], buy_rows, side="buy", baseline_wr=baseline_wr, baseline_label=baseline_label
+    )
+    _render_swap_panel(
+        axes[1], sell_rows, side="sell", baseline_wr=baseline_wr, baseline_label=baseline_label
+    )
+
+    fig.suptitle(title, fontsize=13, fontweight="bold", y=0.99)
+    # Figure-level subtitle so both panels share the explanation. Wrapped
+    # to the figure width via a manual newline rather than wrap=True (which
+    # leans on the renderer's text-extent and is fragile in tight_layout).
+    fig.text(
+        0.5,
+        0.945,
+        subtitle,
+        ha="center",
+        va="top",
+        color=PALETTE["muted"],
+        fontsize=9.5,
+        style="italic",
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.91), w_pad=3.0)
+    return fig
+
+
+def _per_account_table(d: pd.DataFrame, min_games: int = 10) -> pd.DataFrame:
+    """Per-account WR table for one person: (riot_account, games, wins, wr, ci_lo, ci_hi).
+
+    Filters out accounts with fewer than ``min_games`` games, since Wilson
+    CIs on tiny samples (e.g. a 2-game throwaway alt) drown the chart in
+    [0, 1] whiskers and tell us nothing about smurf vs main.
+    """
+    agg = d.groupby("riot_account")["win"].agg(games="count", wins="sum").reset_index()
+    agg = agg[agg["games"] >= min_games].copy()
+    if agg.empty:
+        return agg
+    agg["wr"] = agg["wins"] / agg["games"]
+    cis = [wilson_ci(int(w), int(n)) for w, n in zip(agg["wins"], agg["games"], strict=False)]
+    agg["ci_lo"] = [c[0] for c in cis]
+    agg["ci_hi"] = [c[1] for c in cis]
+    return agg.sort_values("games", ascending=False).reset_index(drop=True)
+
+
+def _chi2_accounts_pvalue(accounts: pd.DataFrame) -> tuple[float, float]:
+    """2×k chi² of (wins, losses) across this person's k Riot accounts.
+
+    Tests "do these accounts share one true WR?" — small p means the
+    accounts behave differently (smurf/main split). Returns (chi2, p).
+    Uses the in-module ``chi2_pvalue`` Wilson-Hilferty approximation so we
+    don't pull in scipy.
+    """
+    if len(accounts) < 2:
+        return (0.0, 1.0)
+    wins = accounts["wins"].to_numpy(dtype=float)
+    games = accounts["games"].to_numpy(dtype=float)
+    losses = games - wins
+    grand = float(games.sum())
+    total_wins = float(wins.sum())
+    total_losses = float(losses.sum())
+    if grand <= 0 or total_wins <= 0 or total_losses <= 0:
+        return (0.0, 1.0)
+    chi2 = 0.0
+    for w, lo, n in zip(wins, losses, games, strict=False):
+        exp_w = total_wins * n / grand
+        exp_l = total_losses * n / grand
+        if exp_w > 0:
+            chi2 += (w - exp_w) ** 2 / exp_w
+        if exp_l > 0:
+            chi2 += (lo - exp_l) ** 2 / exp_l
+    df_chi = len(accounts) - 1
+    return (chi2, chi2_pvalue(chi2, df_chi))
+
+
+def plot_per_account_breakdown(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Smurf/alt detection — split each person's games by Riot account.
+
+    Per-person view shows one bar per account with Wilson 95% CI and a
+    reference line at the person's overall WR. Aggregate view stacks
+    every person with ≥2 qualifying accounts so you can scan the whole
+    cohort for within-person WR gaps. A 2×k chi² flags accounts whose
+    win rates differ more than chance would explain.
+    """
+    is_agg = _is_aggregate(player)
+
+    if is_agg:
+        # One row per (person, riot_account) for everyone in the cohort,
+        # then keep only persons who clear both gates: ≥50 games total
+        # AND ≥2 accounts that themselves clear the ≥10-games floor.
+        person_totals = df.groupby("person").size()
+        candidates = [p for p, n in person_totals.items() if n >= 50]
+        per_person: list[tuple[str, pd.DataFrame, float]] = []
+        for name in candidates:
+            sub = df[df["person"] == name]
+            tbl = _per_account_table(sub, min_games=10)
+            if len(tbl) >= 2:
+                _, p_val = _chi2_accounts_pvalue(tbl)
+                per_person.append((name, tbl, p_val))
+
+        if len(per_person) < 2:
+            return _empty_figure("No person has ≥2 Riot accounts with ≥10 games each")
+
+        # Order persons by within-person WR spread, biggest variation on
+        # top — that's where the smurf/main story is most visible.
+        per_person.sort(key=lambda t: t[1]["wr"].max() - t[1]["wr"].min(), reverse=True)
+
+        n_people = len(per_person)
+        fig, ax = plt.subplots(figsize=(10, max(7.0, 0.95 * n_people + 1.6)))
+
+        # Each person occupies one "row slot" at integer y. Within that
+        # slot we stack the person's accounts vertically as sub-bars
+        # spanning ±row_h/2 around the centre, sized to fit k accounts
+        # without overlap regardless of k.
+        row_h = 0.78
+        row_centres = np.arange(n_people)
+        # Slim navy → teal → orange cycle keeps adjacent person blocks
+        # visually distinct without relying on the ride-payoff/win-loss
+        # green/red that mean something elsewhere on the dashboard.
+        acct_colours = [PALETTE["primary"], PALETTE["accent_teal"], PALETTE["accent_orange"]]
+
+        for row_i, (_name, tbl, _p_val) in enumerate(per_person):
+            k = len(tbl)
+            bar_h = row_h / k
+            # Largest n at the top of each block (tbl is sorted desc on
+            # games already) so the main account leads visually.
+            offsets = np.linspace(-row_h / 2 + bar_h / 2, row_h / 2 - bar_h / 2, k)
+            for j, (offset, (_, row)) in enumerate(zip(offsets, tbl.iterrows(), strict=False)):
+                y = row_centres[row_i] + offset
+                colour = acct_colours[j % len(acct_colours)]
+                ax.barh(y, row["wr"], height=bar_h * 0.92, color=colour, alpha=0.85)
+                ax.errorbar(
+                    row["wr"],
+                    y,
+                    xerr=[[row["wr"] - row["ci_lo"]], [row["ci_hi"] - row["wr"]]],
+                    **WHISKER_STYLE,
+                )
+                # Anchor the annotation past the upper-CI whisker tip so
+                # the text doesn't sit on top of the error bar. Clip at
+                # 0.97 so very-high-WR alts don't push text past the axis.
+                ax.annotate(
+                    f"{row['riot_account']}  n={int(row['games'])}  {row['wr']:.0%}",
+                    xy=(min(float(row["ci_hi"]) + 0.005, 0.97), y),
+                    xytext=(6, 0),
+                    textcoords="offset points",
+                    va="center",
+                    fontsize=8.5,
+                    color=PALETTE["text"],
+                )
+
+        # Person-name labels on the left axis, with the chi² p-value
+        # inline so the reader can spot significant splits in one pass.
+        ax.set_yticks(row_centres)
+        ax.set_yticklabels(
+            [f"{name}  (p={p:.3f})" for name, _, p in per_person],
+            color=PALETTE["text"],
+        )
+        ax.invert_yaxis()
+        ax.set_xlim(0, 1)
+        ax.axvline(0.5, color=PALETTE["muted"], linewidth=0.8, linestyle=(0, (4, 4)), alpha=0.55)
+        ax.set_xlabel("Win rate")
+        ax.set_title(_title("Per-account WR breakdown - main vs smurf/alt detection", None))
+        _subtitle(
+            ax,
+            "Each row = one person, one bar per Riot account (>=10 games). "
+            "Chi-square p-values flag significant within-person WR differences.",
+        )
+        _polish_ax(ax)
+        fig.tight_layout()
+        return fig
+
+    # --- per-person view ---------------------------------------------------
+    person_name = _resolve_person(df, player)
+    if person_name is None:
+        return _empty_figure("No data for the selection")
+    d = df[df["person"] == person_name]
+    if d.empty:
+        return _empty_figure("No data for the selection")
+
+    n_total = len(d)
+    n_accounts_raw = d["riot_account"].nunique()
+    # Account-count gate comes before the games-count gate: a 200-game
+    # single-account player is "only 1 Riot account", not "Need >=50".
+    if n_accounts_raw < 2:
+        return _empty_figure(f"{person_name} has only 1 Riot account")
+    if n_total < 50:
+        return _empty_figure(f"Need >=50 games ({n_total})")
+
+    tbl = _per_account_table(d, min_games=10)
+    if len(tbl) < 2:
+        return _empty_figure(f"{person_name} has <2 Riot accounts with >=10 games")
+
+    chi2, p_val = _chi2_accounts_pvalue(tbl)
+    overall_wr = float(d["win"].mean())
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    y = np.arange(len(tbl))
+    wrs = tbl["wr"].to_numpy()
+    lo = tbl["ci_lo"].to_numpy()
+    hi = tbl["ci_hi"].to_numpy()
+    counts = tbl["games"].to_numpy()
+
+    max_n = max(counts.max(), 1)
+    alphas = np.clip(0.45 + 0.55 * np.sqrt(counts / max_n), 0.45, 1.0)
+    colours = [(*plt.matplotlib.colors.to_rgb(PALETTE["primary"]), a) for a in alphas]
+
+    ax.barh(y, wrs, color=colours, height=0.65)
+    ax.errorbar(wrs, y, xerr=[wrs - lo, hi - wrs], **WHISKER_STYLE)
+    ax.axvline(
+        overall_wr,
+        color=PALETTE["accent_orange"],
+        linewidth=1.2,
+        linestyle=(0, (3, 3)),
+        alpha=0.85,
+        label=f"overall WR {overall_wr:.0%}",
+    )
+    ax.set_yticks(y)
+    ax.set_yticklabels(tbl["riot_account"], color=PALETTE["text"])
+    ax.invert_yaxis()
+    ax.set_xlim(0, 1)
+    ax.set_xlabel("Win rate")
+    ax.set_title(_title(f"Per-account breakdown - {person_name}", None))
+    sig_label = "significant" if p_val < 0.05 else "not significant"
+    _subtitle(
+        ax,
+        f"{len(tbl)} Riot accounts with >=10 games. "
+        f"Chi-square p={p_val:.3f}: {sig_label} within-person variation.",
+    )
+    for yi, (wr, n, acct, hi_i) in enumerate(
+        zip(wrs, counts, tbl["riot_account"], hi, strict=False)
+    ):
+        # Anchor past the upper Wilson tip so the whisker doesn't strike
+        # through the account label.
+        ax.annotate(
+            f"{acct}  n={int(n)}  WR={wr:.0%}",
+            xy=(min(float(hi_i) + 0.005, 0.97), yi),
+            xytext=(6, 0),
+            textcoords="offset points",
+            va="center",
+            fontsize=9,
+            color=PALETTE["text"],
+        )
+    ax.legend(loc="lower right")
+    _polish_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
+# --- 47. Quarterly champion meta shifts -----------------------------------
+
+
+def plot_champion_meta_shifts(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Detect meta / patch shifts: per-champion WR variation across calendar quarters.
+
+    Buckets games by ``YYYY-Qn`` from ``game_start``. For each champion with
+    enough data, runs a 2×k chi² of (wins, losses) by quarter. BH-FDR
+    adjusts q-values across all qualifying champions. Top 20 by significance
+    (raw p ascending, range_pp descending) are drawn as a quarterly WR
+    heatmap with a side-panel of stats.
+    """
+    if not _is_aggregate(player):
+        return _empty_figure("Aggregate view only - pick 'All'")
+
+    if df.empty or "game_start" not in df.columns:
+        return _empty_figure("No games to plot")
+
+    work = df[["champion", "win", "game_start"]].copy()
+    work["game_start"] = pd.to_datetime(work["game_start"])
+    work = work.dropna(subset=["game_start", "champion"])
+    if work.empty:
+        return _empty_figure("No games to plot")
+
+    # Vectorised "YYYY-Qn" so a 2024 Q3 game reads "2024-Q3" rather than
+    # pandas' default "2024Q3". Easier to scan as a column header.
+    quarters = (
+        work["game_start"].dt.year.astype(str) + "-Q" + work["game_start"].dt.quarter.astype(str)
+    )
+    work["quarter"] = quarters
+
+    # Per (champion, quarter) totals — single groupby, then filter downstream.
+    grouped = (
+        work.groupby(["champion", "quarter"])["win"].agg(games="size", wins="sum").reset_index()
+    )
+    grouped["wins"] = grouped["wins"].astype(int)
+    grouped["games"] = grouped["games"].astype(int)
+
+    # ≥80 games total per champion across the whole window.
+    champ_totals = grouped.groupby("champion")["games"].sum()
+    eligible_champs = champ_totals[champ_totals >= 80].index.tolist()
+    if not eligible_champs:
+        return _empty_figure("Need >=5 champions with sufficient quarterly data")
+
+    # ≥15 games per quarter, ≥4 such quarters per champion.
+    qualified_rows = grouped[grouped["champion"].isin(eligible_champs) & (grouped["games"] >= 15)]
+    quarters_per_champ = qualified_rows.groupby("champion")["quarter"].nunique()
+    keep_champs = quarters_per_champ[quarters_per_champ >= 4].index.tolist()
+    if len(keep_champs) < 5:
+        return _empty_figure("Need >=5 champions with sufficient quarterly data")
+
+    # Per-champion chi² across that champion's qualifying quarters (≥15 games each).
+    stats: list[dict] = []
+    for champ in keep_champs:
+        sub = qualified_rows[qualified_rows["champion"] == champ]
+        wins = sub["wins"].to_numpy()
+        games = sub["games"].to_numpy()
+        _chi2, _dof, p_raw = chi2_homogeneity(wins, games)
+        wrs = wins / games
+        stats.append(
+            {
+                "champion": champ,
+                "p_raw": p_raw,
+                "range_pp": float(wrs.max() - wrs.min()),
+                "n_quarters": int(len(games)),
+                "n_games": int(games.sum()),
+            }
+        )
+
+    stats_df = pd.DataFrame(stats)
+    stats_df["p_adj"] = bh_adjust(stats_df["p_raw"].tolist())
+    stats_df = stats_df.sort_values(["p_raw", "range_pp"], ascending=[True, False]).reset_index(
+        drop=True
+    )
+
+    top = stats_df.head(20).copy()
+
+    # Chronological column ordering — sort by (year, quarter-num).
+    all_quarters = sorted(
+        work["quarter"].unique().tolist(),
+        key=lambda q: (int(q.split("-Q")[0]), int(q.split("-Q")[1])),
+    )
+
+    # Build the WR / count matrices restricted to the top champions
+    # in the table's row order. Cells with <15 games blank out (NaN) so
+    # the diverging cmap doesn't mislead on sparse data.
+    wr_matrix = np.full((len(top), len(all_quarters)), np.nan, dtype=float)
+    n_matrix = np.zeros((len(top), len(all_quarters)), dtype=int)
+    lookup = grouped.set_index(["champion", "quarter"])
+    for row_i, champ in enumerate(top["champion"].tolist()):
+        for col_j, q in enumerate(all_quarters):
+            if (champ, q) in lookup.index:
+                rec = lookup.loc[(champ, q)]
+                games = int(rec["games"])
+                if games >= 15:
+                    wr_matrix[row_i, col_j] = int(rec["wins"]) / games
+                    n_matrix[row_i, col_j] = games
+
+    fig = plt.figure(figsize=(12, 9))
+    # Heatmap on the left (~74% width), side panel on the right.
+    gs = fig.add_gridspec(1, 2, width_ratios=[3.0, 1.0], wspace=0.05)
+    ax = fig.add_subplot(gs[0, 0])
+    ax_side = fig.add_subplot(gs[0, 1])
+
+    cmap = plt.get_cmap("RdYlGn").copy()
+    cmap.set_bad(color="#f3f4f6")
+    # Clip ±10pp from 0.5 — anything beyond is rare and would otherwise
+    # dominate the scale, washing out smaller-but-real shifts.
+    im = ax.imshow(wr_matrix, aspect="auto", cmap=cmap, vmin=0.4, vmax=0.6)
+
+    ax.set_xticks(range(len(all_quarters)))
+    ax.set_xticklabels(all_quarters, rotation=45, ha="right", color=PALETTE["text"])
+    ax.set_yticks(range(len(top)))
+    ax.set_yticklabels(top["champion"].tolist(), color=PALETTE["text"])
+    ax.set_xlabel("Quarter")
+    ax.set_title(_title("Quarterly champion WR - meta shift detection", None))
+    _subtitle(
+        ax,
+        "Top 20 champions by significance of cross-quarter WR variation. "
+        "BH-FDR adjusted q-values. * = q < 0.10.",
+    )
+    ax.grid(False)
+    for spine in ax.spines.values():
+        spine.set_color(PALETTE["spine"])
+
+    # Cell annotations — small font so 20×N stays legible inside (12, 9).
+    for i in range(wr_matrix.shape[0]):
+        for j in range(wr_matrix.shape[1]):
+            wr = wr_matrix[i, j]
+            n = n_matrix[i, j]
+            if np.isnan(wr):
+                continue
+            # Switch to white text on the deep red / deep green tails so
+            # annotations stay readable when the cell is fully saturated.
+            txt_color = "white" if (wr <= 0.43 or wr >= 0.57) else PALETTE["text"]
+            ax.text(
+                j,
+                i,
+                f"{wr:.0%}\nn={n}",
+                ha="center",
+                va="center",
+                fontsize=7.5,
+                color=txt_color,
+            )
+
+    cbar = fig.colorbar(im, ax=ax, label="WR", shrink=0.6, pad=0.02)
+    cbar.outline.set_visible(False)
+
+    # Side panel: per-row stats. y-axis matches the heatmap so each line
+    # of text lines up with its champion row.
+    ax_side.set_xlim(0, 1)
+    ax_side.set_ylim(-0.5, len(top) - 0.5)
+    ax_side.invert_yaxis()
+    ax_side.set_axis_off()
+    ax_side.text(
+        0.0,
+        -1.0,
+        "raw p   /   BH q   /   range",
+        ha="left",
+        va="bottom",
+        fontsize=9,
+        color=PALETTE["muted"],
+        style="italic",
+        transform=ax_side.transData,
+    )
+    for i, (_, row) in enumerate(top.iterrows()):
+        flag = " *" if row["p_adj"] < 0.10 else "  "
+        ax_side.text(
+            0.0,
+            i,
+            f"p={row['p_raw']:.3f}  q={row['p_adj']:.3f}  range={row['range_pp']*100:.1f}pp{flag}",
+            ha="left",
+            va="center",
+            fontsize=8.5,
+            color=PALETTE["text"],
+            family="monospace",
+        )
+
+    # imshow's default origin='upper' already puts matrix row 0 at the
+    # top of the axes — exactly the ranking we want, no inversion needed.
+    # tight_layout warns when an off-axis is in the gridspec, so use
+    # subplots_adjust manually — same effect, no warning.
+    fig.subplots_adjust(left=0.10, right=0.97, top=0.92, bottom=0.10)
+    return fig
+
+
+# --- 51. Patch meta shifts — sibling of 47, real patches via Match-V5 ------
+
+
+def _short_patch(s: str | None) -> str | None:
+    """Collapse Riot's ``gameVersion`` ("14.18.612.4234") to its patch ("14.18").
+
+    Hotfixes within a patch share the first two segments — bucketing on
+    those folds the hotfix dot-revisions together. Returns None for
+    empty / malformed input so callers can dropna() before bucketing.
+    """
+    if not s:
+        return None
+    parts = str(s).split(".")
+    if len(parts) < 2:
+        return None
+    major, minor = parts[0].strip(), parts[1].strip()
+    if not (major.isdigit() and minor.isdigit()):
+        return None
+    return f"{major}.{minor}"
+
+
+def plot_patch_meta_shifts(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Detect meta / patch shifts: per-champion WR variation across real Riot patches.
+
+    Sibling of ``plot_champion_meta_shifts`` (iter 57), which segments by
+    calendar quarter as a noisy proxy. This one buckets by the actual
+    patch derived from Match-V5's ``gameVersion``, so hotfixes and balance
+    cadence line up with the bumps in WR. Rows with NULL ``patch_version``
+    (pre-backfill) are dropped — the subtitle reports the count.
+    """
+    if not _is_aggregate(player):
+        return _empty_figure("Aggregate view only - pick 'All'")
+
+    backfill_hint = (
+        "Need >=5 champions with >=4 patches of >=15 games each. "
+        "Run scripts/backfill_patch_version.py first?"
+    )
+
+    if df.empty or "patch_version" not in df.columns:
+        return _empty_figure(backfill_hint)
+
+    work = df[["champion", "win", "patch_version"]].copy()
+    n_null = int(work["patch_version"].isna().sum())
+    work = work.dropna(subset=["patch_version", "champion"])
+    work["patch_short"] = work["patch_version"].map(_short_patch)
+    work = work.dropna(subset=["patch_short"])
+    if work.empty:
+        return _empty_figure(backfill_hint)
+
+    grouped = (
+        work.groupby(["champion", "patch_short"])["win"].agg(games="size", wins="sum").reset_index()
+    )
+    grouped["wins"] = grouped["wins"].astype(int)
+    grouped["games"] = grouped["games"].astype(int)
+
+    champ_totals = grouped.groupby("champion")["games"].sum()
+    eligible_champs = champ_totals[champ_totals >= 80].index.tolist()
+    if not eligible_champs:
+        return _empty_figure(backfill_hint)
+
+    qualified_rows = grouped[grouped["champion"].isin(eligible_champs) & (grouped["games"] >= 15)]
+    patches_per_champ = qualified_rows.groupby("champion")["patch_short"].nunique()
+    keep_champs = patches_per_champ[patches_per_champ >= 4].index.tolist()
+    if len(keep_champs) < 5:
+        return _empty_figure(backfill_hint)
+
+    stats: list[dict] = []
+    for champ in keep_champs:
+        sub = qualified_rows[qualified_rows["champion"] == champ]
+        wins = sub["wins"].to_numpy()
+        games = sub["games"].to_numpy()
+        _chi2, _dof, p_raw = chi2_homogeneity(wins, games)
+        wrs = wins / games
+        stats.append(
+            {
+                "champion": champ,
+                "p_raw": p_raw,
+                "range_pp": float(wrs.max() - wrs.min()),
+                "n_patches": int(len(games)),
+                "n_games": int(games.sum()),
+            }
+        )
+
+    stats_df = pd.DataFrame(stats)
+    stats_df["p_adj"] = bh_adjust(stats_df["p_raw"].tolist())
+    stats_df = stats_df.sort_values(["p_raw", "range_pp"], ascending=[True, False]).reset_index(
+        drop=True
+    )
+
+    top = stats_df.head(20).copy()
+
+    # Numeric sort by (major, minor) so "9.24" lands before "10.1".
+    all_patches = sorted(
+        work["patch_short"].unique().tolist(),
+        key=lambda p: tuple(int(x) for x in p.split(".")),
+    )
+
+    wr_matrix = np.full((len(top), len(all_patches)), np.nan, dtype=float)
+    n_matrix = np.zeros((len(top), len(all_patches)), dtype=int)
+    lookup = grouped.set_index(["champion", "patch_short"])
+    for row_i, champ in enumerate(top["champion"].tolist()):
+        for col_j, p in enumerate(all_patches):
+            if (champ, p) in lookup.index:
+                rec = lookup.loc[(champ, p)]
+                games = int(rec["games"])
+                if games >= 15:
+                    wr_matrix[row_i, col_j] = int(rec["wins"]) / games
+                    n_matrix[row_i, col_j] = games
+
+    fig = plt.figure(figsize=(12, 9))
+    gs = fig.add_gridspec(1, 2, width_ratios=[3.0, 1.0], wspace=0.05)
+    ax = fig.add_subplot(gs[0, 0])
+    ax_side = fig.add_subplot(gs[0, 1])
+
+    cmap = plt.get_cmap("RdYlGn").copy()
+    cmap.set_bad(color="#f3f4f6")
+    im = ax.imshow(wr_matrix, aspect="auto", cmap=cmap, vmin=0.4, vmax=0.6)
+
+    ax.set_xticks(range(len(all_patches)))
+    ax.set_xticklabels(all_patches, rotation=45, ha="right", color=PALETTE["text"])
+    ax.set_yticks(range(len(top)))
+    ax.set_yticklabels(top["champion"].tolist(), color=PALETTE["text"])
+    ax.set_xlabel("Patch")
+    ax.set_title(_title("Patch champion WR - meta shift detection", None))
+    _subtitle(
+        ax,
+        "Top 20 by chi-square significance. BH-FDR adjusted q-values. "
+        f"* = q < 0.10. {n_null:,} games with unknown patch excluded.",
+    )
+    ax.grid(False)
+    for spine in ax.spines.values():
+        spine.set_color(PALETTE["spine"])
+
+    for i in range(wr_matrix.shape[0]):
+        for j in range(wr_matrix.shape[1]):
+            wr = wr_matrix[i, j]
+            n = n_matrix[i, j]
+            if np.isnan(wr):
+                continue
+            txt_color = "white" if (wr <= 0.43 or wr >= 0.57) else PALETTE["text"]
+            ax.text(
+                j,
+                i,
+                f"{wr:.0%}\nn={n}",
+                ha="center",
+                va="center",
+                fontsize=7.5,
+                color=txt_color,
+            )
+
+    cbar = fig.colorbar(im, ax=ax, label="WR", shrink=0.6, pad=0.02)
+    cbar.outline.set_visible(False)
+
+    ax_side.set_xlim(0, 1)
+    ax_side.set_ylim(-0.5, len(top) - 0.5)
+    ax_side.invert_yaxis()
+    ax_side.set_axis_off()
+    ax_side.text(
+        0.0,
+        -1.0,
+        "raw p   /   BH q   /   range",
+        ha="left",
+        va="bottom",
+        fontsize=9,
+        color=PALETTE["muted"],
+        style="italic",
+        transform=ax_side.transData,
+    )
+    for i, (_, row) in enumerate(top.iterrows()):
+        flag = " *" if row["p_adj"] < 0.10 else "  "
+        ax_side.text(
+            0.0,
+            i,
+            f"p={row['p_raw']:.3f}  q={row['p_adj']:.3f}  range={row['range_pp']*100:.1f}pp{flag}",
+            ha="left",
+            va="center",
+            fontsize=8.5,
+            color=PALETTE["text"],
+            family="monospace",
+        )
+
+    fig.subplots_adjust(left=0.10, right=0.97, top=0.92, bottom=0.10)
+    return fig
+
+
+# --- 48. Insights card - TL;DR for one person ------------------------------
+
+_INSIGHTS_MIN_GAMES = 50
+_INSIGHTS_SWAP_MIN_GAMES = 100
+_INSIGHTS_ROLE_MIN_GAMES = 10
+_INSIGHTS_CELL_MIN_GAMES = 15
+
+
+def _insights_panel_off(ax) -> None:
+    """Strip axis chrome from a text-only insights panel."""
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+
+
+def _insights_panel_header(ax, title: str, color: str) -> None:
+    """Coloured strip across the top of a panel with the panel name."""
+    ax.add_patch(
+        plt.Rectangle(
+            (0.0, 0.86),
+            1.0,
+            0.14,
+            transform=ax.transAxes,
+            facecolor=color,
+            edgecolor="none",
+            zorder=1,
+        )
+    )
+    ax.text(
+        0.5,
+        0.93,
+        title,
+        ha="center",
+        va="center",
+        transform=ax.transAxes,
+        fontsize=11,
+        fontweight="bold",
+        color="white",
+        zorder=2,
+    )
+
+
+def _insights_insufficient(ax, title: str, header_color: str) -> None:
+    """Drop a styled 'INSUFFICIENT DATA' message into a panel."""
+    _insights_panel_off(ax)
+    _insights_panel_header(ax, title, header_color)
+    ax.text(
+        0.5,
+        0.45,
+        "INSUFFICIENT\nDATA",
+        ha="center",
+        va="center",
+        fontsize=12,
+        color=PALETTE["muted"],
+        family="monospace",
+    )
+
+
+def _insights_pace_panel(ax, sub: pd.DataFrame) -> None:
+    wins = sub.loc[sub["win"] == 1, "duration_min"].to_numpy()
+    losses = sub.loc[sub["win"] == 0, "duration_min"].to_numpy()
+    if len(wins) < 2 or len(losses) < 2:
+        _insights_insufficient(ax, "PACE", PALETTE["primary"])
+        return
+
+    diff, p = _welch_t(wins, losses)
+    if diff < -1.0:
+        verdict = "Stomper"
+        accent = PALETTE["loss"]
+    elif diff > 1.0:
+        verdict = "Scaler"
+        accent = PALETTE["win"]
+    else:
+        verdict = "Neutral"
+        accent = PALETTE["neutral"]
+
+    _insights_panel_off(ax)
+    _insights_panel_header(ax, "PACE", PALETTE["primary"])
+    ax.text(
+        0.5,
+        0.62,
+        verdict,
+        ha="center",
+        va="center",
+        fontsize=22,
+        fontweight="bold",
+        color=accent,
+    )
+    sign = "+" if diff >= 0 else ""
+    ax.text(
+        0.5,
+        0.34,
+        f"wins {sign}{diff:.1f} min vs losses",
+        ha="center",
+        va="center",
+        fontsize=10,
+        color=PALETTE["text"],
+        family="monospace",
+    )
+    ax.text(
+        0.5,
+        0.18,
+        f"p = {p:.3f}",
+        ha="center",
+        va="center",
+        fontsize=10,
+        color=PALETTE["muted"],
+        family="monospace",
+    )
+
+
+def _insights_role_panel(ax, sub: pd.DataFrame, *, side: str) -> None:
+    """side: 'best' or 'worst'."""
+    title = "BEST ROLE" if side == "best" else "WORST ROLE"
+    header_color = PALETTE["win"] if side == "best" else PALETTE["loss"]
+
+    d = sub[sub["role"].isin(ROLE_ORDER)]
+    if d.empty:
+        _insights_insufficient(ax, title, header_color)
+        return
+    agg = d.groupby("role").agg(games=("win", "size"), wins=("win", "sum")).reset_index()
+    agg = agg[agg["games"] >= _INSIGHTS_ROLE_MIN_GAMES]
+    if agg.empty:
+        _insights_insufficient(ax, title, header_color)
+        return
+    agg["wr"] = agg["wins"] / agg["games"]
+    agg = agg.sort_values("wr", ascending=False)
+    row = agg.iloc[-1] if side == "worst" else agg.iloc[0]
+
+    role = str(row["role"])
+    wr = float(row["wr"])
+    n = int(row["games"])
+    wins = int(row["wins"])
+    lo, hi = wilson_ci(wins, n)
+
+    _insights_panel_off(ax)
+    _insights_panel_header(ax, title, header_color)
+    ax.text(
+        0.5,
+        0.62,
+        role,
+        ha="center",
+        va="center",
+        fontsize=22,
+        fontweight="bold",
+        color=header_color,
+    )
+    ax.text(
+        0.5,
+        0.36,
+        f"{wr:.1%}  (n={n})",
+        ha="center",
+        va="center",
+        fontsize=11,
+        color=PALETTE["text"],
+        family="monospace",
+    )
+    ax.text(
+        0.5,
+        0.20,
+        f"CI [{lo:.0%}, {hi:.0%}]",
+        ha="center",
+        va="center",
+        fontsize=9,
+        color=PALETTE["muted"],
+        family="monospace",
+    )
+
+
+def _insights_swap_panel(ax, sub: pd.DataFrame, *, side: str) -> None:
+    """Top-3 BUY or SELL champion recs. side: 'buy' or 'sell'."""
+    title = "BUY" if side == "buy" else "SELL"
+    header_color = PALETTE["win"] if side == "buy" else PALETTE["loss"]
+    n_total = len(sub)
+    if n_total < _INSIGHTS_SWAP_MIN_GAMES:
+        _insights_insufficient(ax, title, header_color)
+        return
+
+    baseline_wr = float(sub["win"].mean())
+    prior_n = 30.0
+    min_n_buy = 5
+    min_n_sell = 20
+    top_k = 3
+
+    g = sub.groupby("champion")["win"].agg(["count", "sum"])
+    g = g.rename(columns={"count": "games", "sum": "wins"})
+    g = g[g["games"] >= 3]
+    if g.empty:
+        _insights_insufficient(ax, title, header_color)
+        return
+    g["raw_wr"] = g["wins"] / g["games"]
+    g["shrunk_wr"] = [
+        bayesian_shrunk_wr(int(w), int(n), baseline_wr, prior_n)
+        for w, n in zip(g["wins"], g["games"], strict=False)
+    ]
+    g["play_freq"] = g["games"] / n_total
+    g["vs_baseline"] = g["shrunk_wr"] - baseline_wr
+
+    if side == "buy":
+        cand = g[(g["shrunk_wr"] > baseline_wr + 0.02) & (g["games"] >= min_n_buy)].copy()
+        cand["score"] = cand["vs_baseline"] * (1.0 - cand["play_freq"])
+    else:
+        cand = g[(g["shrunk_wr"] < baseline_wr - 0.02) & (g["games"] >= min_n_sell)].copy()
+        cand["score"] = (-cand["vs_baseline"]) * cand["play_freq"]
+    cand = cand.sort_values("score", ascending=False).head(top_k)
+
+    _insights_panel_off(ax)
+    _insights_panel_header(ax, title, header_color)
+
+    if cand.empty:
+        ax.text(
+            0.5,
+            0.45,
+            "No candidates",
+            ha="center",
+            va="center",
+            fontsize=11,
+            color=PALETTE["muted"],
+            family="monospace",
+        )
+        return
+
+    # Three rows of monospace text. Y positions chosen to leave room under header.
+    y_positions = [0.68, 0.48, 0.28]
+    for y, (champ, row) in zip(y_positions, cand.iterrows(), strict=False):
+        ax.text(
+            0.5,
+            y,
+            f"{champ}",
+            ha="center",
+            va="bottom",
+            fontsize=11,
+            fontweight="bold",
+            color=PALETTE["text"],
+        )
+        ax.text(
+            0.5,
+            y - 0.02,
+            f"{row['shrunk_wr']:.0%}  (n={int(row['games'])})",
+            ha="center",
+            va="top",
+            fontsize=9,
+            color=PALETTE["muted"],
+            family="monospace",
+        )
+
+
+def _insights_golden_hour_panel(ax, sub: pd.DataFrame) -> None:
+    title = "GOLDEN HOUR"
+    header_color = PALETTE["accent_purple"]
+
+    if sub.empty:
+        _insights_insufficient(ax, title, header_color)
+        return
+
+    d = sub.copy()
+    d["hour_bucket"] = d["hour"].map(_hour_bucket)
+    cells = (
+        d.groupby(["dow", "hour_bucket"], observed=True)
+        .agg(games=("win", "size"), wins=("win", "sum"))
+        .reset_index()
+    )
+    cells = cells[cells["games"] >= _INSIGHTS_CELL_MIN_GAMES]
+    if cells.empty:
+        _insights_insufficient(ax, title, header_color)
+        return
+    cells["wr"] = cells["wins"] / cells["games"]
+    best = cells.sort_values("wr", ascending=False).iloc[0]
+    worst = cells.sort_values("wr", ascending=True).iloc[0]
+
+    _insights_panel_off(ax)
+    _insights_panel_header(ax, title, header_color)
+
+    # BEST sub-block
+    ax.text(
+        0.5,
+        0.72,
+        "BEST",
+        ha="center",
+        va="center",
+        fontsize=9,
+        color=PALETTE["win"],
+        fontweight="bold",
+    )
+    ax.text(
+        0.5,
+        0.60,
+        f"{DOW_LABELS[int(best['dow'])]}  {str(best['hour_bucket']).split(' ')[0]}",
+        ha="center",
+        va="center",
+        fontsize=10,
+        color=PALETTE["text"],
+        family="monospace",
+    )
+    ax.text(
+        0.5,
+        0.49,
+        f"{best['wr']:.0%}  (n={int(best['games'])})",
+        ha="center",
+        va="center",
+        fontsize=10,
+        color=PALETTE["text"],
+        family="monospace",
+    )
+
+    # WORST sub-block
+    ax.text(
+        0.5,
+        0.32,
+        "WORST",
+        ha="center",
+        va="center",
+        fontsize=9,
+        color=PALETTE["loss"],
+        fontweight="bold",
+    )
+    ax.text(
+        0.5,
+        0.20,
+        f"{DOW_LABELS[int(worst['dow'])]}  {str(worst['hour_bucket']).split(' ')[0]}",
+        ha="center",
+        va="center",
+        fontsize=10,
+        color=PALETTE["text"],
+        family="monospace",
+    )
+    ax.text(
+        0.5,
+        0.09,
+        f"{worst['wr']:.0%}  (n={int(worst['games'])})",
+        ha="center",
+        va="center",
+        fontsize=10,
+        color=PALETTE["text"],
+        family="monospace",
+    )
+
+
+def _insights_recent_form_panel(ax, df: pd.DataFrame, sub: pd.DataFrame) -> None:
+    """30-day WR vs lifetime WR, with color-coded delta."""
+    title = "RECENT FORM"
+    header_color = PALETTE["accent_teal"]
+
+    # Anchor recency to the latest game in the full df, matching plot_recent_form.
+    game_start_all = pd.to_datetime(df["game_start"])
+    now = game_start_all.max()
+    if pd.isna(now):
+        _insights_insufficient(ax, title, header_color)
+        return
+
+    sub_ts = pd.to_datetime(sub["game_start"])
+    recent_mask = sub_ts >= (now - pd.Timedelta(days=30))
+    n_30 = int(recent_mask.sum())
+    if n_30 < 8:
+        _insights_panel_off(ax)
+        _insights_panel_header(ax, title, header_color)
+        ax.text(
+            0.5,
+            0.45,
+            f"INSUFFICIENT\n30D DATA (n={n_30})",
+            ha="center",
+            va="center",
+            fontsize=11,
+            color=PALETTE["muted"],
+            family="monospace",
+        )
+        return
+
+    wr_30 = float(sub.loc[recent_mask, "win"].mean())
+    wr_life = float(sub["win"].mean())
+    delta_pp = (wr_30 - wr_life) * 100.0
+
+    if delta_pp > 1.0:
+        accent = PALETTE["win"]
+    elif delta_pp < -1.0:
+        accent = PALETTE["loss"]
+    else:
+        accent = PALETTE["neutral"]
+
+    _insights_panel_off(ax)
+    _insights_panel_header(ax, title, header_color)
+    ax.text(
+        0.5,
+        0.62,
+        f"{delta_pp:+.1f} pp",
+        ha="center",
+        va="center",
+        fontsize=22,
+        fontweight="bold",
+        color=accent,
+    )
+    ax.text(
+        0.5,
+        0.36,
+        f"30d {wr_30:.0%}  (n={n_30})",
+        ha="center",
+        va="center",
+        fontsize=10,
+        color=PALETTE["text"],
+        family="monospace",
+    )
+    ax.text(
+        0.5,
+        0.20,
+        f"lifetime {wr_life:.0%}",
+        ha="center",
+        va="center",
+        fontsize=10,
+        color=PALETTE["muted"],
+        family="monospace",
+    )
+
+
+def _insights_hot_champ_panel(ax, sub: pd.DataFrame) -> None:
+    """P(same champ | prev win) vs P(same | prev loss)."""
+    title = "HOT-CHAMP BEHAVIOR"
+    header_color = PALETTE["accent_orange"]
+
+    d = sub.sort_values("game_start").reset_index(drop=True)
+    d = d.assign(
+        prev_champion=d["champion"].shift(1),
+        prev_win=d["win"].shift(1),
+    )
+    d = d.dropna(subset=["prev_win", "prev_champion"])
+    if d.empty:
+        _insights_insufficient(ax, title, header_color)
+        return
+    d = d.copy()
+    d["prev_win"] = d["prev_win"].astype(int)
+    d["same_champion"] = (d["champion"] == d["prev_champion"]).astype(int)
+
+    wins = d[d["prev_win"] == 1]
+    losses = d[d["prev_win"] == 0]
+    n_w, n_l = len(wins), len(losses)
+    if n_w < 30 or n_l < 30:
+        _insights_insufficient(ax, title, header_color)
+        return
+
+    p_win = float(wins["same_champion"].mean())
+    p_loss = float(losses["same_champion"].mean())
+    delta = p_win - p_loss
+    delta_pp = delta * 100.0
+
+    if delta_pp > 15.0:
+        accent = PALETTE["primary"]
+    elif delta_pp < 0.0:
+        accent = PALETTE["loss"]
+    else:
+        accent = PALETTE["neutral"]
+
+    _insights_panel_off(ax)
+    _insights_panel_header(ax, title, header_color)
+    ax.text(
+        0.5,
+        0.62,
+        f"{delta_pp:+.1f} pp",
+        ha="center",
+        va="center",
+        fontsize=22,
+        fontweight="bold",
+        color=accent,
+    )
+    ax.text(
+        0.5,
+        0.36,
+        f"ride|win {p_win:.0%}  (n={n_w})",
+        ha="center",
+        va="center",
+        fontsize=10,
+        color=PALETTE["text"],
+        family="monospace",
+    )
+    ax.text(
+        0.5,
+        0.20,
+        f"comfort|loss {p_loss:.0%}  (n={n_l})",
+        ha="center",
+        va="center",
+        fontsize=10,
+        color=PALETTE["muted"],
+        family="monospace",
+    )
+
+
+def plot_insights_card(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """TL;DR insights card - one chart that consolidates the most actionable
+    findings for a single player into a 7-panel info-graphic.
+
+    Aggregate view rejects with a "pick a player" placeholder. Per-player
+    view requires >=50 games (matching the stat-sheet floor) — anything
+    less and the card is empty by design. Inside the card, each panel
+    gates independently: BUY/SELL needs >=100 games, best/worst role needs
+    >=10 games at that role, golden hour needs >=15 games in some cell.
+    """
+    if _is_aggregate(player):
+        return _empty_figure("Per-person only - pick a player")
+
+    person = _resolve_person(df, player)
+    sub = _filter_player(df, player)
+    n_games = int(len(sub))
+    if person is None or n_games < _INSIGHTS_MIN_GAMES:
+        return _empty_figure(f"Need >=50 games ({n_games})")
+
+    display_name = _display_label(player) or person
+
+    # Per-group WR percentile via the same logic as the stat sheet.
+    frame = _stat_sheet_frame(df)
+    wr = float(sub["win"].mean())
+    if person in set(frame["person"]):
+        wr_values = frame["wr"].to_numpy(dtype=float)
+        ranks = pd.Series(wr_values).rank(method="average")
+        focal_idx = int(np.where(frame["person"].to_numpy() == person)[0][0])
+        if len(wr_values) > 1:
+            pct = (ranks.iloc[focal_idx] - 1) / (len(wr_values) - 1) * 100.0
+        else:
+            pct = 50.0
+        pct_int = int(round(pct))
+    else:
+        # Shouldn't happen given the >=50 gate, but degrade gracefully.
+        pct_int = None
+
+    fig = plt.figure(figsize=(14, 11))
+    # Four rows: banner+headline, behaviour panels, recommendation panels,
+    # recency + hot-champ strip.
+    gs = fig.add_gridspec(4, 3, height_ratios=[1.0, 1.4, 1.6, 1.0], hspace=0.35, wspace=0.18)
+
+    # Row 1 spans all three columns — banner + big WR + games count.
+    ax_head = fig.add_subplot(gs[0, :])
+    _insights_panel_off(ax_head)
+    ax_head.add_patch(
+        plt.Rectangle(
+            (0.0, 0.78),
+            1.0,
+            0.22,
+            transform=ax_head.transAxes,
+            facecolor=PALETTE["primary"],
+            edgecolor="none",
+            zorder=1,
+        )
+    )
+    ax_head.text(
+        0.02,
+        0.89,
+        f"STAT SHEET  -  {display_name}",
+        ha="left",
+        va="center",
+        transform=ax_head.transAxes,
+        fontsize=16,
+        fontweight="bold",
+        color="white",
+        zorder=2,
+    )
+    ax_head.text(
+        0.98,
+        0.89,
+        f"{n_games} games",
+        ha="right",
+        va="center",
+        transform=ax_head.transAxes,
+        fontsize=11,
+        color="white",
+        family="monospace",
+        zorder=2,
+    )
+    # Big WR centerpiece.
+    ax_head.text(
+        0.25,
+        0.38,
+        f"{wr:.1%}",
+        ha="center",
+        va="center",
+        fontsize=42,
+        fontweight="bold",
+        color=PALETTE["primary"],
+    )
+    ax_head.text(
+        0.25,
+        0.06,
+        "Win rate",
+        ha="center",
+        va="center",
+        fontsize=10,
+        color=PALETTE["muted"],
+        family="monospace",
+    )
+    if pct_int is None:
+        pct_label = "n/a"
+    else:
+        # English ordinal suffix: 11/12/13 are special "th"; otherwise
+        # 1/2/3 take st/nd/rd. Keeps "22nd / 33rd" from reading as "22th".
+        if 10 <= (pct_int % 100) <= 20:
+            _ord = "th"
+        else:
+            _ord = {1: "st", 2: "nd", 3: "rd"}.get(pct_int % 10, "th")
+        pct_label = f"{pct_int}{_ord} pct"
+    ax_head.text(
+        0.65,
+        0.38,
+        pct_label,
+        ha="center",
+        va="center",
+        fontsize=34,
+        fontweight="bold",
+        color=PALETTE["text"],
+    )
+    ax_head.text(
+        0.65,
+        0.06,
+        "vs friend group",
+        ha="center",
+        va="center",
+        fontsize=10,
+        color=PALETTE["muted"],
+        family="monospace",
+    )
+
+    # Row 2: pace / best role / worst role.
+    ax_pace = fig.add_subplot(gs[1, 0])
+    ax_best = fig.add_subplot(gs[1, 1])
+    ax_worst = fig.add_subplot(gs[1, 2])
+    _insights_pace_panel(ax_pace, sub)
+    _insights_role_panel(ax_best, sub, side="best")
+    _insights_role_panel(ax_worst, sub, side="worst")
+
+    # Row 3: BUY / SELL / golden hour.
+    ax_buy = fig.add_subplot(gs[2, 0])
+    ax_sell = fig.add_subplot(gs[2, 1])
+    ax_gold = fig.add_subplot(gs[2, 2])
+    _insights_swap_panel(ax_buy, sub, side="buy")
+    _insights_swap_panel(ax_sell, sub, side="sell")
+    _insights_golden_hour_panel(ax_gold, sub)
+
+    # Row 4: recent form + hot-champ behaviour. Two cells across 3 cols via
+    # a subgridspec — parent stays 3-wide for rows 1-3.
+    sub_row4 = gs[3, :].subgridspec(1, 2, wspace=0.18)
+    ax_form = fig.add_subplot(sub_row4[0, 0])
+    ax_hot = fig.add_subplot(sub_row4[0, 1])
+    _insights_recent_form_panel(ax_form, df, sub)
+    _insights_hot_champ_panel(ax_hot, sub)
+
+    fig.subplots_adjust(left=0.03, right=0.97, top=0.96, bottom=0.04)
+    return fig
+
+
+# --- 49. Recent form vs lifetime WR ----------------------------------------
+
+_RECENT_FORM_LIFETIME_MIN = 50
+_RECENT_FORM_WINDOW_MIN = 8
+_RECENT_FORM_AGGREGATE_MIN_PLAYERS = 3
+_RECENT_FORM_WINDOWS_DAYS = (30, 60, 90)
+_RECENT_FORM_Q_THRESHOLD = 0.10
+
+
+def _recent_form_table(df: pd.DataFrame) -> pd.DataFrame:
+    """Per-person recent-form table — one row per qualifying player.
+
+    Lifetime is wins/games across the player's whole history. Each window
+    captures games within ``now - window`` days, where ``now`` is the
+    latest ``game_start`` in ``df`` (global, not per-player — so an
+    inactive player correctly shows 0 recent games). The 30/60/90 day
+    tests compare the recent window vs the EARLIER baseline (games
+    strictly older than 90 days) — same baseline for all three windows
+    so the test pools don't overlap.
+
+    Returns columns: person, n_life, wr_life, plus n_{w} / wr_{w} /
+    p_{w} / q_{w} for each window in :data:`_RECENT_FORM_WINDOWS_DAYS`,
+    and earlier-baseline ``n_earlier`` / ``wr_earlier``. ``q_*`` is
+    BH-FDR adjusted across the 3 * N qualifying-player tests jointly.
+    Players with <50 lifetime games are dropped.
+    """
+    if df.empty or "game_start" not in df.columns:
+        return pd.DataFrame()
+
+    work = df[["person", "win", "game_start"]].copy()
+    work["game_start"] = pd.to_datetime(work["game_start"])
+    work = work.dropna(subset=["person", "game_start"])
+    if work.empty:
+        return pd.DataFrame()
+
+    now = work["game_start"].max()
+    cutoff_earlier = now - pd.Timedelta(days=max(_RECENT_FORM_WINDOWS_DAYS))
+
+    rows: list[dict] = []
+    p_for_bh: list[float] = []
+    p_keys: list[tuple[str, int]] = []
+
+    for person, sub in work.groupby("person", sort=False):
+        n_life = int(len(sub))
+        if n_life < _RECENT_FORM_LIFETIME_MIN:
+            continue
+        wins_life = int(sub["win"].sum())
+        wr_life = wins_life / n_life
+
+        # Earlier baseline = strictly older than the longest window.
+        earlier = sub[sub["game_start"] < cutoff_earlier]
+        n_earlier = int(len(earlier))
+        wins_earlier = int(earlier["win"].sum())
+        wr_earlier = (wins_earlier / n_earlier) if n_earlier > 0 else float("nan")
+
+        rec: dict = {
+            "person": person,
+            "n_life": n_life,
+            "wins_life": wins_life,
+            "wr_life": wr_life,
+            "n_earlier": n_earlier,
+            "wins_earlier": wins_earlier,
+            "wr_earlier": wr_earlier,
+        }
+
+        for w in _RECENT_FORM_WINDOWS_DAYS:
+            recent = sub[sub["game_start"] >= now - pd.Timedelta(days=w)]
+            n_w = int(len(recent))
+            wins_w = int(recent["win"].sum())
+            wr_w = (wins_w / n_w) if n_w > 0 else float("nan")
+            rec[f"n_{w}"] = n_w
+            rec[f"wins_{w}"] = wins_w
+            rec[f"wr_{w}"] = wr_w
+
+            # 2-proportion test = chi-square 2x2 (df=1) of recent vs earlier.
+            # chi2_homogeneity drops zero-total buckets, but we still want
+            # the helper to see both; gate explicitly so we skip when
+            # either side is empty (NaN p) rather than returning 1.0.
+            if n_w > 0 and n_earlier > 0:
+                _chi2, _dof, p_raw = chi2_homogeneity(
+                    np.array([wins_w, wins_earlier], dtype=float),
+                    np.array([n_w, n_earlier], dtype=float),
+                )
+            else:
+                p_raw = float("nan")
+            rec[f"p_{w}"] = p_raw
+            if np.isfinite(p_raw):
+                p_for_bh.append(p_raw)
+                p_keys.append((person, w))
+
+        rows.append(rec)
+
+    if not rows:
+        return pd.DataFrame()
+
+    out = pd.DataFrame(rows)
+    # BH-FDR across all valid (person, window) p-values jointly.
+    q_values = bh_adjust(p_for_bh) if p_for_bh else []
+    q_lookup = {key: q for key, q in zip(p_keys, q_values, strict=False)}
+    for w in _RECENT_FORM_WINDOWS_DAYS:
+        out[f"q_{w}"] = out["person"].map(lambda p, _w=w: q_lookup.get((p, _w), float("nan")))
+
+    return out
+
+
+def _plot_recent_form_aggregate(df: pd.DataFrame) -> plt.Figure:
+    """Horizontal bar chart of 30d-vs-lifetime WR delta per qualifying player."""
+    table = _recent_form_table(df)
+    if table.empty:
+        return _empty_figure(
+            f"Need >={_RECENT_FORM_AGGREGATE_MIN_PLAYERS} players with >="
+            f"{_RECENT_FORM_LIFETIME_MIN} games"
+        )
+
+    # Drop players with <8 games in the 30d window — bar would be noise.
+    qual = table[table["n_30"] >= _RECENT_FORM_WINDOW_MIN].copy()
+    if len(qual) < _RECENT_FORM_AGGREGATE_MIN_PLAYERS:
+        return _empty_figure(
+            f"Need >={_RECENT_FORM_AGGREGATE_MIN_PLAYERS} players with >="
+            f"{_RECENT_FORM_WINDOW_MIN} games in last 30d"
+        )
+
+    qual["delta"] = qual["wr_30"] - qual["wr_life"]
+    qual = qual.sort_values("delta", ascending=False).reset_index(drop=True)
+
+    fig, ax = plt.subplots(figsize=(10, max(4.0, 0.45 * len(qual) + 2.0)))
+    y_pos = np.arange(len(qual))
+
+    colors: list[str] = []
+    for _, row in qual.iterrows():
+        q30 = row["q_30"]
+        wr_recent = row["wr_30"]
+        wr_earlier = row["wr_earlier"]
+        # Color uses test direction (recent vs earlier), not display delta —
+        # the q-value tests the earlier-vs-recent gap, not the lifetime gap.
+        if np.isfinite(q30) and q30 < _RECENT_FORM_Q_THRESHOLD and np.isfinite(wr_earlier):
+            if wr_recent > wr_earlier:
+                colors.append(PALETTE["win"])
+            elif wr_recent < wr_earlier:
+                colors.append(PALETTE["loss"])
+            else:
+                colors.append(PALETTE["neutral"])
+        else:
+            colors.append(PALETTE["neutral"])
+
+    ax.barh(y_pos, qual["delta"].to_numpy() * 100.0, color=colors, alpha=0.85)
+    ax.axvline(0.0, color=PALETTE["muted"], linewidth=1.0)
+
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(qual["person"].tolist())
+    ax.invert_yaxis()
+    ax.set_xlabel("30d WR  -  lifetime WR  (pp)")
+
+    # Annotate every bar to the RIGHT of its tip when positive, or just
+    # past x=0 when negative — keeps the text off the y-axis labels and
+    # in the chart's right-hand whitespace.
+    deltas = qual["delta"].to_numpy() * 100.0
+    if len(deltas):
+        max_pos = max(float(np.nanmax(deltas)), 0.0)
+        pad = max(0.8, 0.02 * (np.nanmax(np.abs(deltas)) + 1.0))
+    else:
+        max_pos = 0.0
+        pad = 1.0
+    for i, (_, row) in enumerate(qual.iterrows()):
+        delta_pp = row["delta"] * 100.0
+        q30 = row["q_30"]
+        q_txt = f"{q30:.3f}" if np.isfinite(q30) else "-"
+        label = (
+            f"30d: {row['wr_30']:.0%} (n={int(row['n_30'])})  "
+            f"lifetime: {row['wr_life']:.0%} (n={int(row['n_life'])})  "
+            f"Δ={delta_pp:+.1f}pp  q={q_txt}"
+        )
+        x_text = (delta_pp + pad) if delta_pp >= 0 else pad
+        ax.text(
+            x_text,
+            i,
+            label,
+            ha="left",
+            va="center",
+            fontsize=8.5,
+            color=PALETTE["text"],
+        )
+
+    # Pad x-limits so annotations don't clip — right edge needs room for
+    # the longest label past the longest positive bar.
+    if len(deltas):
+        min_neg = min(float(np.nanmin(deltas)), 0.0)
+        # ~55 chars * ~0.8 pp/char-equivalent at fontsize=8.5 on a 10in axes
+        # → reserve ~45pp of right-side room.
+        ax.set_xlim(min_neg - 2.0, max_pos + 50.0)
+
+    ax.set_title("Recent form - last 30 days vs lifetime")
+    _subtitle(
+        ax,
+        f"Delta in pp. Bar colored if BH-FDR adjusted q < {_RECENT_FORM_Q_THRESHOLD:.2f} "
+        "(recent vs earlier baseline, earlier = games >90d old).",
+    )
+    _polish_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
+def _plot_recent_form_person(df: pd.DataFrame, player: str | None) -> plt.Figure:
+    """Per-player view: 4 bars (lifetime / 90d / 60d / 30d) with Wilson CIs."""
+    person = _resolve_person(df, player)
+    sub = _filter_player(df, player)
+    n_life = int(len(sub))
+    if person is None or n_life < _RECENT_FORM_LIFETIME_MIN:
+        return _empty_figure(f"Need >={_RECENT_FORM_LIFETIME_MIN} games ({n_life})")
+
+    work = sub[["person", "win", "game_start"]].copy()
+    work["game_start"] = pd.to_datetime(work["game_start"])
+    work = work.dropna(subset=["game_start"])
+    n_life = int(len(work))
+    if n_life < _RECENT_FORM_LIFETIME_MIN:
+        return _empty_figure(f"Need >={_RECENT_FORM_LIFETIME_MIN} games ({n_life})")
+
+    # "now" must be the GLOBAL latest game_start to match the aggregate
+    # definition — using the player's own latest would hide inactivity.
+    global_now = pd.to_datetime(df["game_start"]).max()
+    cutoff_earlier = global_now - pd.Timedelta(days=max(_RECENT_FORM_WINDOWS_DAYS))
+
+    wins_life = int(work["win"].sum())
+    wr_life = wins_life / n_life
+
+    earlier = work[work["game_start"] < cutoff_earlier]
+    n_earlier = int(len(earlier))
+    wins_earlier = int(earlier["win"].sum())
+
+    bars: list[dict] = []
+    bars.append(
+        {
+            "label": "Lifetime",
+            "n": n_life,
+            "wins": wins_life,
+            "wr": wr_life,
+            "p": None,
+        }
+    )
+    # Order: lifetime, then 90d, 60d, 30d so the rolling cap shrinks left-to-right.
+    for w in (90, 60, 30):
+        recent = work[work["game_start"] >= global_now - pd.Timedelta(days=w)]
+        n_w = int(len(recent))
+        wins_w = int(recent["win"].sum())
+        wr_w = (wins_w / n_w) if n_w > 0 else float("nan")
+        if n_w > 0 and n_earlier > 0:
+            _chi2, _dof, p_raw = chi2_homogeneity(
+                np.array([wins_w, wins_earlier], dtype=float),
+                np.array([n_w, n_earlier], dtype=float),
+            )
+        else:
+            p_raw = float("nan")
+        bars.append({"label": f"Last {w}d", "n": n_w, "wins": wins_w, "wr": wr_w, "p": p_raw})
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    x = np.arange(len(bars))
+    heights = np.array([b["wr"] if np.isfinite(b["wr"]) else 0.0 for b in bars], dtype=float)
+    visible = np.array([b["n"] >= _RECENT_FORM_WINDOW_MIN for b in bars], dtype=bool)
+    # Lifetime always visible since we passed the >=50 gate above.
+    visible[0] = True
+
+    # Lifetime in primary, recent windows in win/loss tint depending on
+    # whether they're above or below lifetime (purely cosmetic — the test
+    # result is annotated separately as raw p).
+    colors = [PALETTE["primary"]]
+    for b in bars[1:]:
+        if not np.isfinite(b["wr"]):
+            colors.append(PALETTE["neutral"])
+        elif b["wr"] > wr_life:
+            colors.append(PALETTE["win"])
+        elif b["wr"] < wr_life:
+            colors.append(PALETTE["loss"])
+        else:
+            colors.append(PALETTE["neutral"])
+
+    draw_heights = np.where(visible, heights, 0.0)
+    ax.bar(x, draw_heights, color=colors, alpha=0.85, width=0.65)
+
+    # Wilson CIs only on bars we actually draw.
+    yerr_lo = np.zeros(len(bars))
+    yerr_hi = np.zeros(len(bars))
+    for i, b in enumerate(bars):
+        if not visible[i] or not np.isfinite(b["wr"]):
+            continue
+        lo, hi = wilson_ci(int(b["wins"]), int(b["n"]))
+        yerr_lo[i] = max(0.0, b["wr"] - lo)
+        yerr_hi[i] = max(0.0, hi - b["wr"])
+    ax.errorbar(
+        x[visible], heights[visible], yerr=[yerr_lo[visible], yerr_hi[visible]], **WHISKER_STYLE
+    )
+
+    # Annotations: WR + sample count under each bar, raw p above each
+    # recent bar (no p on lifetime — it's the baseline pole).
+    for i, b in enumerate(bars):
+        if not visible[i]:
+            ax.text(
+                x[i],
+                0.02,
+                f"—\nn={b['n']}",
+                ha="center",
+                va="bottom",
+                fontsize=9,
+                color=PALETTE["muted"],
+            )
+            continue
+        if np.isfinite(b["wr"]):
+            ax.text(
+                x[i],
+                b["wr"] / 2,
+                f"{b['wr']:.0%}\nn={b['n']}",
+                ha="center",
+                va="center",
+                fontsize=10,
+                color=PALETTE["text"],
+                fontweight="bold",
+            )
+        # P-value above the upper whisker for recent windows.
+        if i > 0 and b["p"] is not None and np.isfinite(b["p"]):
+            top = (b["wr"] + yerr_hi[i]) if visible[i] else b["wr"]
+            ax.text(
+                x[i],
+                top + 0.02,
+                f"p={b['p']:.3f}",
+                ha="center",
+                va="bottom",
+                fontsize=9,
+                color=PALETTE["muted"],
+            )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels([b["label"] for b in bars])
+    ax.set_ylabel("Win rate")
+    ax.set_ylim(0, max(0.7, float(np.nanmax(heights)) + 0.15))
+    _baseline(ax, 0.5)
+    ax.set_title(f"Recent form - {_display_label(player) or person}")
+    _subtitle(
+        ax,
+        f"Lifetime ({n_life} games) vs recent rolling windows. "
+        "Chi-square tests recent vs earlier (life - 90d) baseline.",
+    )
+    _polish_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
+def plot_recent_form(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Recent form (30/60/90d) vs lifetime WR — who's hot or cold right now?
+
+    Aggregate view shows one bar per qualifying player: 30d_WR minus
+    lifetime_WR in pp, colored by chi-square significance of the recent
+    vs earlier (>90d) baseline gap, BH-FDR adjusted across all tests.
+
+    Per-player view shows four bars (lifetime + 90d + 60d + 30d) with
+    Wilson 95% CIs and the raw p of recent-vs-earlier baseline annotated
+    above each recent bar.
+    """
+    if _is_aggregate(player):
+        return _plot_recent_form_aggregate(df)
+    return _plot_recent_form_person(df, player)
+
+
+# --- session stamina (marathon penalty) ------------------------------------
+
+_STAMINA_BIN_EDGES = [0.0, 1.0, 2.0, 3.0, 5.0, np.inf]
+_STAMINA_BIN_LABELS = ["<1h", "1-2h", "2-3h", "3-5h", "5+h"]
+_STAMINA_MIN_GAMES_PER_PERSON = 100
+_STAMINA_MIN_SESSIONS_AGGREGATE = 10
+_STAMINA_MIN_SESSIONS_PER_BUCKET = 5
+
+
+def _stamina_sessions_frame(d: pd.DataFrame) -> pd.DataFrame:
+    """Collapse match rows to one row per (person, session_id).
+
+    Filters out single-game "sessions" — a 1/1 or 0/1 WR isn't a
+    meaningful data point and would dominate the <1h bucket otherwise.
+    """
+    sessions = (
+        d.dropna(subset=["win", "session_id", "duration_sec"])
+        .groupby(["person", "session_id"], observed=True)
+        .agg(games=("win", "size"), wins=("win", "sum"), dur_sec=("duration_sec", "sum"))
+        .reset_index()
+    )
+    sessions = sessions[sessions["games"] >= 2].copy()
+    if sessions.empty:
+        return sessions
+    sessions["dur_h"] = sessions["dur_sec"] / 3600.0
+    sessions["wr"] = sessions["wins"] / sessions["games"]
+    sessions["bucket"] = pd.cut(
+        sessions["dur_h"],
+        bins=_STAMINA_BIN_EDGES,
+        labels=_STAMINA_BIN_LABELS,
+        right=False,
+        include_lowest=True,
+    )
+    return sessions
+
+
+def plot_session_stamina(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Marathon-penalty WR by total session duration.
+
+    Each (person, session) collapses to one data point: total play hours
+    in that sitting and the session's WR. Sessions are bucketed by length
+    (<1h, 1-2h, 2-3h, 3-5h, 5+h). Aggregate macro-averages session WRs
+    within each bucket (every session weighs the same regardless of game
+    count) and bootstraps a 95% CI. Per-person mode pools wins and games
+    within bucket and reports Wilson 95% CIs.
+    """
+    d = _filter_player(df, player)
+    if d.empty or "session_id" not in d.columns:
+        return _empty_figure("No games to plot")
+
+    is_aggregate_mode = _is_aggregate(player)
+
+    if not is_aggregate_mode:
+        n_games = int(len(d))
+        if n_games < _STAMINA_MIN_GAMES_PER_PERSON:
+            return _empty_figure(f"Need >=100 games ({n_games})")
+
+    sessions = _stamina_sessions_frame(d)
+    if sessions.empty:
+        return _empty_figure("Insufficient session data")
+
+    if is_aggregate_mode and len(sessions) < _STAMINA_MIN_SESSIONS_AGGREGATE:
+        return _empty_figure("Insufficient session data")
+
+    rng = np.random.default_rng(63)
+    n_boot = 2000
+
+    rows: list[dict] = []
+    if is_aggregate_mode:
+        for label in _STAMINA_BIN_LABELS:
+            cell = sessions[sessions["bucket"] == label]
+            if len(cell) < _STAMINA_MIN_SESSIONS_PER_BUCKET:
+                continue
+            wrs = cell["wr"].to_numpy()
+            boot = rng.choice(wrs, size=(n_boot, wrs.size), replace=True).mean(axis=1)
+            rows.append(
+                {
+                    "bucket": label,
+                    "wr": float(wrs.mean()),
+                    "n_sessions": int(len(cell)),
+                    "n_games": int(cell["games"].sum()),
+                    "ci_lo": float(np.quantile(boot, 0.025)),
+                    "ci_hi": float(np.quantile(boot, 0.975)),
+                }
+            )
+    else:
+        for label in _STAMINA_BIN_LABELS:
+            cell = sessions[sessions["bucket"] == label]
+            if len(cell) < _STAMINA_MIN_SESSIONS_PER_BUCKET:
+                continue
+            wins = int(cell["wins"].sum())
+            games = int(cell["games"].sum())
+            if games == 0:
+                continue
+            lo, hi = wilson_ci(wins, games)
+            rows.append(
+                {
+                    "bucket": label,
+                    "wr": wins / games,
+                    "n_sessions": int(len(cell)),
+                    "n_games": games,
+                    "ci_lo": lo,
+                    "ci_hi": hi,
+                }
+            )
+
+    if not rows:
+        return _empty_figure("No session-duration buckets met the minimum sample threshold")
+
+    series = pd.DataFrame(rows)
+    # Preserve fixed bucket order regardless of which buckets survived.
+    bucket_order = {b: i for i, b in enumerate(_STAMINA_BIN_LABELS)}
+    series["order"] = series["bucket"].map(bucket_order)
+    series = series.sort_values("order").reset_index(drop=True)
+
+    if is_aggregate_mode:
+        per_person_overall = d.groupby("person")["win"].mean()
+        baseline_wr = float(per_person_overall.mean())
+        baseline_label = f"macro-average overall WR {baseline_wr:.0%}"
+    else:
+        baseline_wr = float(d["win"].mean())
+        baseline_label = f"overall WR {baseline_wr:.0%}"
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    xs = np.arange(len(series))
+    ys = series["wr"].to_numpy()
+    colour = PALETTE["primary"]
+
+    ax.plot(xs, ys, color=colour, marker="o", markersize=7, linewidth=2.2)
+    ax.fill_between(
+        xs,
+        series["ci_lo"].to_numpy(),
+        series["ci_hi"].to_numpy(),
+        color=colour,
+        alpha=0.18,
+        linewidth=0,
+    )
+
+    last_x = int(xs[-1]) if len(xs) else 0
+    for xi, yi, n_s, n_g in zip(
+        xs,
+        ys,
+        series["n_sessions"].to_numpy(),
+        series["n_games"].to_numpy(),
+        strict=False,
+    ):
+        # Pin the first/last labels to the axis side so they don't bleed
+        # past the y-axis (xi=0) or off the right edge (xi=last).
+        if int(xi) == 0:
+            ha = "left"
+            x_offset = -2
+        elif int(xi) == last_x:
+            ha = "right"
+            x_offset = 2
+        else:
+            ha = "center"
+            x_offset = 0
+        ax.annotate(
+            f"n={int(n_s)} sessions, {int(n_g)} games",
+            xy=(xi, yi),
+            xytext=(x_offset, 10),
+            textcoords="offset points",
+            ha=ha,
+            va="bottom",
+            fontsize=8,
+            color=PALETTE["muted"],
+        )
+
+    _baseline(ax, y=baseline_wr, label=baseline_label)
+
+    ax.set_xticks(xs)
+    ax.set_xticklabels(series["bucket"].tolist())
+    ax.set_xlabel("Total session duration")
+    ax.set_ylabel("Win rate")
+    ax.set_ylim(0.0, 1.0)
+
+    if is_aggregate_mode:
+        ax.set_title("Marathon penalty - WR by session length")
+        subtitle = (
+            "Macro WR per session-duration bucket. Each session is one data point. "
+            f"Sessions defined by <{SESSION_GAP_MIN}min gap between games."
+        )
+    else:
+        name = _display_label(player) or ""
+        ax.set_title(f"Marathon penalty - {name}")
+        subtitle = (
+            f"Pooled WR per session-duration bucket for {name}. "
+            f"Sessions defined by <{SESSION_GAP_MIN}min gap between games."
+        )
+
+    _subtitle(ax, subtitle)
+    ax.legend(loc="lower right", fontsize=9)
+    _polish_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
+# --- 52. KDA dominance within shared games --------------------------------
+
+
+def compute_kda_dominance_pairs(df: pd.DataFrame, min_games: int = 5) -> pd.DataFrame:
+    """Pairwise KDA dominance across same-team shared games.
+
+    For every (person_i, person_j) with i < j alphabetically:
+      - ``n`` = shared same-team games
+      - ``i_wins`` = games where person_i's KDA strictly exceeded person_j's
+      - ``p_i_dominant`` = i_wins / n
+      - ``ci_lo`` / ``ci_hi`` = Wilson 95% CI on ``p_i_dominant``
+      - ``mean_diff`` = mean of ``kda_i - kda_j`` over the shared games
+      - ``pvalue`` = two-sided normal approximation to a binomial test of
+        H0: p = 0.5. scipy isn't in the project, so the same erfc trick the
+        ``chi2_pvalue`` helper uses elsewhere does the job here.
+
+    Same-team detection mirrors :func:`compute_duos`: join on
+    ``(match_id, win)`` and keep ``person_x < person_y`` so each unordered
+    pair appears once. Rows with NaN KDA are dropped before the self-join
+    so missing kills/assists/deaths can't silently get counted as "i lost".
+    """
+    if df.empty:
+        return pd.DataFrame(
+            columns=[
+                "a",
+                "b",
+                "n",
+                "i_wins",
+                "p_i_dominant",
+                "ci_lo",
+                "ci_hi",
+                "mean_diff",
+                "pvalue",
+            ]
+        )
+
+    m = (
+        df[["match_id", "win", "person", "kda"]]
+        .dropna(subset=["kda"])
+        .drop_duplicates(subset=["match_id", "person"])
+    )
+    pairs = m.merge(m, on=["match_id", "win"], suffixes=("_x", "_y"))
+    pairs = pairs[pairs["person_x"] < pairs["person_y"]].copy()
+    if pairs.empty:
+        return pd.DataFrame(
+            columns=[
+                "a",
+                "b",
+                "n",
+                "i_wins",
+                "p_i_dominant",
+                "ci_lo",
+                "ci_hi",
+                "mean_diff",
+                "pvalue",
+            ]
+        )
+    pairs["i_wins"] = (pairs["kda_x"] > pairs["kda_y"]).astype(int)
+    pairs["diff"] = pairs["kda_x"] - pairs["kda_y"]
+
+    agg = (
+        pairs.groupby(["person_x", "person_y"])
+        .agg(n=("i_wins", "size"), i_wins=("i_wins", "sum"), mean_diff=("diff", "mean"))
+        .reset_index()
+        .rename(columns={"person_x": "a", "person_y": "b"})
+    )
+    agg = agg[agg["n"] >= min_games].copy()
+    if agg.empty:
+        return agg.assign(p_i_dominant=[], ci_lo=[], ci_hi=[], pvalue=[])
+
+    agg["p_i_dominant"] = agg["i_wins"] / agg["n"]
+    ci_pairs = [wilson_ci(int(w), int(n)) for w, n in zip(agg["i_wins"], agg["n"], strict=False)]
+    agg["ci_lo"] = [lo for lo, _ in ci_pairs]
+    agg["ci_hi"] = [hi for _, hi in ci_pairs]
+
+    # Two-sided binomial p-value under H0 p=0.5 via normal approximation —
+    # consistent with chi2_pvalue's "no scipy" approach. At n>=5 with p=0.5
+    # this is plenty accurate for the "is this real?" callout.
+    def _p(k: int, n: int) -> float:
+        if n <= 0:
+            return 1.0
+        z = abs(k - n / 2.0) / math.sqrt(n / 4.0)
+        return math.erfc(z / math.sqrt(2.0))
+
+    agg["pvalue"] = [_p(int(w), int(n)) for w, n in zip(agg["i_wins"], agg["n"], strict=False)]
+    return agg.sort_values(["n", "p_i_dominant"], ascending=[False, False]).reset_index(drop=True)
+
+
+def plot_kda_dominance(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Within shared same-team games, who out-KDAs whom?
+
+    Aggregate: a symmetric heatmap — cell (i, j) shows the % of shared
+    games where row i's KDA beat col j's. Only the upper triangle is filled
+    because (i, j) and (j, i) are mirror images (p_ij = 1 - p_ji).
+    Diagonal and below-threshold cells are greyed.
+
+    Per-person: a horizontal bar of the focal player's dominance vs each
+    qualifying teammate, with Wilson 95% CI whiskers and a reference line
+    at 50%.
+    """
+    pairs = compute_kda_dominance_pairs(df, min_games=5)
+
+    if not _is_aggregate(player):
+        focal = _resolve_person(df, player)
+        display_name = _display_label(player) or "this player"
+        if not focal or pairs.empty:
+            return _empty_figure("Not enough shared-game data with other tracked players")
+        own = pairs[(pairs["a"] == focal) | (pairs["b"] == focal)].copy()
+        if own.empty:
+            return _empty_figure("Not enough shared-game data with other tracked players")
+        # Re-orient so the focal player is always "i".
+        own["teammate"] = np.where(own["a"] == focal, own["b"], own["a"])
+        own["p_dominant"] = np.where(
+            own["a"] == focal, own["p_i_dominant"], 1 - own["p_i_dominant"]
+        )
+        # Mirror the Wilson CI when the focal player is on the "b" side.
+        own["lo"] = np.where(own["a"] == focal, own["ci_lo"], 1 - own["ci_hi"])
+        own["hi"] = np.where(own["a"] == focal, own["ci_hi"], 1 - own["ci_lo"])
+        own["focal_wins"] = np.where(own["a"] == focal, own["i_wins"], own["n"] - own["i_wins"])
+
+        if len(own) < 5:
+            return _empty_figure("Not enough shared-game data with other tracked players")
+
+        own = own.sort_values("p_dominant", ascending=True).reset_index(drop=True)
+        ys = np.arange(len(own))
+        ps = own["p_dominant"].to_numpy()
+        los = own["lo"].to_numpy()
+        his = own["hi"].to_numpy()
+        ns = own["n"].to_numpy()
+
+        fig, ax = plt.subplots(figsize=(11, max(4.0, 0.45 * len(own) + 2.0)))
+        colours = [PALETTE["win"] if p >= 0.5 else PALETTE["loss"] for p in ps]
+        ax.barh(ys, ps, color=colours, height=0.7)
+        ax.errorbar(
+            ps,
+            ys,
+            xerr=[ps - los, his - ps],
+            **WHISKER_STYLE,
+        )
+        ax.axvline(0.5, color=PALETTE["muted"], linestyle="--", linewidth=1.0, label="even (50%)")
+        ax.set_yticks(ys)
+        ax.set_yticklabels(own["teammate"].tolist())
+        ax.set_xlim(0.0, 1.0)
+        ax.set_xlabel("Share of shared games where your KDA > teammate's")
+        ax.set_title(_title("KDA dominance", player))
+        _subtitle(
+            ax,
+            "Fraction of shared games where your KDA > teammate's. Wilson 95% CIs.",
+        )
+        ax.legend(loc="lower right")
+        _polish_ax(ax)
+        for yi, (p, n, mate) in enumerate(zip(ps, ns, own["teammate"].tolist(), strict=False)):
+            ax.annotate(
+                f"{p:.0%}  vs {mate}  (n={int(n)})",
+                xy=(p, yi),
+                xytext=(6, 0),
+                textcoords="offset points",
+                va="center",
+                fontsize=9,
+                color=PALETTE["text"],
+            )
+        # Replace the default title with the spec's per-person header
+        # (overrides _title's "KDA dominance · <name>" with a clearer form).
+        ax.set_title(f"KDA dominance - {display_name}")
+        fig.tight_layout()
+        return fig
+
+    # --- Aggregate heatmap -------------------------------------------------
+    if pairs.empty or len(pairs) < 3:
+        return _empty_figure("Need >=3 (player, player) pairs with >=5 shared games")
+
+    players = sorted(set(pairs["a"]) | set(pairs["b"]))
+    n_players = len(players)
+    idx = {name: i for i, name in enumerate(players)}
+
+    p_grid = np.full((n_players, n_players), np.nan)
+    n_grid = np.zeros((n_players, n_players), dtype=int)
+    for _, row in pairs.iterrows():
+        i = idx[row["a"]]
+        j = idx[row["b"]]
+        # Upper triangle from the alphabetical pair: row a, col b.
+        p_grid[i, j] = float(row["p_i_dominant"])
+        n_grid[i, j] = int(row["n"])
+        # Mirror so the lower triangle reads as "row's dominance over col".
+        p_grid[j, i] = 1.0 - float(row["p_i_dominant"])
+        n_grid[j, i] = int(row["n"])
+
+    # Render only the upper triangle as instructed; mask the rest as NaN.
+    show = np.full_like(p_grid, np.nan)
+    for i in range(n_players):
+        for j in range(n_players):
+            if j > i and not np.isnan(p_grid[i, j]):
+                show[i, j] = p_grid[i, j]
+
+    import matplotlib as mpl
+
+    cmap = mpl.colormaps.get_cmap("RdYlGn").copy()
+    cmap.set_bad(color="#dcdcdc")
+    norm = mpl.colors.Normalize(vmin=0.0, vmax=1.0)
+
+    fig, (ax, cax) = plt.subplots(
+        1,
+        2,
+        figsize=(1.2 * n_players + 4.5, 0.85 * n_players + 2.5),
+        gridspec_kw={"width_ratios": [22, 1]},
+    )
+    im = ax.imshow(show, cmap=cmap, norm=norm, aspect="equal")
+
+    ax.set_xticks(np.arange(n_players))
+    ax.set_xticklabels(players, rotation=35, ha="right")
+    ax.set_yticks(np.arange(n_players))
+    ax.set_yticklabels(players)
+
+    for i in range(n_players):
+        for j in range(n_players):
+            if i == j:
+                ax.text(j, i, "-", ha="center", va="center", color=PALETTE["muted"], fontsize=11)
+                continue
+            if j <= i:
+                # Lower triangle implied by the upper; leave blank.
+                ax.text(j, i, "", ha="center", va="center")
+                continue
+            n = n_grid[i, j]
+            p = p_grid[i, j]
+            if n < 5 or np.isnan(p):
+                ax.text(j, i, "-", ha="center", va="center", color=PALETTE["muted"], fontsize=11)
+                continue
+            # Near-50 cells land in the yellow zone of RdYlGn where dark text
+            # reads; extremes darken and want white.
+            txt_colour = PALETTE["text"] if abs(p - 0.5) < 0.12 else "white"
+            ax.text(
+                j,
+                i,
+                f"{p:.0%}\nn={int(n)}",
+                ha="center",
+                va="center",
+                fontsize=9,
+                color=txt_colour,
+            )
+
+    ax.set_xticks(np.arange(n_players + 1) - 0.5, minor=True)
+    ax.set_yticks(np.arange(n_players + 1) - 0.5, minor=True)
+    ax.grid(which="minor", color="white", linewidth=2)
+    ax.tick_params(which="minor", length=0)
+    ax.tick_params(which="major", length=0)
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+
+    ax.set_title("KDA dominance - who carries when paired?")
+    _subtitle(
+        ax,
+        "Per-pair % of shared games where row's KDA > col's KDA. "
+        "Cells with <5 shared games shown grey.",
+    )
+
+    cbar = fig.colorbar(im, cax=cax)
+    cbar.set_label("Row dominates column (%)")
+    cbar.set_ticks([0.0, 0.25, 0.5, 0.75, 1.0])
+    cbar.ax.set_yticklabels(["0%", "25%", "50%", "75%", "100%"])
+
+    fig.tight_layout()
+    return fig
+
+
+# --- 53. Rank recovery ------------------------------------------------------
+
+
+def _compute_demotion_events(ranks: pd.DataFrame) -> pd.DataFrame:
+    """All tier-demotion events across players with recovery time (days).
+
+    For each person, collapse consecutive rows at the same tier into a single
+    "tier group" (start_ts = first snapshot of the group) so intra-tier LP
+    noise can't fire a transition. Then walk group-to-group: every drop in
+    ``tier_rank`` is one demotion event with original tier T. Recovery_ts is
+    the start of the next group whose ``tier_rank`` >= rank(T). Cascading
+    drops (T -> T-1 -> T-2) create two separate events — each tracks its own
+    original tier.
+    """
+    rank_of = {tier: i for i, tier in enumerate(TIER_ORDER)}
+    events: list[dict] = []
+    for person, g in ranks.sort_values(["person", "timestamp"]).groupby("person", sort=False):
+        if len(g) < 5:
+            continue
+        # Collapse consecutive same-tier rows into groups. ``shift != ``
+        # cumsum gives a fresh group id every time the tier changes.
+        tiers = g["tier"].to_numpy()
+        change = np.concatenate(([True], tiers[1:] != tiers[:-1]))
+        group_id = np.cumsum(change) - 1
+        first_idx = []
+        last_idx = []
+        for gid in range(group_id.max() + 1):
+            mask = group_id == gid
+            idxs = np.where(mask)[0]
+            first_idx.append(idxs[0])
+            last_idx.append(idxs[-1])
+        group_tiers = [tiers[i] for i in first_idx]
+        group_starts = g["timestamp"].to_numpy()[first_idx]
+        # Skip any tier we don't recognise (defensive — shouldn't happen
+        # because load_rank_history filters NULLs upstream).
+        group_ranks = [rank_of.get(t, -1) for t in group_tiers]
+
+        for i in range(len(group_tiers) - 1):
+            prev_rank = group_ranks[i]
+            next_rank = group_ranks[i + 1]
+            if prev_rank < 0 or next_rank < 0:
+                continue
+            if next_rank >= prev_rank:
+                continue
+            # Demotion: original tier is the one we dropped FROM.
+            demoted_at = group_starts[i + 1]
+            recovered_at = None
+            for j in range(i + 2, len(group_tiers)):
+                if group_ranks[j] >= prev_rank:
+                    recovered_at = group_starts[j]
+                    break
+            recovery_days = None
+            if recovered_at is not None:
+                recovery_days = (
+                    pd.Timestamp(recovered_at) - pd.Timestamp(demoted_at)
+                ).total_seconds() / 86400
+            events.append(
+                {
+                    "person": person,
+                    "from_tier": group_tiers[i],
+                    "to_tier": group_tiers[i + 1],
+                    "demoted_at": pd.Timestamp(demoted_at),
+                    "recovered_at": pd.Timestamp(recovered_at)
+                    if recovered_at is not None
+                    else pd.NaT,
+                    "recovery_days": recovery_days,
+                    "ongoing": recovered_at is None,
+                }
+            )
+    if not events:
+        return pd.DataFrame(
+            columns=[
+                "person",
+                "from_tier",
+                "to_tier",
+                "demoted_at",
+                "recovered_at",
+                "recovery_days",
+                "ongoing",
+            ]
+        )
+    return pd.DataFrame(events)
+
+
+def plot_rank_recovery(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Time to climb back after a tier demotion.
+
+    Aggregate: histogram of recovery_days across every qualifying demotion
+    event in the friend group, with median + IQR annotated and an ongoing
+    count called out. Per-person: a card showing the player's longest
+    recovery, their most recent demotion, and a step-line of their tier
+    over time with demotion markers.
+    """
+    try:
+        ranks = load_rank_history(DEFAULT_DB)
+    except Exception as exc:
+        return _empty_figure(f"Could not load rank history: {exc!r}")
+    if ranks.empty:
+        return _empty_figure("No rank history available")
+
+    events = _compute_demotion_events(ranks)
+
+    if _is_aggregate(player):
+        recovered = events[~events["ongoing"]]
+        if len(recovered) < 3:
+            return _empty_figure("Need >=3 demotion events across the friend group")
+
+        days = recovered["recovery_days"].to_numpy(dtype=float)
+        median = float(np.median(days))
+        q1 = float(np.percentile(days, 25))
+        q3 = float(np.percentile(days, 75))
+        ongoing_n = int(events["ongoing"].sum())
+
+        fig, ax = plt.subplots(figsize=(11, 4.8))
+        # Recovery times span ~6 orders of magnitude (minutes to >1 year):
+        # log-spaced bins keep both the boundary-bounce mass at the low end
+        # and the multi-month grinds at the high end legible.
+        floor = max(days.min(), 1 / 1440)  # 1 minute floor for log scale
+        days_clip = np.clip(days, floor, None)
+        bins = np.logspace(np.log10(floor), np.log10(days_clip.max()), 20)
+        ax.hist(days_clip, bins=bins, color=PALETTE["primary"], alpha=0.85, edgecolor="white")
+        ax.axvline(
+            median, color=PALETTE["accent_orange"], linewidth=1.6, label=f"Median {median:.2f}d"
+        )
+        ax.axvspan(
+            max(q1, floor),
+            q3,
+            color=PALETTE["accent_orange"],
+            alpha=0.12,
+            label=f"IQR {q1:.2f}-{q3:.2f}d",
+        )
+        ax.set_xscale("log")
+        ax.set_xlabel("Days to recover original tier  (log scale)")
+        ax.set_ylabel("Demotion events")
+        ax.set_title("Tier recovery time - days to climb back after a demotion")
+        ongoing_note = f"  {ongoing_n} demotion(s) never recovered (excluded)." if ongoing_n else ""
+        _subtitle(
+            ax,
+            f"Histogram of recovery times across all qualifying demotion events. "
+            f"n={len(days)} recovered, median + IQR shown.{ongoing_note}",
+        )
+        ax.legend(loc="upper right")
+        _polish_ax(ax)
+        fig.tight_layout()
+        return fig
+
+    # --- Per-person card ----------------------------------------------------
+    focal = _resolve_person(df, player) if isinstance(df, pd.DataFrame) and not df.empty else None
+    if not focal:
+        # Fall back to the bare label so we can still render when df is empty
+        # (the aggregate validation loop passes a hydrated df, but defensive).
+        label = _display_label(player)
+        focal = label
+    name = _display_label(player) or "this player"
+    person_ranks = ranks[ranks["person"] == focal].sort_values("timestamp").reset_index(drop=True)
+    if len(person_ranks) < 5:
+        return _empty_figure(f"Need more rank-history data for {name}")
+
+    person_events = (
+        events[events["person"] == focal].sort_values("demoted_at").reset_index(drop=True)
+    )
+    if person_events.empty:
+        return _empty_figure(f"No tier demotions detected for {name}")
+
+    recovered = person_events[~person_events["ongoing"]]
+    ongoing = person_events[person_events["ongoing"]]
+    n_total = len(person_events)
+    n_recovered = len(recovered)
+    n_ongoing = len(ongoing)
+    median_days = float(recovered["recovery_days"].median()) if n_recovered else float("nan")
+
+    if n_recovered:
+        longest = recovered.loc[recovered["recovery_days"].idxmax()]
+        longest_text = (
+            f"Longest: {longest['from_tier'].title()} -> {longest['to_tier'].title()}  "
+            f"({longest['recovery_days']:.1f}d, climbed back {longest['recovered_at'].strftime('%Y-%m-%d')})"
+        )
+    else:
+        longest_text = "Longest: no completed recoveries yet."
+
+    most_recent = person_events.iloc[-1]
+    if most_recent["ongoing"]:
+        days_so_far = (
+            pd.Timestamp.now(tz=most_recent["demoted_at"].tz) - most_recent["demoted_at"]
+        ).total_seconds() / 86400
+        recent_text = (
+            f"Most recent: {most_recent['from_tier'].title()} -> {most_recent['to_tier'].title()}  "
+            f"({most_recent['demoted_at'].strftime('%Y-%m-%d')}, ongoing - {days_so_far:.1f}d so far)"
+        )
+    else:
+        recent_text = (
+            f"Most recent: {most_recent['from_tier'].title()} -> {most_recent['to_tier'].title()}  "
+            f"({most_recent['demoted_at'].strftime('%Y-%m-%d')}, recovered in {most_recent['recovery_days']:.1f}d)"
+        )
+
+    fig = plt.figure(figsize=(12, 6.4), constrained_layout=True)
+    gs = fig.add_gridspec(3, 1, height_ratios=[0.6, 0.6, 3.0], hspace=0.25)
+    ax_top = fig.add_subplot(gs[0, 0])
+    ax_mid = fig.add_subplot(gs[1, 0])
+    ax_bot = fig.add_subplot(gs[2, 0])
+
+    for ax, text in ((ax_top, longest_text), (ax_mid, recent_text)):
+        ax.set_axis_off()
+        ax.text(
+            0.02,
+            0.5,
+            text,
+            ha="left",
+            va="center",
+            color=PALETTE["text"],
+            fontsize=12,
+        )
+
+    # Timeline: rank_score step plot + demotion markers.
+    person_ranks["inter_h"] = person_ranks["timestamp"].diff().dt.total_seconds() / 3600
+    rank_plot = person_ranks["rank_score"].where(
+        ~(person_ranks["inter_h"] > RANK_GAP_HOURS), np.nan
+    )
+    ax_bot.plot(
+        person_ranks["timestamp"],
+        rank_plot,
+        color=PALETTE["primary"],
+        linewidth=1.6,
+    )
+    # All demotion markers as light hairlines; loud highlights for the
+    # longest + most-recent so the text callouts have visible anchors.
+    for _, ev in person_events.iterrows():
+        ax_bot.axvline(
+            ev["demoted_at"],
+            color=PALETTE["muted"],
+            linewidth=0.6,
+            alpha=0.25,
+            linestyle="-",
+        )
+    if n_recovered:
+        ax_bot.axvline(
+            longest["demoted_at"],
+            color=PALETTE["accent_orange"],
+            linewidth=1.6,
+            alpha=0.9,
+            linestyle="--",
+            label="longest",
+        )
+    recent_colour = PALETTE["loss"] if most_recent["ongoing"] else PALETTE["accent_teal"]
+    ax_bot.axvline(
+        most_recent["demoted_at"],
+        color=recent_colour,
+        linewidth=1.6,
+        alpha=0.9,
+        linestyle="--",
+        label="most recent",
+    )
+    ax_bot.legend(loc="lower right", fontsize=9)
+    _rank_axis(ax_bot)
+    ax_bot.set_xlabel("Date")
+    ax_bot.set_ylabel("Rank")
+    _polish_ax(ax_bot)
+
+    median_part = (
+        f"Median recovery: {median_days:.1f} days."
+        if n_recovered
+        else "No completed recoveries yet."
+    )
+    fig.suptitle(f"Rank recovery - {name}", fontsize=14, fontweight="bold")
+    ax_top.set_title(
+        f"You've had {n_total} tier demotions. {n_recovered} recovered, "
+        f"{n_ongoing} ongoing. {median_part}",
+        fontsize=10,
+        color=PALETTE["muted"],
+        loc="left",
+        pad=2,
+        fontweight="normal",
+    )
+    return fig
+
+
+# --- 54. Last game of day --------------------------------------------------
+
+_LAST_GAME_MIN_DAYS = 10
+_LAST_GAME_BOOT = 2000
+
+
+def _two_prop_z_p(x1: int, n1: int, x2: int, n2: int) -> float:
+    """Two-tailed two-proportion z-test p-value (pooled SE). NaN when undefined."""
+    if n1 <= 0 or n2 <= 0:
+        return float("nan")
+    p1 = x1 / n1
+    p2 = x2 / n2
+    p_pool = (x1 + x2) / (n1 + n2)
+    se = math.sqrt(p_pool * (1 - p_pool) * (1 / n1 + 1 / n2))
+    if se == 0:
+        return float("nan")
+    z = (p1 - p2) / se
+    return math.erfc(abs(z) / math.sqrt(2))
+
+
+def _last_game_of_day_per_player(df: pd.DataFrame) -> pd.DataFrame:
+    """Per-player aggregates over multi-game days.
+
+    For each (person, date) with >=2 games, the chronologically last game
+    contributes one trial to ``last_*`` and the remaining games contribute to
+    ``non_last_*``. Pools across all qualifying days per player.
+    """
+    if df.empty:
+        return pd.DataFrame(
+            columns=[
+                "person",
+                "n_days",
+                "last_wins",
+                "last_n",
+                "non_last_wins",
+                "non_last_n",
+                "last_wr",
+                "non_last_wr",
+            ]
+        )
+    # Stable chronological order so .tail(1) really gives the last game.
+    d = df.sort_values(["person", "game_start"]).copy()
+    sizes = d.groupby(["person", "date"]).size()
+    multi = sizes[sizes >= 2].index
+    if len(multi) == 0:
+        return pd.DataFrame(
+            columns=[
+                "person",
+                "n_days",
+                "last_wins",
+                "last_n",
+                "non_last_wins",
+                "non_last_n",
+                "last_wr",
+                "non_last_wr",
+            ]
+        )
+    multi_idx = pd.MultiIndex.from_tuples(multi.tolist(), names=["person", "date"])
+    keep = d.set_index(["person", "date"]).index.isin(multi_idx)
+    md = d[keep].copy()
+
+    # The last row within each (person, date) is the player's last game of
+    # that day. Everything else on multi-game days is "non-last".
+    last_rows = md.groupby(["person", "date"], sort=False).tail(1)
+    last_idx = last_rows.index
+    md["is_last"] = md.index.isin(last_idx)
+
+    last = md[md["is_last"]]
+    non_last = md[~md["is_last"]]
+
+    last_agg = last.groupby("person")["win"].agg(last_wins="sum", last_n="count")
+    non_last_agg = non_last.groupby("person")["win"].agg(non_last_wins="sum", non_last_n="count")
+    out = last_agg.join(non_last_agg, how="outer").fillna(0).astype(int).reset_index()
+    out["n_days"] = out["last_n"]  # one last-game per multi-game day
+    out["last_wr"] = np.where(out["last_n"] > 0, out["last_wins"] / out["last_n"], np.nan)
+    out["non_last_wr"] = np.where(
+        out["non_last_n"] > 0, out["non_last_wins"] / out["non_last_n"], np.nan
+    )
+    return out[
+        [
+            "person",
+            "n_days",
+            "last_wins",
+            "last_n",
+            "non_last_wins",
+            "non_last_n",
+            "last_wr",
+            "non_last_wr",
+        ]
+    ]
+
+
+def _last_game_bootstrap_diff(
+    last_wr: np.ndarray, non_last_wr: np.ndarray, n_boot: int = _LAST_GAME_BOOT
+) -> tuple[float, float, float]:
+    """Paired bootstrap (resample players) for macro mean of per-player diffs."""
+    n = len(last_wr)
+    if n == 0:
+        return (float("nan"), float("nan"), float("nan"))
+    diffs_obs = last_wr - non_last_wr
+    rng = np.random.default_rng(20260524)
+    boot = np.empty(n_boot)
+    for i in range(n_boot):
+        idx = rng.integers(0, n, size=n)
+        boot[i] = diffs_obs[idx].mean()
+    return (
+        float(diffs_obs.mean()),
+        float(np.percentile(boot, 2.5)),
+        float(np.percentile(boot, 97.5)),
+    )
+
+
+def plot_last_game_of_day(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """WR of the last game on multi-game days vs WR of non-last games.
+
+    Tests for "play until you win" (keep going on losses, stop on wins) and
+    its mirror "quit while ahead" (stop after a win) — both patterns inflate
+    the last-game WR by selection, so direction alone is not diagnostic.
+    """
+    per_player = _last_game_of_day_per_player(df)
+    qualifying = per_player[per_player["n_days"] >= _LAST_GAME_MIN_DAYS].copy()
+
+    if _is_aggregate(player):
+        if len(qualifying) < 3:
+            return _empty_figure("Need >=3 players with >=10 multi-game days")
+        return _plot_last_game_aggregate(qualifying)
+
+    label = _display_label(player) or "this player"
+    person = _resolve_person(df, player)
+    if person is None:
+        return _empty_figure(f"No games for {label}")
+    row = per_player[per_player["person"] == person]
+    if row.empty or int(row["n_days"].iloc[0]) < _LAST_GAME_MIN_DAYS:
+        n_days = int(row["n_days"].iloc[0]) if not row.empty else 0
+        return _empty_figure(f"Need >=10 multi-game days ({n_days} for {label})")
+    return _plot_last_game_per_person(row.iloc[0], label)
+
+
+def _plot_last_game_aggregate(qualifying: pd.DataFrame) -> plt.Figure:
+    qualifying = (
+        qualifying.assign(delta=qualifying["last_wr"] - qualifying["non_last_wr"])
+        .sort_values("delta", ascending=False)
+        .reset_index(drop=True)
+    )
+
+    last_wr = qualifying["last_wr"].to_numpy()
+    non_last_wr = qualifying["non_last_wr"].to_numpy()
+    deltas = last_wr - non_last_wr
+    mean_diff, ci_lo, ci_hi = _last_game_bootstrap_diff(last_wr, non_last_wr)
+    macro_last = float(last_wr.mean())
+    macro_non_last = float(non_last_wr.mean())
+
+    if ci_lo > 0:
+        verdict = "Δ > 0 (play-until-win OR quit-while-ahead)"
+    elif ci_hi < 0:
+        verdict = "Δ < 0 (last game underperforms)"
+    else:
+        verdict = "no detectable difference"
+
+    last_cis = [
+        wilson_ci(int(w), int(n))
+        for w, n in zip(qualifying["last_wins"], qualifying["last_n"], strict=False)
+    ]
+    non_last_cis = [
+        wilson_ci(int(w), int(n))
+        for w, n in zip(qualifying["non_last_wins"], qualifying["non_last_n"], strict=False)
+    ]
+    last_lo = np.array([c[0] for c in last_cis])
+    last_hi = np.array([c[1] for c in last_cis])
+    non_last_lo = np.array([c[0] for c in non_last_cis])
+    non_last_hi = np.array([c[1] for c in non_last_cis])
+
+    n = len(qualifying)
+    y_players = np.arange(n) + 1
+    y_macro = 0
+    bar_h = 0.36
+
+    fig, ax = plt.subplots(figsize=(11, max(5.0, 0.55 * n + 2.5)))
+    ax.barh(
+        y_players - bar_h / 2,
+        last_wr,
+        height=bar_h,
+        color=PALETTE["primary"],
+        label="Last game WR",
+        zorder=2,
+    )
+    ax.barh(
+        y_players + bar_h / 2,
+        non_last_wr,
+        height=bar_h,
+        color=PALETTE["accent_orange"],
+        label="Non-last WR",
+        zorder=2,
+    )
+    ax.errorbar(
+        last_wr,
+        y_players - bar_h / 2,
+        xerr=[last_wr - last_lo, last_hi - last_wr],
+        **WHISKER_STYLE,
+        zorder=3,
+    )
+    ax.errorbar(
+        non_last_wr,
+        y_players + bar_h / 2,
+        xerr=[non_last_wr - non_last_lo, non_last_hi - non_last_wr],
+        **WHISKER_STYLE,
+        zorder=3,
+    )
+    # Macro summary row.
+    ax.barh(y_macro - bar_h / 2, macro_last, height=bar_h, color=PALETTE["primary"], alpha=0.55)
+    ax.barh(
+        y_macro + bar_h / 2,
+        macro_non_last,
+        height=bar_h,
+        color=PALETTE["accent_orange"],
+        alpha=0.55,
+    )
+    ax.axvline(0.5, color=PALETTE["spine"], linewidth=0.8, alpha=0.6)
+
+    # Per-row delta annotation past the longer of the two whiskers.
+    rightmost = np.maximum(last_hi, non_last_hi)
+    for i, delta in enumerate(deltas):
+        ax.text(
+            rightmost[i] + 0.01,
+            y_players[i],
+            f"Δ {delta:+.1%}",
+            va="center",
+            ha="left",
+            fontsize=9,
+            color=PALETTE["text"],
+        )
+    ax.text(
+        max(macro_last, macro_non_last) + 0.01,
+        y_macro,
+        f"Δ {mean_diff:+.1%}",
+        va="center",
+        ha="left",
+        fontsize=9,
+        color=PALETTE["text"],
+        fontweight="bold",
+    )
+
+    yticks = [y_macro, *list(y_players)]
+    yticklabels = ["MACRO MEAN", *[str(p) for p in qualifying["person"].tolist()]]
+    ax.set_yticks(yticks)
+    ax.set_yticklabels(yticklabels)
+    ax.invert_yaxis()
+    ax.set_xlim(
+        0.0,
+        max(0.8, float(max(last_hi.max(), non_last_hi.max(), macro_last, macro_non_last)) + 0.18),
+    )
+    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
+    ax.set_xlabel("Win rate")
+    ax.legend(loc="lower right", frameon=False)
+
+    ax.set_title("Last game of multi-game days vs non-last")
+    _subtitle(
+        ax,
+        "Tests 'play until you win' (Delta > 0) vs 'quit ahead' (Delta also > 0, but "
+        f"from selection). Both produce positive Delta, so direction alone isn't "
+        f"diagnostic. Macro Delta = {mean_diff:+.1%} [95% CI {ci_lo:+.1%}, {ci_hi:+.1%}]; "
+        f"{verdict}.",
+    )
+    _polish_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
+def _plot_last_game_per_person(row: pd.Series, label: str) -> plt.Figure:
+    last_w = int(row["last_wins"])
+    last_n = int(row["last_n"])
+    non_last_w = int(row["non_last_wins"])
+    non_last_n = int(row["non_last_n"])
+    p_last = last_w / last_n if last_n > 0 else float("nan")
+    p_non_last = non_last_w / non_last_n if non_last_n > 0 else float("nan")
+    ci_last = wilson_ci(last_w, last_n) if last_n > 0 else (float("nan"), float("nan"))
+    ci_non_last = (
+        wilson_ci(non_last_w, non_last_n) if non_last_n > 0 else (float("nan"), float("nan"))
+    )
+
+    p_val = _two_prop_z_p(last_w, last_n, non_last_w, non_last_n)
+    if math.isnan(p_val):
+        p_text = "p=n/a"
+        interp = "insufficient data"
+    else:
+        p_text = f"p={p_val:.3f}"
+        if p_val < 0.05:
+            if (p_last - p_non_last) > 0:
+                interp = "last game over-performs (significant)"
+            else:
+                interp = "last game under-performs (significant)"
+        else:
+            interp = "no significant difference"
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    x = np.arange(2)
+    means = np.array(
+        [
+            p_last if not math.isnan(p_last) else 0.0,
+            p_non_last if not math.isnan(p_non_last) else 0.0,
+        ]
+    )
+    ax.bar(x, means, color=[PALETTE["primary"], PALETTE["accent_orange"]], width=0.55, zorder=2)
+    err_lo = np.array(
+        [
+            (p_last - ci_last[0]) if not math.isnan(p_last) else 0.0,
+            (p_non_last - ci_non_last[0]) if not math.isnan(p_non_last) else 0.0,
+        ]
+    )
+    err_hi = np.array(
+        [
+            (ci_last[1] - p_last) if not math.isnan(p_last) else 0.0,
+            (ci_non_last[1] - p_non_last) if not math.isnan(p_non_last) else 0.0,
+        ]
+    )
+    ax.errorbar(x, means, yerr=[err_lo, err_hi], **WHISKER_STYLE, zorder=3)
+    ax.axhline(0.5, color=PALETTE["spine"], linewidth=0.8, alpha=0.6)
+
+    label_ys = means + err_hi + 0.02
+    for i, (mean, n_, ly) in enumerate(zip(means, (last_n, non_last_n), label_ys, strict=True)):
+        ax.text(
+            i,
+            ly,
+            f"{mean:.0%}\nn={n_}",
+            ha="center",
+            va="bottom",
+            fontsize=10,
+            color=PALETTE["text"],
+        )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(["Last game of day", "Non-last games"])
+    ax.set_ylabel("Win rate on multi-game days")
+    ax.set_ylim(0, max(0.7, float(label_ys.max()) + 0.18))
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0%}"))
+
+    delta = (p_last - p_non_last) if (last_n > 0 and non_last_n > 0) else float("nan")
+    ax.set_title(f"Last game of day - {label}")
+    _subtitle(
+        ax,
+        f"WR of chronologically last game on multi-game days vs WR of non-last games. "
+        f"Delta = {delta:+.1%}; two-proportion z-test {p_text} - {interp}. "
+        f"n_days={int(row['n_days'])}.",
+    )
+    _polish_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
+# --- 55. Longest historical streaks ----------------------------------------
+
+#: Minimum games for either a per-person streak chart or a player to qualify
+#: for the aggregate. Below this the Schilling baseline is too noisy to be
+#: meaningful — the expected-max grows like log(n), but the variance is
+#: substantial at small n.
+_LONGEST_STREAK_MIN_GAMES = 50
+
+
+def _longest_run(wins: np.ndarray, dates: np.ndarray, *, target: int) -> tuple[int, object, object]:
+    """Longest run of consecutive ``target`` values in ``wins``.
+
+    Returns ``(length, start_date, end_date)``. Both dates are entries from
+    the parallel ``dates`` array marking the first and last games in the
+    streak; length 0 returns ``(0, None, None)``.
+    """
+    best_len = 0
+    best_start_idx = -1
+    best_end_idx = -1
+    cur_len = 0
+    cur_start_idx = -1
+    for i, w in enumerate(wins):
+        if int(w) == target:
+            if cur_len == 0:
+                cur_start_idx = i
+            cur_len += 1
+            if cur_len > best_len:
+                best_len = cur_len
+                best_start_idx = cur_start_idx
+                best_end_idx = i
+        else:
+            cur_len = 0
+    if best_len == 0:
+        return 0, None, None
+    return best_len, dates[best_start_idx], dates[best_end_idx]
+
+
+def _expected_max_streak(n: int, p: float) -> float:
+    """Schilling's first-order expected max run length for n i.i.d.
+    Bernoulli(p) trials, for runs of the ``p``-valued outcome.
+
+    Returns NaN when the formula is ill-defined (degenerate p, or
+    n*(1-p) <= 1 so the log is non-positive).
+    """
+    if n <= 0 or not (0.0 < p < 1.0):
+        return float("nan")
+    # Clamp away from 0 / 1 to keep log(1/p) well-conditioned and bounded.
+    p_clamped = min(max(p, 0.05), 0.95)
+    arg = n * (1.0 - p_clamped)
+    if arg <= 1.0:
+        return float("nan")
+    base = 1.0 / p_clamped
+    try:
+        return math.log(arg) / math.log(base)
+    except (ValueError, ZeroDivisionError):
+        return float("nan")
+
+
+def _longest_streak_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """Per-person max win + max loss streak with dates and Schilling baselines.
+
+    Walks each person's chronological win sequence once and records the max
+    consecutive 1-run (wins) and 0-run (losses), with the (start, end) game
+    dates. Adds expected-max under an i.i.d. coin-flip with that player's
+    realised WR.
+    """
+    if df.empty:
+        return pd.DataFrame(
+            columns=[
+                "person",
+                "n_games",
+                "wr",
+                "max_win_streak",
+                "win_start",
+                "win_end",
+                "expected_win_streak",
+                "max_loss_streak",
+                "loss_start",
+                "loss_end",
+                "expected_loss_streak",
+            ]
+        )
+    rows: list[dict[str, object]] = []
+    for person, g in df.sort_values(["person", "game_start"]).groupby("person", sort=False):
+        wins = g["win"].astype(int).to_numpy()
+        dates = g["game_start"].to_numpy()
+        n = len(wins)
+        p = float(wins.mean()) if n > 0 else float("nan")
+        max_w, w_start, w_end = _longest_run(wins, dates, target=1)
+        max_l, l_start, l_end = _longest_run(wins, dates, target=0)
+        rows.append(
+            {
+                "person": person,
+                "n_games": n,
+                "wr": p,
+                "max_win_streak": max_w,
+                "win_start": w_start,
+                "win_end": w_end,
+                "expected_win_streak": _expected_max_streak(n, p),
+                "max_loss_streak": max_l,
+                "loss_start": l_start,
+                "loss_end": l_end,
+                # Loss "p" is 1-WR; expected max loss-streak baseline.
+                "expected_loss_streak": _expected_max_streak(n, 1.0 - p)
+                if not math.isnan(p)
+                else float("nan"),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _format_streak_dates(start: object, end: object) -> str:
+    if start is None or end is None:
+        return ""
+    try:
+        s = pd.Timestamp(start).strftime("%Y-%m-%d")
+        e = pd.Timestamp(end).strftime("%Y-%m-%d")
+    except (TypeError, ValueError):
+        return ""
+    return s if s == e else f"{s} -> {e}"
+
+
+def plot_longest_streaks(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Per-player longest historical win + loss streaks vs i.i.d. baseline.
+
+    Compares each player's observed max streak (per side) against Schilling's
+    first-order expected max run length under a coin-flip with that player's
+    realised WR. The interesting cases are streaks well above expected --
+    that's where the i.i.d. null is least plausible (tilt, hot/cold runs).
+    """
+    frame = _longest_streak_frame(df)
+    qualifying = frame[frame["n_games"] >= _LONGEST_STREAK_MIN_GAMES].copy()
+
+    if _is_aggregate(player):
+        if len(qualifying) < 3:
+            return _empty_figure("Need >=3 players with >=50 games")
+        return _plot_longest_streaks_aggregate(qualifying)
+
+    label = _display_label(player) or "this player"
+    person = _resolve_person(df, player)
+    if person is None:
+        return _empty_figure(f"No games for {label}")
+    row = frame[frame["person"] == person]
+    if row.empty:
+        return _empty_figure(f"No games for {label}")
+    n = int(row["n_games"].iloc[0])
+    if n < _LONGEST_STREAK_MIN_GAMES:
+        return _empty_figure(f"Need >=50 games for streak baseline ({n})")
+    return _plot_longest_streaks_per_person(row.iloc[0], label)
+
+
+def _plot_longest_streaks_aggregate(qualifying: pd.DataFrame) -> plt.Figure:
+    # Spec: alphabetical (case-insensitive) so the chart stays stable when
+    # players have similar streak numbers and ordering by metric would jitter.
+    qualifying = qualifying.sort_values(
+        "person", key=lambda s: s.str.lower(), kind="mergesort"
+    ).reset_index(drop=True)
+
+    n = len(qualifying)
+    y = np.arange(n)
+    bar_h = 0.38
+
+    win_obs = qualifying["max_win_streak"].to_numpy(dtype=float)
+    loss_obs = qualifying["max_loss_streak"].to_numpy(dtype=float)
+    win_exp = qualifying["expected_win_streak"].to_numpy(dtype=float)
+    loss_exp = qualifying["expected_loss_streak"].to_numpy(dtype=float)
+
+    fig, ax = plt.subplots(figsize=(11, max(4.5, 0.6 * n + 2.0)))
+    ax.barh(
+        y - bar_h / 2,
+        win_obs,
+        height=bar_h,
+        color=PALETTE["win"],
+        label="Max win streak",
+        zorder=2,
+    )
+    ax.barh(
+        y + bar_h / 2,
+        loss_obs,
+        height=bar_h,
+        color=PALETTE["loss"],
+        label="Max loss streak",
+        zorder=2,
+    )
+
+    rightmost = float(max(win_obs.max(), loss_obs.max()))
+
+    def _annotate(actual: float, expected: float, ypos: float) -> None:
+        if math.isnan(expected):
+            text = f"{int(actual)}  (expected ~n/a)"
+        else:
+            text = f"{int(actual)}  (expected ~{expected:.0f})"
+            if actual - expected >= 2:
+                text += " *"
+        ax.text(
+            actual + max(0.15, rightmost * 0.015),
+            ypos,
+            text,
+            va="center",
+            ha="left",
+            fontsize=9,
+            color=PALETTE["text"],
+        )
+
+    for i in range(n):
+        _annotate(win_obs[i], win_exp[i], y[i] - bar_h / 2)
+        _annotate(loss_obs[i], loss_exp[i], y[i] + bar_h / 2)
+
+    ax.set_yticks(y)
+    ax.set_yticklabels(qualifying["person"].tolist())
+    ax.invert_yaxis()
+    ax.set_xlim(0, rightmost * 1.30 + 2.5)
+    ax.set_xlabel("Streak length (games)")
+    ax.legend(loc="lower right", frameon=False)
+
+    ax.set_title("Longest win & loss streaks per player")
+    _subtitle(
+        ax,
+        "Observed max vs coin-flip baseline assuming each game is i.i.d. with "
+        "the player's WR. A '*' marks streaks at least 2 games above the "
+        "i.i.d. expectation.",
+    )
+    _polish_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
+def _plot_longest_streaks_per_person(row: pd.Series, label: str) -> plt.Figure:
+    n = int(row["n_games"])
+    wr = float(row["wr"])
+    max_w = int(row["max_win_streak"])
+    max_l = int(row["max_loss_streak"])
+    exp_w = float(row["expected_win_streak"])
+    exp_l = float(row["expected_loss_streak"])
+    win_dates = _format_streak_dates(row["win_start"], row["win_end"])
+    loss_dates = _format_streak_dates(row["loss_start"], row["loss_end"])
+
+    fig = plt.figure(figsize=(9.5, 4.8))
+    ax = fig.add_axes((0.06, 0.10, 0.88, 0.70))
+    ax.set_axis_off()
+
+    def _exp_text(expected: float) -> str:
+        return "n/a" if math.isnan(expected) else f"{expected:.1f}"
+
+    # Two big headline numbers side-by-side.
+    ax.text(
+        0.25,
+        0.78,
+        str(max_w),
+        ha="center",
+        va="center",
+        fontsize=56,
+        fontweight="bold",
+        color=PALETTE["win"],
+    )
+    ax.text(
+        0.25,
+        0.40,
+        "MAX WIN STREAK",
+        ha="center",
+        va="center",
+        fontsize=11,
+        color=PALETTE["muted"],
+    )
+    ax.text(
+        0.25,
+        0.28,
+        win_dates or "no win streak",
+        ha="center",
+        va="center",
+        fontsize=10,
+        color=PALETTE["text"],
+    )
+    ax.text(
+        0.25,
+        0.14,
+        f"{max_w} vs expected {_exp_text(exp_w)}",
+        ha="center",
+        va="center",
+        fontsize=10,
+        color=PALETTE["muted"],
+    )
+
+    ax.text(
+        0.75,
+        0.78,
+        str(max_l),
+        ha="center",
+        va="center",
+        fontsize=56,
+        fontweight="bold",
+        color=PALETTE["loss"],
+    )
+    ax.text(
+        0.75,
+        0.40,
+        "MAX LOSS STREAK",
+        ha="center",
+        va="center",
+        fontsize=11,
+        color=PALETTE["muted"],
+    )
+    ax.text(
+        0.75,
+        0.28,
+        loss_dates or "no loss streak",
+        ha="center",
+        va="center",
+        fontsize=10,
+        color=PALETTE["text"],
+    )
+    ax.text(
+        0.75,
+        0.14,
+        f"{max_l} vs expected {_exp_text(exp_l)}",
+        ha="center",
+        va="center",
+        fontsize=10,
+        color=PALETTE["muted"],
+    )
+
+    fig.suptitle(f"Longest streaks - {label}", fontsize=14, fontweight="bold", y=0.96)
+    fig.text(
+        0.5,
+        0.86,
+        f"WR = {wr:.0%}, total games = {n}. Expected max under i.i.d. baseline shown.",
+        ha="center",
+        va="center",
+        fontsize=10,
+        style="italic",
+        color=PALETTE["muted"],
+    )
+    return fig
+
+
+# --- 56. Mahalanobis multivariate outliers ---------------------------------
+
+_MAHALANOBIS_FEATURES = ("kills", "deaths", "assists", "duration_min")
+_MAHALANOBIS_MIN_GAMES = 50
+# chi-square 0.95 quantile at df=4 — the d^2 threshold above which a game is
+# "outlier" at p<0.05 under the multivariate-normal null. Hardcoded so the
+# subtitle doesn't depend on inverting Wilson-Hilferty.
+_MAHALANOBIS_CHI2_95_DF4 = 9.488
+
+
+def plot_mahalanobis_outliers(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Top 5 most-anomalous games per player via Mahalanobis distance.
+
+    For each player's (kills, deaths, assists, duration_min) feature matrix,
+    compute d^2 = (x - mu)^T Sigma^-1 (x - mu) for every game against the
+    player's own centroid + covariance. Top 5 by d^2 are their career
+    outliers. Methodologically distinct from single-stat record holders
+    (26_match_highlights) -- this is multidimensional.
+    """
+    if _is_aggregate(player):
+        return _empty_figure("Per-person only - pick a player to find their outlier games")
+
+    label = _display_label(player) or "this player"
+    d = _filter_player(df, player).copy()
+    n = len(d)
+    if n < _MAHALANOBIS_MIN_GAMES:
+        return _empty_figure(f"Need >={_MAHALANOBIS_MIN_GAMES} games for outlier analysis ({n})")
+
+    X = d[list(_MAHALANOBIS_FEATURES)].to_numpy(dtype=float)
+    mu = X.mean(axis=0)
+    # Small ridge on the covariance for numerical stability when a feature
+    # is near-constant (e.g. a player who never dies). pinv handles the
+    # rest if the ridge isn't enough.
+    cov = np.cov(X, rowvar=False) + 1e-6 * np.eye(X.shape[1])
+    if not np.all(np.isfinite(cov)):
+        return _empty_figure("Insufficient variance in your stats for outlier detection")
+    try:
+        cov_inv = np.linalg.pinv(cov)
+    except np.linalg.LinAlgError:
+        return _empty_figure("Insufficient variance in your stats for outlier detection")
+
+    diff = X - mu
+    d2 = np.einsum("ij,jk,ik->i", diff, cov_inv, diff)
+    if not np.all(np.isfinite(d2)) or float(np.std(d2)) <= 0:
+        return _empty_figure("Insufficient variance in your stats for outlier detection")
+
+    # Per-feature z-scores let us pick the dominant driver of each game's
+    # anomaly so the headline can name the one feature that pushed d^2 up.
+    feat_std = X.std(axis=0)
+    feat_std_safe = np.where(feat_std > 0, feat_std, 1.0)
+    z_per_feat = diff / feat_std_safe
+
+    order = np.argsort(d2)[::-1]
+    top_idx = order[:5]
+
+    # Standardise for the PCA scatter only -- Mahalanobis is scale-invariant
+    # already, but raw PCA on K/D/A/duration would let duration dominate PC1.
+    X_z = diff / feat_std_safe
+    pca_pts, _components, _var_ratio = pca_2d(X_z)
+
+    # Build the outlier-game summaries up front so layout code stays clean.
+    feat_display = {
+        "kills": "kills",
+        "deaths": "deaths",
+        "assists": "assists",
+        "duration_min": "game length",
+    }
+    rows: list[dict] = []
+    for rank, i in enumerate(top_idx, start=1):
+        rec = d.iloc[i]
+        d2_val = float(d2[i])
+        p_val = chi2_pvalue(d2_val, df=len(_MAHALANOBIS_FEATURES))
+        z = z_per_feat[i]
+        driver = int(np.argmax(np.abs(z)))
+        feat_name = _MAHALANOBIS_FEATURES[driver]
+        z_val = float(z[driver])
+        direction = "high" if z_val > 0 else "low"
+        raw_val = rec[feat_name]
+        if feat_name == "duration_min":
+            value_str = f"{raw_val:.0f}m"
+        else:
+            value_str = f"{int(raw_val)}"
+        date_str = pd.Timestamp(rec["game_start"]).strftime("%Y-%m-%d")
+        headline = (
+            f"Career-{direction} {feat_display[feat_name]} ({value_str}) "
+            f"on {rec['champion']}, {date_str}"
+        )
+        rows.append(
+            {
+                "rank": rank,
+                "idx": int(i),
+                "date": date_str,
+                "champion": str(rec["champion"]),
+                "outcome": "W" if int(rec["win"]) == 1 else "L",
+                "kills": int(rec["kills"]),
+                "deaths": int(rec["deaths"]),
+                "assists": int(rec["assists"]),
+                "duration": float(rec["duration_min"]),
+                "d2": d2_val,
+                "p": p_val,
+                "headline": headline,
+            }
+        )
+
+    # --- Render: top scatter + bottom table ---------------------------------
+    fig = plt.figure(figsize=(12, 9.4))
+    gs = fig.add_gridspec(
+        2,
+        1,
+        height_ratios=[1.1, 1.0],
+        left=0.08,
+        right=0.96,
+        top=0.83,
+        bottom=0.04,
+        hspace=0.42,
+    )
+
+    ax_scatter = fig.add_subplot(gs[0])
+    ax_scatter.scatter(
+        pca_pts[:, 0],
+        pca_pts[:, 1],
+        s=14,
+        color=PALETTE["neutral"],
+        alpha=0.55,
+        zorder=2,
+    )
+    ax_scatter.scatter(
+        pca_pts[top_idx, 0],
+        pca_pts[top_idx, 1],
+        s=80,
+        color=PALETTE["loss"],
+        edgecolor="white",
+        linewidth=1.2,
+        zorder=4,
+    )
+    for rank_idx, i in enumerate(top_idx, start=1):
+        ax_scatter.annotate(
+            f"#{rank_idx}",
+            (pca_pts[i, 0], pca_pts[i, 1]),
+            xytext=(7, 5),
+            textcoords="offset points",
+            fontsize=10,
+            color=PALETTE["loss"],
+            fontweight="bold",
+        )
+    ax_scatter.set_xlabel("PC1 (standardised K/D/A/duration)")
+    ax_scatter.set_ylabel("PC2")
+    _polish_ax(ax_scatter)
+    ax_scatter.grid(True, alpha=0.25, color=PALETTE["grid"])
+
+    ax_table = fig.add_subplot(gs[1])
+    ax_table.set_axis_off()
+    ax_table.set_xlim(0, 1)
+    ax_table.set_ylim(0, 1)
+
+    # Column header + rows. Five outlier rows + a header band, evenly spaced.
+    headers = ["#", "Date", "Champion", "W/L", "K/D/A", "Dur", "d^2", "p-value"]
+    col_x = [0.015, 0.06, 0.17, 0.32, 0.40, 0.53, 0.62, 0.71]
+    ax_table.text(
+        0.0,
+        1.02,
+        "Outlier games",
+        fontsize=12,
+        fontweight="bold",
+        color=PALETTE["text"],
+        va="top",
+    )
+    header_y = 0.88
+    for x, h in zip(col_x, headers, strict=True):
+        ax_table.text(
+            x,
+            header_y,
+            h,
+            fontsize=10,
+            fontweight="bold",
+            color=PALETTE["muted"],
+            va="center",
+        )
+    ax_table.axhline(
+        header_y - 0.04,
+        color=PALETTE["spine"],
+        linewidth=0.8,
+        xmin=0.0,
+        xmax=0.985,
+    )
+
+    row_top = header_y - 0.10
+    row_step = 0.165
+    for i, r in enumerate(rows):
+        y = row_top - i * row_step
+        kda_str = f"{r['kills']}/{r['deaths']}/{r['assists']}"
+        dur_str = f"{r['duration']:.0f}m"
+        d2_str = f"{r['d2']:.1f}"
+        if r["p"] < 0.001:
+            p_str = "<0.001"
+        elif r["p"] < 0.01:
+            p_str = f"{r['p']:.3f}"
+        else:
+            p_str = f"{r['p']:.2f}"
+        outcome_color = PALETTE["win"] if r["outcome"] == "W" else PALETTE["loss"]
+        cells = [
+            (col_x[0], f"#{r['rank']}", PALETTE["loss"], "bold"),
+            (col_x[1], r["date"], PALETTE["text"], "normal"),
+            (col_x[2], r["champion"], PALETTE["text"], "normal"),
+            (col_x[3], r["outcome"], outcome_color, "bold"),
+            (col_x[4], kda_str, PALETTE["text"], "normal"),
+            (col_x[5], dur_str, PALETTE["text"], "normal"),
+            (col_x[6], d2_str, PALETTE["text"], "normal"),
+            (col_x[7], p_str, PALETTE["text"], "normal"),
+        ]
+        for x, text, color, weight in cells:
+            ax_table.text(
+                x,
+                y,
+                text,
+                fontsize=10,
+                color=color,
+                fontweight=weight,
+                va="center",
+            )
+        # Headline below the row, indented under the date column.
+        ax_table.text(
+            col_x[1],
+            y - 0.055,
+            r["headline"],
+            fontsize=9,
+            color=PALETTE["muted"],
+            style="italic",
+            va="center",
+        )
+
+    fig.suptitle(
+        f"Career-defining outlier games - {label}",
+        fontsize=15,
+        fontweight="bold",
+        y=0.97,
+    )
+    fig.text(
+        0.5,
+        0.92,
+        "Multivariate Mahalanobis distance on (K, D, A, duration). "
+        f"Top 5 most-anomalous games from {n} total. "
+        f"d^2 > {_MAHALANOBIS_CHI2_95_DF4:.1f} = p < 0.05 under multivariate-normal null.",
+        ha="center",
+        va="center",
+        fontsize=10,
+        color=PALETTE["muted"],
+        style="italic",
+    )
+    return fig
+
+
+# --- 57. Monthly champion shifts -- finer-grained sibling of iter 47 -------
+
+
+def plot_monthly_champion_shifts(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
+    """Detect meta / patch shifts at MONTHLY granularity (finer than iter 47).
+
+    Same statistical machinery as ``plot_champion_meta_shifts`` (quarterly)
+    but bucketed by calendar month (``YYYY-MM``). More buckets give finer
+    resolution for patches that don't align with quarter boundaries -- at
+    the cost of fewer games per bucket and noisier chi-square inputs.
+    """
+    if not _is_aggregate(player):
+        return _empty_figure("Aggregate view only - pick 'All'")
+
+    if df.empty or "game_start" not in df.columns:
+        return _empty_figure("No games to plot")
+
+    work = df[["champion", "win", "game_start"]].copy()
+    work["game_start"] = pd.to_datetime(work["game_start"])
+    work = work.dropna(subset=["game_start", "champion"])
+    if work.empty:
+        return _empty_figure("No games to plot")
+
+    # "YYYY-MM" — sortable lexicographically and matches Discord's date hints.
+    work["month"] = work["game_start"].dt.strftime("%Y-%m")
+
+    grouped = work.groupby(["champion", "month"])["win"].agg(games="size", wins="sum").reset_index()
+    grouped["wins"] = grouped["wins"].astype(int)
+    grouped["games"] = grouped["games"].astype(int)
+
+    # >=80 total games across the whole window (same threshold as quarterly).
+    champ_totals = grouped.groupby("champion")["games"].sum()
+    eligible_champs = champ_totals[champ_totals >= 80].index.tolist()
+    if not eligible_champs:
+        return _empty_figure("Need >=5 champions with sufficient monthly data")
+
+    # >=15 games per month, >=4 such months per champion.
+    qualified_rows = grouped[grouped["champion"].isin(eligible_champs) & (grouped["games"] >= 15)]
+    months_per_champ = qualified_rows.groupby("champion")["month"].nunique()
+    keep_champs = months_per_champ[months_per_champ >= 4].index.tolist()
+    if len(keep_champs) < 5:
+        return _empty_figure("Need >=5 champions with sufficient monthly data")
+
+    stats: list[dict] = []
+    for champ in keep_champs:
+        sub = qualified_rows[qualified_rows["champion"] == champ]
+        wins = sub["wins"].to_numpy()
+        games = sub["games"].to_numpy()
+        _chi2, _dof, p_raw = chi2_homogeneity(wins, games)
+        wrs = wins / games
+        stats.append(
+            {
+                "champion": champ,
+                "p_raw": p_raw,
+                "range_pp": float(wrs.max() - wrs.min()),
+                "n_months": int(len(games)),
+                "n_games": int(games.sum()),
+            }
+        )
+
+    stats_df = pd.DataFrame(stats)
+    stats_df["p_adj"] = bh_adjust(stats_df["p_raw"].tolist())
+    stats_df = stats_df.sort_values(["p_raw", "range_pp"], ascending=[True, False]).reset_index(
+        drop=True
+    )
+
+    top = stats_df.head(20).copy()
+
+    # "YYYY-MM" sorts chronologically as a string, so a plain sorted() works.
+    all_months = sorted(work["month"].unique().tolist())
+
+    wr_matrix = np.full((len(top), len(all_months)), np.nan, dtype=float)
+    n_matrix = np.zeros((len(top), len(all_months)), dtype=int)
+    lookup = grouped.set_index(["champion", "month"])
+    for row_i, champ in enumerate(top["champion"].tolist()):
+        for col_j, m in enumerate(all_months):
+            if (champ, m) in lookup.index:
+                rec = lookup.loc[(champ, m)]
+                games = int(rec["games"])
+                if games >= 15:
+                    wr_matrix[row_i, col_j] = int(rec["wins"]) / games
+                    n_matrix[row_i, col_j] = games
+
+    # Wider figure than iter 47 — months produces ~3-4x more columns.
+    fig = plt.figure(figsize=(14, 9))
+    gs = fig.add_gridspec(1, 2, width_ratios=[3.4, 1.0], wspace=0.05)
+    ax = fig.add_subplot(gs[0, 0])
+    ax_side = fig.add_subplot(gs[0, 1])
+
+    cmap = plt.get_cmap("RdYlGn").copy()
+    cmap.set_bad(color="#f3f4f6")
+    im = ax.imshow(wr_matrix, aspect="auto", cmap=cmap, vmin=0.4, vmax=0.6)
+
+    ax.set_xticks(range(len(all_months)))
+    ax.set_xticklabels(all_months, rotation=45, ha="right", color=PALETTE["text"], fontsize=8)
+    ax.set_yticks(range(len(top)))
+    ax.set_yticklabels(top["champion"].tolist(), color=PALETTE["text"])
+    ax.set_xlabel("Month")
+    ax.set_title(_title("Monthly champion WR - finer-grained meta detection", None))
+    _subtitle(
+        ax,
+        "Per-champion chi-square across calendar months. Top 20 by significance. "
+        "BH-FDR q. * = q<0.10.",
+    )
+    ax.grid(False)
+    for spine in ax.spines.values():
+        spine.set_color(PALETTE["spine"])
+
+    # Smaller font than iter 47 — monthly grid is denser per row.
+    for i in range(wr_matrix.shape[0]):
+        for j in range(wr_matrix.shape[1]):
+            wr = wr_matrix[i, j]
+            n = n_matrix[i, j]
+            if np.isnan(wr):
+                continue
+            txt_color = "white" if (wr <= 0.43 or wr >= 0.57) else PALETTE["text"]
+            ax.text(
+                j,
+                i,
+                f"{wr:.0%}\nn={n}",
+                ha="center",
+                va="center",
+                fontsize=6.0,
+                color=txt_color,
+            )
+
+    cbar = fig.colorbar(im, ax=ax, label="WR", shrink=0.6, pad=0.02)
+    cbar.outline.set_visible(False)
+
+    ax_side.set_xlim(0, 1)
+    ax_side.set_ylim(-0.5, len(top) - 0.5)
+    ax_side.invert_yaxis()
+    ax_side.set_axis_off()
+    ax_side.text(
+        0.0,
+        -1.0,
+        "raw p   /   BH q   /   range",
+        ha="left",
+        va="bottom",
+        fontsize=9,
+        color=PALETTE["muted"],
+        style="italic",
+        transform=ax_side.transData,
+    )
+    for i, (_, row) in enumerate(top.iterrows()):
+        flag = " *" if row["p_adj"] < 0.10 else "  "
+        ax_side.text(
+            0.0,
+            i,
+            f"p={row['p_raw']:.3f}  q={row['p_adj']:.3f}  range={row['range_pp']*100:.1f}pp{flag}",
+            ha="left",
+            va="center",
+            fontsize=8.5,
+            color=PALETTE["text"],
+            family="monospace",
+        )
+
+    fig.subplots_adjust(left=0.10, right=0.97, top=0.92, bottom=0.12)
+    return fig
 
 
 # --- registry --------------------------------------------------------------
@@ -3512,4 +13180,40 @@ ALL_PLOTS = [
     ("19_time_since_prev", plot_time_since_prev),
     ("20_session_analysis", plot_session_analysis),
     ("21_duo_winrate", plot_duo_winrate),
+    ("22_model_calibration", plot_model_calibration),
+    ("23_actions_card", plot_actions_card),
+    ("24_per_player_predictability", plot_per_player_predictability),
+    ("25_tier_winrate", plot_tier_winrate),
+    ("26_match_highlights", plot_match_highlights),
+    ("27_recent_sessions", plot_recent_sessions),
+    ("28_playstyle_clusters", plot_playstyle_clusters),
+    ("29_champion_freshness", plot_champion_freshness),
+    ("30_role_winrate", plot_role_winrate),
+    ("31_player_role_matrix", plot_player_role_matrix),
+    ("32_tilt_by_gap", plot_tilt_by_gap),
+    ("33_session_position_wr", plot_session_position_wr),
+    ("34_improvement_slope", plot_improvement_slope),
+    ("35_stat_sheet", plot_stat_sheet),
+    ("36_game_pace", plot_game_pace),
+    ("37_shrunk_champ_rankings", plot_shrunk_champ_rankings),
+    ("38_champ_pool_concentration", plot_champ_pool_concentration),
+    ("39_champion_mastery", plot_champion_mastery),
+    ("40_champion_rust", plot_champion_rust),
+    ("41_dow_hour_heatmap", plot_dow_hour_heatmap),
+    ("42_same_champ_behavior", plot_same_champ_behavior),
+    ("43_ride_payoff", plot_ride_payoff),
+    ("44_win_autocorrelation", plot_win_autocorrelation),
+    ("45_champ_swap_recs", plot_champ_swap_recs),
+    ("46_per_account_breakdown", plot_per_account_breakdown),
+    ("47_champion_meta_shifts", plot_champion_meta_shifts),
+    ("48_insights_card", plot_insights_card),
+    ("49_recent_form", plot_recent_form),
+    ("50_session_stamina", plot_session_stamina),
+    ("51_patch_meta_shifts", plot_patch_meta_shifts),
+    ("52_kda_dominance", plot_kda_dominance),
+    ("53_rank_recovery", plot_rank_recovery),
+    ("54_last_game_of_day", plot_last_game_of_day),
+    ("55_longest_streaks", plot_longest_streaks),
+    ("56_mahalanobis_outliers", plot_mahalanobis_outliers),
+    ("57_monthly_champion_shifts", plot_monthly_champion_shifts),
 ]

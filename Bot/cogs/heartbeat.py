@@ -37,6 +37,10 @@ POST_RANKS_STALE_AFTER = dt.timedelta(minutes=10)
 # very safe stale threshold that still catches the disconnect-freeze case.
 STREAM_STALE_AFTER = dt.timedelta(minutes=30)
 
+# 3× STICKY_CHECK_MINUTES from cogs.match_analysis (5 min loop). One missed
+# tick is plausible under Gateway flap; three is conclusively stuck.
+STICKY_PANEL_STALE_AFTER = dt.timedelta(minutes=15)
+
 
 class Heartbeat(commands.Cog):
     """Restart frozen @tasks.loop tasks by reloading their parent cog."""
@@ -64,6 +68,13 @@ class Heartbeat(commands.Cog):
             extension="cogs.backfill",
             attr="_stream_last_ran",
             stale_after=STREAM_STALE_AFTER,
+            now=now,
+        )
+        await self._check_one(
+            cog_name="MatchAnalysis",
+            extension="cogs.match_analysis",
+            attr="_sticky_panel_last_fired",
+            stale_after=STICKY_PANEL_STALE_AFTER,
             now=now,
         )
 

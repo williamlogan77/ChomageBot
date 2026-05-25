@@ -35,14 +35,16 @@ def _is_chomage_keeper(interaction: discord.Interaction) -> bool:
 
 
 def _name_from_interaction(interaction: discord.Interaction) -> str | None:
-    """Derive a human-readable command identifier from any interaction.
+    """Derive a stable identifier from any interaction.
 
     Returns:
       - For application commands: the full command path, e.g.
         ``/me``, ``/refresh sync``, ``/champ``.
-      - For button clicks: the custom_id, e.g. ``ms:panel:c0``.
-      - For select menus: the custom_id (the chosen value isn't stored
-        — we want command-usage not pick-distribution).
+      - For button clicks: the ``custom_id``, e.g. ``ms:panel:c0``.
+        Decoded to a human chart name at query time in ``/usage_stats``.
+      - For string-select picks: ``<custom_id>=<selected_value>``. The
+        suffix is critical for the More-menu select, where one custom_id
+        would otherwise collapse all chart picks into a single row.
       - None for autocomplete / modal-submit / other low-signal types.
     """
     itype = interaction.type
@@ -65,7 +67,16 @@ def _name_from_interaction(interaction: discord.Interaction) -> str | None:
         return f"/{name.strip()}" if name else None
 
     if itype is discord.InteractionType.component:
-        return data.get("custom_id")
+        custom_id = data.get("custom_id", "")
+        # component_type 2 = button, 3 = string select, 5-8 = other selects.
+        # For selects, suffix the picked value so each pick is its own row
+        # in /usage_stats (without this, the More-menu dropdown's single
+        # custom_id swallows every chart pick into one undifferentiated row).
+        component_type = data.get("component_type")
+        values = data.get("values") or []
+        if component_type in (3, 5, 6, 7, 8) and values:
+            return f"{custom_id}={values[0]}"
+        return custom_id or None
 
     # Skip autocomplete + modal_submit + ping — low value to log.
     return None
@@ -151,8 +162,12 @@ class UsageLogger(commands.Cog):
             )
             return
 
+        # Translate opaque custom_ids into human chart names. Lookups are
+        # done lazily at query time so this cog has no import-time
+        # dependency on cogs.match_analysis (which keeps load order safe).
+        decoder = self._build_decoder()
         lines = [
-            f"`{i + 1:>2}. {name:<28} {n:>4}  ({uniq} unique)`"
+            f"`{i + 1:>2}. {decoder(name):<32} {n:>4}  ({uniq} unique)`"
             for i, (name, n, uniq) in enumerate(rows)
         ]
         embed = discord.Embed(
@@ -161,6 +176,45 @@ class UsageLogger(commands.Cog):
         )
         embed.set_footer(text=f"{total:,} total events · cutoff {cutoff}")
         await interaction.followup.send(embed=embed, ephemeral=True)
+
+    def _build_decoder(self):
+        """Map opaque interaction identifiers to human chart names.
+
+        Looks up the match-analysis cog at query time (not import time)
+        so we don't create a load-order coupling. If the cog isn't
+        loaded, falls back to raw identifiers.
+        """
+        panel_labels: dict[str, str] = {}
+        select_labels: dict[str, str] = {}
+        try:
+            ma_cog = self.bot.get_cog("MatchAnalysis")
+            if ma_cog is not None:
+                from cogs import match_analysis as ma
+
+                # CHART_DEFS is (label, emoji, fn, title) — indexed by cN
+                for idx, entry in enumerate(ma.CHART_DEFS):
+                    label = entry[0]
+                    panel_labels[f"ms:panel:c{idx}"] = f"button: {label}"
+                panel_labels[ma.PANEL_SELECT_ID] = "panel person select"
+
+                # MORE_CHART_DEFS is (stem, label, emoji, description)
+                for entry in ma.MORE_CHART_DEFS:
+                    stem, label = entry[0], entry[1]
+                    select_labels[stem] = f"more: {label}"
+        except Exception:
+            pass
+
+        def decode(name: str) -> str:
+            if name in panel_labels:
+                return panel_labels[name]
+            # Select-pick rows look like "<custom_id>=<value>"
+            if "=" in name:
+                _, value = name.split("=", 1)
+                if value in select_labels:
+                    return select_labels[value]
+            return name
+
+        return decode
 
 
 async def setup(bot: commands.Bot) -> None:

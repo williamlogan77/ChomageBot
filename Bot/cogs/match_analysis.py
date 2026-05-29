@@ -28,6 +28,8 @@ import asyncio
 import datetime as dt
 import io
 import logging
+import re
+import sqlite3
 import time
 
 import discord
@@ -333,6 +335,61 @@ MORE_CHART_DEFS = [
         "Per-champion monthly WR shifts (finer than quarterly meta chart)",
     ),
 ]
+
+
+# Matches the canonical-index custom_ids on both the panel buttons
+# (ms:panel:cN) and the explorer buttons (ms:expl:cN). The person select
+# (ms:panel:person…) deliberately doesn't match — it isn't a chart.
+_CHART_CUSTOM_ID_RE = re.compile(r"^ms:(?:panel|expl):c(\d+)$")
+
+# The chart pinned to the first slot regardless of popularity. Index 0 is
+# also the default chart opened on a person-pick, so keeping it first keeps
+# the panel's visual lead-in and the default view aligned.
+_PINNED_CHART_IDX = 0
+
+
+def _chart_display_order(db_path: str) -> list[int]:
+    """Canonical CHART_DEFS indices ordered most-clicked-first for display.
+
+    Reads click counts from ``command_usage`` (both panel and in-explorer
+    chart buttons, which share the canonical ``cN`` index), and returns a
+    permutation of ``range(len(CHART_DEFS))``:
+
+      - ``_PINNED_CHART_IDX`` (Summary) always lands first.
+      - remaining charts sort by descending click count.
+      - canonical index breaks ties — so with no usage data the result is
+        the canonical order, and the layout only diverges as real clicks
+        accumulate.
+
+    Never raises: any DB error (missing table pre-migration, locked file)
+    falls back to canonical order. Returns CANONICAL indices, not slots —
+    the caller keeps ``custom_id``/callbacks bound to these so dispatch,
+    the usage decoder, and historical rows all stay valid.
+    """
+    n = len(CHART_DEFS)
+    canonical = list(range(n))
+    counts: dict[int, int] = {}
+    try:
+        with sqlite3.connect(db_path) as con:
+            rows = con.execute(
+                "SELECT command_name, COUNT(*) FROM command_usage "
+                "WHERE command_name LIKE 'ms:panel:c%' OR command_name LIKE 'ms:expl:c%' "
+                "GROUP BY command_name"
+            ).fetchall()
+        for name, cnt in rows:
+            m = _CHART_CUSTOM_ID_RE.match(name or "")
+            if m:
+                idx = int(m.group(1))
+                if 0 <= idx < n:
+                    counts[idx] = counts.get(idx, 0) + int(cnt)
+    except Exception as exc:
+        log.info(f"chart display-order: usage read failed ({exc!r}), using canonical order")
+        return canonical
+
+    return sorted(
+        canonical,
+        key=lambda i: (i != _PINNED_CHART_IDX, -counts.get(i, 0), i),
+    )
 
 
 def _figure_to_file(fig, name: str = "chart.png") -> discord.File:
@@ -895,7 +952,19 @@ class _ExplorerView(discord.ui.View):
         # iter 38+ charts) are reachable via the More-select instead.
         max_buttons = 19
         for idx, (label, emoji, _, _) in enumerate(CHART_DEFS[:max_buttons]):
-            button = discord.ui.Button(label=label, emoji=emoji, row=1 + (idx // 5))
+            # Canonical-index custom_id so usage_logger can attribute each
+            # click to a specific chart. Without it these ephemeral-view
+            # buttons get auto-generated ids and their clicks are invisible
+            # — which is exactly the signal the panel's dynamic ordering
+            # needs. The id is unique within the view (distinct idx) and
+            # safe across concurrent explorers (non-persistent views route
+            # by message id, so identical ids don't collide).
+            button = discord.ui.Button(
+                label=label,
+                emoji=emoji,
+                row=1 + (idx // 5),
+                custom_id=f"ms:expl:c{idx}",
+            )
             button.callback = self._make_chart_callback(idx)
             self.add_item(button)
 
@@ -1094,7 +1163,7 @@ class MatchStatsPanel(discord.ui.View):
     options don't matter for callback dispatch — discord.py routes by
     custom_id)."""
 
-    def __init__(self, df=None):
+    def __init__(self, df=None, display_order: list[int] | None = None):
         super().__init__(timeout=None)
 
         if df is not None:
@@ -1118,8 +1187,17 @@ class MatchStatsPanel(discord.ui.View):
         select.callback = self._on_select
         self.add_item(select)
 
-        for idx, (label, emoji, _, _) in enumerate(CHART_DEFS):
-            row = 1 + (idx // 5)
+        # `display_order` is a permutation of canonical CHART_DEFS indices
+        # controlling VISUAL placement only (most-clicked first, Summary
+        # pinned). custom_id + callback stay bound to the canonical index
+        # `idx`, so dispatch, the usage decoder, and historical cN rows are
+        # unaffected by reordering. None (e.g. the persistence stub) renders
+        # canonical order — dispatch doesn't care about order anyway.
+        if display_order is None:
+            display_order = list(range(len(CHART_DEFS)))
+        for slot, idx in enumerate(display_order):
+            label, emoji, _, _ = CHART_DEFS[idx]
+            row = 1 + (slot // 5)
             button = discord.ui.Button(
                 label=label,
                 emoji=emoji,
@@ -1383,7 +1461,14 @@ class MatchAnalysis(commands.Cog):
         bot lacks send permission; other exceptions propagate.
         """
         df = await _load_matches_cached(self.bot.db_path)
-        view = MatchStatsPanel(df=df if not df.empty else None)
+        # Order the chart buttons most-clicked-first (Summary pinned),
+        # recomputed on every (re)post from the live usage log. Off the
+        # event loop — it's a quick read but still touches disk.
+        display_order = await asyncio.to_thread(_chart_display_order, self.bot.db_path)
+        view = MatchStatsPanel(
+            df=df if not df.empty else None,
+            display_order=display_order,
+        )
         msg = await channel.send(
             embed=_build_panel_embed(),
             view=view,

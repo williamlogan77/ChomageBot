@@ -40,6 +40,27 @@ DEFAULT_BACKFILL_COUNT = 100
 STREAM_RECENT_COUNT = 5  # How many recent IDs the stream checks per player
 
 
+def _participant_position(participant: dict) -> str | None:
+    """The role Riot says this participant actually played.
+
+    Prefer ``teamPosition`` (Riot's role-classifier output: TOP / JUNGLE /
+    MIDDLE / BOTTOM / UTILITY). It's empty "" on remakes and some very old
+    matches, so fall back to ``individualPosition`` — same vocabulary, but
+    it can read "Invalid". When neither yields a usable value we store
+    NULL and let ``load_matches`` fall back to the CHAMPION_ROLES heuristic.
+
+    The raw Riot string is stored verbatim; the MIDDLE->MID / BOTTOM->ADC /
+    UTILITY->SUPPORT mapping to display roles happens at read time.
+    """
+    for key in ("teamPosition", "individualPosition"):
+        value = participant.get(key)
+        if isinstance(value, str):
+            value = value.strip()
+            if value and value.lower() != "invalid":
+                return value
+    return None
+
+
 class Backfill(commands.Cog):
     """Backfill commands + always-on streaming for match_stats."""
 
@@ -325,8 +346,9 @@ class Backfill(commands.Cog):
                     await db.execute(
                         "INSERT OR IGNORE INTO match_stats "
                         "(match_id, puuid, game_start, queue_id, champion, "
-                        " win, kills, deaths, assists, duration_sec, patch_version) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        " win, kills, deaths, assists, duration_sec, patch_version, "
+                        " position) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (
                             mid,
                             puuid,
@@ -339,6 +361,7 @@ class Backfill(commands.Cog):
                             participant["assists"],
                             match["info"]["gameDuration"],
                             match["info"].get("gameVersion"),
+                            _participant_position(participant),
                         ),
                     )
                     await db.commit()

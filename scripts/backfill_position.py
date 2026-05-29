@@ -100,9 +100,7 @@ async def _fetch_positions(match_id: str) -> tuple[int, dict[str, str] | None]:
 
 def _queue_null_match_ids(con: sqlite3.Connection) -> list[str]:
     rows = con.execute(
-        "SELECT DISTINCT match_id FROM match_stats "
-        "WHERE position IS NULL "
-        "ORDER BY match_id"
+        "SELECT DISTINCT match_id FROM match_stats " "WHERE position IS NULL " "ORDER BY match_id"
     ).fetchall()
     return [r[0] for r in rows]
 

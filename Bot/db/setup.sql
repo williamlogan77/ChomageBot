@@ -54,6 +54,12 @@ create table if not exists match_stats (
     assists INTEGER not null,
     duration_sec INTEGER not null,
     patch_version TEXT,
+    -- Riot Match-V5 `teamPosition` (TOP/JUNGLE/MIDDLE/BOTTOM/UTILITY), the
+    -- actual role played that game. Empty "" on remakes / very old matches;
+    -- NULL on rows inserted before this column existed. load_matches maps
+    -- these to ROLE_ORDER and falls back to the CHAMPION_ROLES heuristic when
+    -- absent. Existing DBs migrate via scripts/migrate_add_position.py.
+    position TEXT,
     primary key (match_id, puuid)
 );
 create index if not exists idx_match_stats_puuid_time on match_stats (puuid, game_start DESC);

@@ -191,10 +191,13 @@ class UsageLogger(commands.Cog):
             if ma_cog is not None:
                 from cogs import match_analysis as ma
 
-                # CHART_DEFS is (label, emoji, fn, title) — indexed by cN
+                # CHART_DEFS is (label, emoji, fn, title) — indexed by cN.
+                # Both the panel (ms:panel:cN) and the in-explorer chart
+                # buttons (ms:expl:cN) key by the same canonical index.
                 for idx, entry in enumerate(ma.CHART_DEFS):
                     label = entry[0]
                     panel_labels[f"ms:panel:c{idx}"] = f"button: {label}"
+                    panel_labels[f"ms:expl:c{idx}"] = f"explorer: {label}"
                 panel_labels[ma.PANEL_SELECT_ID] = "panel person select"
 
                 # MORE_CHART_DEFS is (stem, label, emoji, description)

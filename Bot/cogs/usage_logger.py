@@ -204,6 +204,9 @@ class UsageLogger(commands.Cog):
                 for entry in ma.MORE_CHART_DEFS:
                     stem, label = entry[0], entry[1]
                     select_labels[stem] = f"more: {label}"
+                # The board's More-analytics dropdown sentinel that opens the
+                # full paginated menu (logged as ms:panel:more=__see_all__).
+                select_labels[ma.MORE_SEE_ALL_VALUE] = "more: open full analytics list"
         except Exception:
             pass
 

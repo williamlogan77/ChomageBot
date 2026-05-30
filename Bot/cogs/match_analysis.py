@@ -91,6 +91,10 @@ EXPLORER_TIMEOUT_SECONDS = 900
 # new view until /match_stats_panel re-posts.
 PANEL_CUSTOM_ID_PREFIX = "ms:panel"
 PANEL_SELECT_ID = f"{PANEL_CUSTOM_ID_PREFIX}:person"
+# Second board dropdown: surfaces the overflow analytics charts (the ones
+# that otherwise only live behind the explorer's "More ▾"). Picking a chart
+# posts it; picking the sentinel opens the full paginated More menu.
+PANEL_MORE_SELECT_ID = f"{PANEL_CUSTOM_ID_PREFIX}:more"
 
 # Marker used by the sticky-pin loop to recognise an existing panel
 # message in channel history. Must match the title set in
@@ -125,6 +129,17 @@ STICKY_RECOVERY_HISTORY_LIMIT = 50
 # even before /match_stats_panel has been run with real data.
 ALL_VALUE = "__all__"
 PLACEHOLDER_VALUE = "__placeholder__"
+# Sentinel option in the board's More-analytics dropdown that opens the full
+# paginated More menu (the dropdown itself can only hold Discord's 25-option
+# max, so the rest live behind this entry).
+MORE_SEE_ALL_VALUE = "__see_all__"
+
+# Board layout: row 0 = player select, rows 1-3 = chart buttons, row 4 = the
+# More-analytics select. That leaves room for 15 chart buttons (3 rows × 5).
+# The 5 charts bumped off the board stay reachable inside the explorer.
+BOARD_CHART_BUTTONS = 15
+# Discord caps a select at 25 options; reserve one for the "see all" entry.
+BOARD_MORE_OPTION_CAP = 24
 
 # (label, emoji, plot_fn, embed_title) — single source of truth for which
 # charts exist + how they appear in the UI. Add an entry here and a
@@ -1195,7 +1210,10 @@ class MatchStatsPanel(discord.ui.View):
         # canonical order — dispatch doesn't care about order anyway.
         if display_order is None:
             display_order = list(range(len(CHART_DEFS)))
-        for slot, idx in enumerate(display_order):
+        # Rows 1-3: the top BOARD_CHART_BUTTONS charts as buttons. The rest
+        # are reachable via the explorer (opened by any board click) and the
+        # More-analytics select below.
+        for slot, idx in enumerate(display_order[:BOARD_CHART_BUTTONS]):
             label, emoji, _, _ = CHART_DEFS[idx]
             row = 1 + (slot // 5)
             button = discord.ui.Button(
@@ -1207,6 +1225,18 @@ class MatchStatsPanel(discord.ui.View):
             )
             button.callback = self._make_chart_callback(idx)
             self.add_item(button)
+
+        # Row 4: the overflow-analytics dropdown. Options are static
+        # (MORE_CHART_DEFS), so the persistence stub and the live panel build
+        # the same set — dispatch routes by custom_id regardless.
+        more_select = discord.ui.Select(
+            placeholder="More analytics ↓",
+            options=self._build_board_more_options(),
+            row=4,
+            custom_id=PANEL_MORE_SELECT_ID,
+        )
+        more_select.callback = self._on_more_select
+        self.add_item(more_select)
 
     async def _on_select(self, interaction: discord.Interaction) -> None:
         cog = interaction.client.get_cog("MatchAnalysis")
@@ -1229,6 +1259,53 @@ class MatchStatsPanel(discord.ui.View):
         # Default chart for a person pick = Summary card.
         await cog.open_explorer(interaction, chart_idx=0, person=person)
 
+    @staticmethod
+    def _build_board_more_options() -> list[discord.SelectOption]:
+        """Options for the board's More-analytics dropdown: the first
+        ``BOARD_MORE_OPTION_CAP`` overflow charts (skipping any stem missing
+        from ALL_PLOTS) plus a trailing 'open full list' entry. Static — no
+        df needed — so the persistence stub renders the same set."""
+        plot_by_stem = dict(analysis.ALL_PLOTS)
+        options: list[discord.SelectOption] = []
+        for stem, label, emoji, description in MORE_CHART_DEFS:
+            if stem not in plot_by_stem:
+                continue
+            options.append(
+                discord.SelectOption(
+                    label=label[:100],
+                    value=stem[:100],
+                    description=description[:100],
+                    emoji=emoji,
+                )
+            )
+            if len(options) >= BOARD_MORE_OPTION_CAP:
+                break
+        options.append(
+            discord.SelectOption(
+                label="Open full analytics list…",
+                value=MORE_SEE_ALL_VALUE,
+                emoji="➕",
+                description="Every chart, paginated",
+            )
+        )
+        return options
+
+    async def _on_more_select(self, interaction: discord.Interaction) -> None:
+        cog = interaction.client.get_cog("MatchAnalysis")
+        if cog is None:
+            await interaction.response.send_message(
+                "Match-stats cog isn't loaded — bot may be restarting. Try again in a moment.",
+                ephemeral=True,
+            )
+            return
+        chosen = interaction.data["values"][0]
+        if chosen == MORE_SEE_ALL_VALUE:
+            # Board click defaults to the all-players view; the user can
+            # refocus inside the explorer.
+            await cog.open_more_menu(interaction, person=None)
+        else:
+            await cog.open_more_chart(interaction, stem=chosen, person=None)
+
     def _make_chart_callback(self, idx: int):
         async def _cb(interaction: discord.Interaction) -> None:
             cog = interaction.client.get_cog("MatchAnalysis")
@@ -1240,6 +1317,46 @@ class MatchStatsPanel(discord.ui.View):
                 return
             # Chart-button click defaults to the aggregate view — the user
             # can pick a person inside the ephemeral.
+            await cog.open_explorer(interaction, chart_idx=idx, person=None)
+
+        return _cb
+
+
+class _PanelButtonDispatch(discord.ui.View):
+    """Dispatch-only persistent view for chart-button custom_ids that the
+    live board can surface via usage ordering but the 15-button panel stub
+    does NOT register.
+
+    The board shows the usage-ranked top ``BOARD_CHART_BUTTONS`` charts, so a
+    high-canonical-index chart (e.g. c17) can appear as a live button. The
+    persistence stub (``MatchStatsPanel()``) only builds the canonical first
+    15 (c0..c14), so without this view a click on c15..c19 would have no
+    registered handler after a restart and silently do nothing. Never sent as
+    a message — only registered via ``add_view`` so discord.py routes these
+    custom_ids. Callbacks mirror ``MatchStatsPanel._make_chart_callback``.
+    """
+
+    def __init__(self, indices: range):
+        super().__init__(timeout=None)
+        for idx in indices:
+            label, emoji, _, _ = CHART_DEFS[idx]
+            button = discord.ui.Button(
+                label=label,
+                emoji=emoji,
+                custom_id=f"{PANEL_CUSTOM_ID_PREFIX}:c{idx}",
+            )
+            button.callback = self._make_cb(idx)
+            self.add_item(button)
+
+    def _make_cb(self, idx: int):
+        async def _cb(interaction: discord.Interaction) -> None:
+            cog = interaction.client.get_cog("MatchAnalysis")
+            if cog is None:
+                await interaction.response.send_message(
+                    "Match-stats cog isn't loaded — bot may be restarting. Try again in a moment.",
+                    ephemeral=True,
+                )
+                return
             await cog.open_explorer(interaction, chart_idx=idx, person=None)
 
         return _cb
@@ -1259,6 +1376,14 @@ class MatchAnalysis(commands.Cog):
         # dispatch; discord.py routes by custom_id.
         self._panel_view = MatchStatsPanel()
         bot.add_view(self._panel_view)
+        # The 15-button stub above registers c0..c14 (+ the player and
+        # More-analytics selects). Usage ordering can place c15..c19 onto the
+        # live board, so register those custom_ids too — otherwise their
+        # clicks have no handler after a restart and silently no-op.
+        overflow = range(BOARD_CHART_BUTTONS, len(CHART_DEFS))
+        self._overflow_view = _PanelButtonDispatch(overflow) if len(overflow) else None
+        if self._overflow_view is not None:
+            bot.add_view(self._overflow_view)
         # Tracks the most-recent panel message so the sticky loop knows
         # which message to delete when re-posting. None until either the
         # admin slash command posts one, or recovery finds an existing
@@ -1272,6 +1397,8 @@ class MatchAnalysis(commands.Cog):
     def cog_unload(self) -> None:
         self.sticky_panel.cancel()
         self._panel_view.stop()
+        if self._overflow_view is not None:
+            self._overflow_view.stop()
 
     async def cog_app_command_error(
         self,
@@ -2260,6 +2387,69 @@ class MatchAnalysis(commands.Cog):
         file = _figure_to_file(fig)
         view = _ExplorerView(df, invoker_id=interaction.user.id, chart_idx=chart_idx, person=person)
         await interaction.followup.send(embed=embed, file=file, view=view, ephemeral=True)
+
+    async def open_more_chart(
+        self, interaction: discord.Interaction, stem: str, person: str | None
+    ) -> None:
+        """Render one overflow-analytics chart (by ALL_PLOTS stem) as an
+        ephemeral post. Used by the board's More-analytics dropdown."""
+        await interaction.response.defer(ephemeral=True)
+        try:
+            df = await _load_matches_cached(self.bot.db_path)
+        except Exception as exc:
+            self.bot.logging.error(f"more-chart data load failed: {exc!r}")
+            await interaction.followup.send(f"Failed to load match data: {exc!r}", ephemeral=True)
+            return
+        if df.empty:
+            await interaction.followup.send(
+                "No match data yet — run /backfill_all first.", ephemeral=True
+            )
+            return
+
+        fn = dict(analysis.ALL_PLOTS).get(stem)
+        if fn is None:
+            await interaction.followup.send(
+                f"Chart `{stem}` not found in the analysis lib.", ephemeral=True
+            )
+            return
+        try:
+            fig = await asyncio.to_thread(fn, df, person)
+        except Exception as exc:
+            self.bot.logging.error(f"more-chart {stem!r} render failed: {exc!r}")
+            await interaction.followup.send(f"Chart failed: {exc!r}", ephemeral=True)
+            return
+
+        label, emoji = next(
+            ((lbl, emo) for s, lbl, emo, _ in MORE_CHART_DEFS if s == stem), (stem, "📊")
+        )
+        who = analysis._display_label(person) or "all players"
+        embed = discord.Embed(title=f"{emoji} {label} — {who}")
+        embed.set_image(url="attachment://chart.png")
+        file = _figure_to_file(fig)
+        await interaction.followup.send(embed=embed, file=file, ephemeral=True)
+
+    async def open_more_menu(self, interaction: discord.Interaction, person: str | None) -> None:
+        """Open the full paginated More-analytics menu as an ephemeral —
+        the board dropdown's 'open full list' escape hatch."""
+        # Defer FIRST: _load_matches_cached can hit the DB / cache lock, which
+        # may exceed Discord's 3s initial-ACK window. After defer we must use
+        # followup.send (which carries views fine).
+        await interaction.response.defer(ephemeral=True)
+        try:
+            df = await _load_matches_cached(self.bot.db_path)
+        except Exception as exc:
+            self.bot.logging.error(f"more-menu data load failed: {exc!r}")
+            await interaction.followup.send(f"Failed to load match data: {exc!r}", ephemeral=True)
+            return
+        if df.empty:
+            await interaction.followup.send(
+                "No match data yet — run /backfill_all first.", ephemeral=True
+            )
+            return
+        view = _MoreAnalyticsView(df=df, invoker_id=interaction.user.id, person=person)
+        await interaction.followup.send(
+            "Pick an analysis — it'll post here.", view=view, ephemeral=True
+        )
 
 
 async def setup(bot: commands.Bot) -> None:

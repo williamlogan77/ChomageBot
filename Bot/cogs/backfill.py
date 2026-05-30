@@ -47,7 +47,8 @@ def _participant_position(participant: dict) -> str | None:
     MIDDLE / BOTTOM / UTILITY). It's empty "" on remakes and some very old
     matches, so fall back to ``individualPosition`` — same vocabulary, but
     it can read "Invalid". When neither yields a usable value we store
-    NULL and let ``load_matches`` fall back to the CHAMPION_ROLES heuristic.
+    NULL, and ``load_matches`` resolves the role to "UNKNOWN" (no
+    champion-based guessing).
 
     The raw Riot string is stored verbatim; the MIDDLE->MID / BOTTOM->ADC /
     UTILITY->SUPPORT mapping to display roles happens at read time.

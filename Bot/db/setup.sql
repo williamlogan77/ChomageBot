@@ -57,8 +57,9 @@ create table if not exists match_stats (
     -- Riot Match-V5 `teamPosition` (TOP/JUNGLE/MIDDLE/BOTTOM/UTILITY), the
     -- actual role played that game. Empty "" on remakes / very old matches;
     -- NULL on rows inserted before this column existed. load_matches maps
-    -- these to ROLE_ORDER and falls back to the CHAMPION_ROLES heuristic when
-    -- absent. Existing DBs migrate via scripts/migrate_add_position.py.
+    -- these to ROLE_ORDER; absent/unmapped values resolve to "UNKNOWN" (no
+    -- champion-based guessing). Existing DBs migrate via
+    -- scripts/migrate_add_position.py.
     position TEXT,
     primary key (match_id, puuid)
 );

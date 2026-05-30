@@ -71,202 +71,14 @@ ROLE_ORDER = ["TOP", "JUNGLE", "MID", "ADC", "SUPPORT"]
 
 # Riot Match-V5 `teamPosition`/`individualPosition` vocabulary mapped to our
 # display roles. Riot says MIDDLE/BOTTOM/UTILITY; we show MID/ADC/SUPPORT.
-# Anything not in here (e.g. "" on remakes, "Invalid") falls through to the
-# CHAMPION_ROLES heuristic in load_matches.
+# Anything not in here (e.g. "" on remakes, "Invalid") resolves to "UNKNOWN"
+# in load_matches — we never guess a role from the champion.
 POSITION_TO_ROLE: dict[str, str] = {
     "TOP": "TOP",
     "JUNGLE": "JUNGLE",
     "MIDDLE": "MID",
     "BOTTOM": "ADC",
     "UTILITY": "SUPPORT",
-}
-
-
-# Heuristic primary-role fallback for rows with no Riot position (matches
-# older than Riot's ~2yr retention window can never be backfilled, and
-# remakes carry an empty teamPosition). The actual played position from
-# match_stats.position is preferred; this only fills the gaps.
-# Some champs flex (e.g. Sett: top/support — we say TOP).
-# Keys match the Riot internal `dataName` (Chogath, Leblanc, FiddleSticks, MonkeyKing, ...)
-# as stored in match_stats.champion. Champions not present here resolve to "UNKNOWN" and
-# are skipped by the per-role winrate chart.
-CHAMPION_ROLES: dict[str, str] = {
-    # TOP
-    "Aatrox": "TOP",
-    "Ambessa": "TOP",
-    "Camille": "TOP",
-    "Chogath": "TOP",
-    "Darius": "TOP",
-    "DrMundo": "TOP",
-    "Fiora": "TOP",
-    "Gangplank": "TOP",
-    "Garen": "TOP",
-    "Gnar": "TOP",
-    "Gwen": "TOP",
-    "Illaoi": "TOP",
-    "Irelia": "TOP",
-    "Jax": "TOP",
-    "Jayce": "TOP",
-    "Kayle": "TOP",
-    "Kennen": "TOP",
-    "Kled": "TOP",
-    "KSante": "TOP",
-    "Malphite": "TOP",
-    "Mordekaiser": "TOP",
-    "Nasus": "TOP",
-    "Ornn": "TOP",
-    "Pantheon": "TOP",
-    "Poppy": "TOP",
-    "Quinn": "TOP",
-    "Renekton": "TOP",
-    "Riven": "TOP",
-    "Rumble": "TOP",
-    "Sett": "TOP",
-    "Shen": "TOP",
-    "Singed": "TOP",
-    "Sion": "TOP",
-    "Teemo": "TOP",
-    "Tryndamere": "TOP",
-    "Urgot": "TOP",
-    "Vladimir": "TOP",
-    "Volibear": "TOP",
-    "Warwick": "TOP",
-    "Yasuo": "TOP",
-    "Yorick": "TOP",
-    # JUNGLE
-    "Amumu": "JUNGLE",
-    "Belveth": "JUNGLE",
-    "Briar": "JUNGLE",
-    "Diana": "JUNGLE",
-    "Ekko": "JUNGLE",
-    "Elise": "JUNGLE",
-    "Evelynn": "JUNGLE",
-    "FiddleSticks": "JUNGLE",
-    "Gragas": "JUNGLE",
-    "Graves": "JUNGLE",
-    "Hecarim": "JUNGLE",
-    "Ivern": "JUNGLE",
-    "JarvanIV": "JUNGLE",
-    "Karthus": "JUNGLE",
-    "Kayn": "JUNGLE",
-    "Khazix": "JUNGLE",
-    "Kindred": "JUNGLE",
-    "LeeSin": "JUNGLE",
-    "Lillia": "JUNGLE",
-    "MasterYi": "JUNGLE",
-    "MonkeyKing": "JUNGLE",
-    "Naafiri": "JUNGLE",
-    "Nidalee": "JUNGLE",
-    "Nocturne": "JUNGLE",
-    "Nunu": "JUNGLE",
-    "Olaf": "JUNGLE",
-    "Rammus": "JUNGLE",
-    "RekSai": "JUNGLE",
-    "Rengar": "JUNGLE",
-    "Sejuani": "JUNGLE",
-    "Shaco": "JUNGLE",
-    "Shyvana": "JUNGLE",
-    "Skarner": "JUNGLE",
-    "Trundle": "JUNGLE",
-    "Udyr": "JUNGLE",
-    "Vi": "JUNGLE",
-    "Viego": "JUNGLE",
-    "XinZhao": "JUNGLE",
-    "Zac": "JUNGLE",
-    # MID
-    "Ahri": "MID",
-    "Akali": "MID",
-    "Akshan": "MID",
-    "Anivia": "MID",
-    "Annie": "MID",
-    "AurelionSol": "MID",
-    "Aurora": "MID",
-    "Azir": "MID",
-    "Cassiopeia": "MID",
-    "Fizz": "MID",
-    "Galio": "MID",
-    "Heimerdinger": "MID",
-    "Hwei": "MID",
-    "Kassadin": "MID",
-    "Katarina": "MID",
-    "Leblanc": "MID",
-    "Lissandra": "MID",
-    "Lux": "MID",
-    "Malzahar": "MID",
-    "Neeko": "MID",
-    "Orianna": "MID",
-    "Qiyana": "MID",
-    "Ryze": "MID",
-    "Sylas": "MID",
-    "Syndra": "MID",
-    "Taliyah": "MID",
-    "Talon": "MID",
-    "TwistedFate": "MID",
-    "Veigar": "MID",
-    "Velkoz": "MID",
-    "Vex": "MID",
-    "Viktor": "MID",
-    "Xerath": "MID",
-    "Yone": "MID",
-    "Zed": "MID",
-    "Ziggs": "MID",
-    "Zoe": "MID",
-    # ADC
-    "Aphelios": "ADC",
-    "Ashe": "ADC",
-    "Caitlyn": "ADC",
-    "Corki": "ADC",
-    "Draven": "ADC",
-    "Ezreal": "ADC",
-    "Jhin": "ADC",
-    "Jinx": "ADC",
-    "Kaisa": "ADC",
-    "Kalista": "ADC",
-    "KogMaw": "ADC",
-    "Lucian": "ADC",
-    "MissFortune": "ADC",
-    "Nilah": "ADC",
-    "Samira": "ADC",
-    "Senna": "ADC",
-    "Sivir": "ADC",
-    "Smolder": "ADC",
-    "Tristana": "ADC",
-    "Twitch": "ADC",
-    "Varus": "ADC",
-    "Vayne": "ADC",
-    "Xayah": "ADC",
-    "Yunara": "ADC",
-    "Zeri": "ADC",
-    # SUPPORT
-    "Alistar": "SUPPORT",
-    "Bard": "SUPPORT",
-    "Blitzcrank": "SUPPORT",
-    "Brand": "SUPPORT",
-    "Braum": "SUPPORT",
-    "Janna": "SUPPORT",
-    "Karma": "SUPPORT",
-    "Leona": "SUPPORT",
-    "Lulu": "SUPPORT",
-    "Maokai": "SUPPORT",
-    "Mel": "SUPPORT",
-    "Milio": "SUPPORT",
-    "Morgana": "SUPPORT",
-    "Nami": "SUPPORT",
-    "Nautilus": "SUPPORT",
-    "Pyke": "SUPPORT",
-    "Rakan": "SUPPORT",
-    "Rell": "SUPPORT",
-    "Renata": "SUPPORT",
-    "Seraphine": "SUPPORT",
-    "Sona": "SUPPORT",
-    "Soraka": "SUPPORT",
-    "Swain": "SUPPORT",
-    "TahmKench": "SUPPORT",
-    "Taric": "SUPPORT",
-    "Thresh": "SUPPORT",
-    "Yuumi": "SUPPORT",
-    "Zilean": "SUPPORT",
-    "Zyra": "SUPPORT",
 }
 
 
@@ -737,13 +549,19 @@ def load_matches(db_path: Path = DEFAULT_DB) -> pd.DataFrame:
         df["duration_min"], bins=DURATION_BINS_MIN, labels=DURATION_LABELS, right=False
     )
     # Role = the position Riot recorded as actually played, mapped to our
-    # display vocabulary. Rows with no usable position (NULL on un-backfilled
-    # rows, "" on remakes, "Invalid") fall back to the CHAMPION_ROLES heuristic
-    # and finally "UNKNOWN". (The SELECT above always yields a `position`
+    # display vocabulary. No champion->role guessing: rows with no usable
+    # position (NULL on un-backfilled/expired matches, "" on remakes,
+    # "Invalid") resolve to "UNKNOWN" and are excluded from role charts via
+    # the ROLE_ORDER filter. (The SELECT above always yields a `position`
     # column — real or `NULL AS position` on un-migrated DBs.)
-    riot_role = df["position"].astype("string").str.strip().str.upper().map(POSITION_TO_ROLE)
-    heuristic_role = df["champion"].map(CHAMPION_ROLES)
-    df["role"] = riot_role.fillna(heuristic_role).fillna("UNKNOWN")
+    df["role"] = (
+        df["position"]
+        .astype("string")
+        .str.strip()
+        .str.upper()
+        .map(POSITION_TO_ROLE)
+        .fillna("UNKNOWN")
+    )
 
     # Per-person time-series features (treats multi-account users as one
     # continuous game stream — sorted by game_start so the streak/gap
@@ -6140,10 +5958,10 @@ def plot_champion_freshness(df: pd.DataFrame, player: str | None = None) -> plt.
 
 
 def plot_role_winrate(df: pd.DataFrame, player: str | None = None) -> plt.Figure:
-    """Win rate split by inferred champion role.
+    """Win rate split by the role actually played.
 
-    Role is a heuristic from CHAMPION_ROLES — champions that flex get
-    their more common role. Rows with an unmapped champion (role
+    Role comes from Riot's recorded position (match_stats.position) mapped
+    to TOP/JUNGLE/MID/ADC/SUPPORT. Rows with no usable position (role
     "UNKNOWN") are skipped.
 
     Per-person: bars are coloured against the player's overall baseline

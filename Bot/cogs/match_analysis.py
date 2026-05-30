@@ -2074,7 +2074,14 @@ class MatchAnalysis(commands.Cog):
                 banner_lines.append(f"**{br['person']}** — {int(br['n'])} games ({p_wr:.0%})")
             embed.add_field(name="🚩 Banner picks", value="\n".join(banner_lines), inline=False)
 
-        role = analysis.CHAMPION_ROLES.get(champ_name, "?")
+        # Role from the positions actually played in our data (no hardcoded
+        # champ->role map) — show the most common one + its share.
+        role_counts = sel.loc[sel["role"].isin(analysis.ROLE_ORDER), "role"].value_counts()
+        if not role_counts.empty:
+            top_role = role_counts.index[0]
+            role = f"{top_role} ({role_counts.iloc[0] / role_counts.sum():.0%})"
+        else:
+            role = "unknown"
         embed.set_footer(
             text=f"Role: {role} · Played by {sel['person'].nunique()} different people"
         )

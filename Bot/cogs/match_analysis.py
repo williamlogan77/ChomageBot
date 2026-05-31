@@ -180,6 +180,12 @@ CHART_DEFS = [
         analysis.plot_duo_winrate,
         "Duos (same team) + head-to-head (opposite teams)",
     ),
+    (
+        "Role matrix",
+        "🧭",
+        analysis.plot_player_role_matrix,
+        "2026 role performance vs each account's own WR",
+    ),
 ]
 
 # Charts only reachable via the explorer's "More ▾" select. Stems must
@@ -188,12 +194,8 @@ CHART_DEFS = [
 MORE_CHART_DEFS = [
     ("21_duo_winrate", "Duos / H2H", "🤝", "Same-team partnerships + head-to-head"),
     ("30_role_winrate", "Per-role WR", "🛡️", "WR per role (TOP/JG/MID/ADC/SUP) with Wilson CIs"),
-    (
-        "31_player_role_matrix",
-        "Role matrix",
-        "🧭",
-        "Player×role heatmap vs personal baseline (aggregate only)",
-    ),
+    # 31_player_role_matrix promoted to a main chart button (CHART_DEFS) — it's
+    # the "Role matrix" button now, no longer in this overflow menu.
     ("32_tilt_by_gap", "Tilt analysis", "😤", "After-loss vs after-win WR by inter-game gap"),
     (
         "33_session_position_wr",

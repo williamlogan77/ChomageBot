@@ -359,10 +359,17 @@ MORE_CHART_DEFS = [
 # (ms:panel:person…) deliberately doesn't match — it isn't a chart.
 _CHART_CUSTOM_ID_RE = re.compile(r"^ms:(?:panel|expl):c(\d+)$")
 
-# The chart pinned to the first slot regardless of popularity. Index 0 is
-# also the default chart opened on a person-pick, so keeping it first keeps
-# the panel's visual lead-in and the default view aligned.
-_PINNED_CHART_IDX = 0
+# Charts pinned to the front of the board regardless of popularity, in this
+# order. Summary (index 0) leads — it's also the default person-pick chart.
+# "Role matrix" is pinned too: it sits at a high CHART_DEFS index, so the
+# usage-ranked board (top 15) and the 19-button explorer would otherwise
+# never surface it (it's not in the More menu either). Pinning guarantees it
+# a one-click board button.
+_PINNED_CHART_IDXS: tuple[int, ...] = (0,) + tuple(
+    i
+    for i, (_label, _emoji, fn, _title) in enumerate(CHART_DEFS)
+    if fn is analysis.plot_player_role_matrix and i != 0
+)
 
 
 def _chart_display_order(db_path: str) -> list[int]:
@@ -372,7 +379,8 @@ def _chart_display_order(db_path: str) -> list[int]:
     chart buttons, which share the canonical ``cN`` index), and returns a
     permutation of ``range(len(CHART_DEFS))``:
 
-      - ``_PINNED_CHART_IDX`` (Summary) always lands first.
+      - ``_PINNED_CHART_IDXS`` (Summary, then Role matrix) always lead, in
+        that order, regardless of popularity.
       - remaining charts sort by descending click count.
       - canonical index breaks ties — so with no usage data the result is
         the canonical order, and the layout only diverges as real clicks
@@ -403,9 +411,12 @@ def _chart_display_order(db_path: str) -> list[int]:
         log.info(f"chart display-order: usage read failed ({exc!r}), using canonical order")
         return canonical
 
+    pin_rank = {idx: rank for rank, idx in enumerate(_PINNED_CHART_IDXS)}
     return sorted(
         canonical,
-        key=lambda i: (i != _PINNED_CHART_IDX, -counts.get(i, 0), i),
+        # pinned charts first (in pin order), then the rest by click count desc,
+        # canonical index breaking ties.
+        key=lambda i: (i not in pin_rank, pin_rank.get(i, 0), -counts.get(i, 0), i),
     )
 
 

@@ -1,13 +1,15 @@
-from rank_sorting_class import Ranker
-import matplotlib.pyplot as plt
+import pickle
+
 import matplotlib.dates as mdates
+import matplotlib.pyplot as plt
+from rank_sorting_class import Ranker
 
 current_ticks = []
 new_ticks = []
 for league in Ranker.LEAGUES.keys():
     for subleague in Ranker.SUBLEAGUE.keys():
         x = Ranker(league, subleague, "0")
-        current_ticks.append((x._score + 50))
+        current_ticks.append(x._score + 50)
         new_ticks.append(str(x).split(" - ")[0])
 
 fig, ax = plt.subplots(figsize=(5, 5), dpi=600)
@@ -28,7 +30,7 @@ for idx, colour in enumerate(colours):
         alpha=opacity,
     )
 
-for idx, tick in enumerate(current_ticks):
+for idx in range(len(current_ticks)):
     ax.axhline(
         y=current_ticks[idx] - 50,
         linewidth=1,
@@ -42,8 +44,6 @@ ax.xaxis.set_major_locator(mdates.DayLocator(interval=7))
 ax.xaxis.set_major_formatter(mdates.DateFormatter("%0d/%m/%y"))
 plt.xticks(rotation=45, ha="center")
 
-
-import pickle
 
 with open("utils/my_fig.pickle", "wb") as f:
     pickle.dump(fig, file=f)

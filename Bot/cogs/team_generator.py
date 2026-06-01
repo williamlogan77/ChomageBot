@@ -1,10 +1,10 @@
-import typing
 import random
-from typing import Any, List, Union
+from typing import Any
+
 import discord
-from discord.ext import commands
-from discord import app_commands
 import numpy as np
+from discord import app_commands
+from discord.ext import commands
 
 
 class TeamGenerator(commands.Cog):
@@ -14,16 +14,14 @@ class TeamGenerator(commands.Cog):
         self.bot = bot
         self.bot.logging.info(f"{__name__} loaded")
 
-    @app_commands.command(
-        name="select_teams", description="Create a number of teams of players"
-    )
+    @app_commands.command(name="select_teams", description="Create a number of teams of players")
     @app_commands.describe(
         team_size="The size of the team",
     )
     async def generate_teams(
         self,
         ctx: discord.Interaction,
-        team_size: typing.Optional[int] = 5,
+        team_size: int | None = 5,
     ):
         """Slash command to generate teams
 
@@ -43,12 +41,11 @@ class UserDropdown(discord.ui.UserSelect):
     """Generate the dropdown component for the selection"""
 
     def __init__(self, team_size):
-
         super().__init__(placeholder="Select a user", min_values=2, max_values=25)
         self.team_size = team_size
 
     async def callback(self, interaction: discord.Interaction) -> Any:
-        members: List[Union[discord.Member, discord.User]] = self.values
+        members: list[discord.Member | discord.User] = self.values
         random.shuffle(members)
         to_send = ""
         for team_no in range(int(np.ceil(len(members) / self.team_size))):

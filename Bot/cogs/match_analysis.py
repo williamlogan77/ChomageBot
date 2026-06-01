@@ -29,7 +29,6 @@ import datetime as dt
 import io
 import logging
 import re
-import sqlite3
 import time
 
 import discord
@@ -41,6 +40,7 @@ import matplotlib.pyplot as plt
 from discord import app_commands
 from discord.ext import commands, tasks
 from utils import match_analysis as analysis
+from utils.db import connect
 
 log = logging.getLogger(__name__)
 
@@ -387,7 +387,7 @@ def _chart_display_order(db_path: str) -> list[int]:
     canonical = list(range(n))
     counts: dict[int, int] = {}
     try:
-        with sqlite3.connect(db_path) as con:
+        with connect(db_path) as con:
             rows = con.execute(
                 "SELECT command_name, COUNT(*) FROM command_usage "
                 "WHERE command_name LIKE 'ms:panel:c%' OR command_name LIKE 'ms:expl:c%' "

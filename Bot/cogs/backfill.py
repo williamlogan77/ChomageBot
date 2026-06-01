@@ -25,10 +25,10 @@ import asyncio
 import datetime as dt
 import logging
 
-import aiosqlite as sqa
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
+from utils.db import aconnect
 from utils.riot_client import get_match, get_match_ids
 
 log = logging.getLogger(__name__)
@@ -104,7 +104,7 @@ class Backfill(commands.Cog):
 
         count = max(1, min(count, PAGE_SIZE))
 
-        async with sqa.connect(self.bot.db_path) as db:
+        async with aconnect(self.bot.db_path) as db:
             rows = await db.execute_fetchall(
                 "SELECT puuid, league_username FROM league_players "
                 "WHERE puuid IS NOT NULL AND puuid != ''"
@@ -205,7 +205,7 @@ class Backfill(commands.Cog):
         player and insert anything new. Cheap on steady state — most calls
         return IDs we already have and skip the match-detail fetch.
         """
-        async with sqa.connect(self.bot.db_path) as db:
+        async with aconnect(self.bot.db_path) as db:
             rows = await db.execute_fetchall(
                 "SELECT puuid, league_username FROM league_players "
                 "WHERE puuid IS NOT NULL AND puuid != ''"
@@ -290,7 +290,7 @@ class Backfill(commands.Cog):
             # Filtering by match_id alone would skip games where this puuid
             # hasn't been backfilled yet but another tracked friend already
             # has — exactly the "duo's second row" case we need to pick up.
-            async with sqa.connect(self.bot.db_path) as db:
+            async with aconnect(self.bot.db_path) as db:
                 placeholders = ",".join("?" * len(ids))
                 existing_rows = await db.execute_fetchall(
                     f"SELECT match_id FROM match_stats "
@@ -343,7 +343,7 @@ class Backfill(commands.Cog):
                 game_start = dt.datetime.fromtimestamp(
                     match["info"]["gameStartTimestamp"] / 1000.0
                 ).strftime("%Y-%m-%d %H:%M:%S")
-                async with sqa.connect(self.bot.db_path) as db:
+                async with aconnect(self.bot.db_path) as db:
                     await db.execute(
                         "INSERT OR IGNORE INTO match_stats "
                         "(match_id, puuid, game_start, queue_id, champion, "

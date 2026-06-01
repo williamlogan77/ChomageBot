@@ -2,13 +2,12 @@ import asyncio
 import glob
 import logging
 import os
-import sqlite3 as sq
 
-import aiosqlite as sqa
 import discord
 import pantheon
 from discord.ext.commands import Bot
 from dotenv import load_dotenv
+from utils import db
 from utils.db_utils import DButils
 
 # Load .env from parent directory relative to this file's location
@@ -27,6 +26,8 @@ class MyDiscordBot(Bot):
         super().__init__(command_prefix, intents=intents)
         self.dbutils = DButils(db_path=db_path)
         self.db_path = db_path
+        # Single seam for the storage backend — see utils/db.py.
+        db.configure(db_path)
         self.guildid = serverid
 
         riot_key = os.environ.get("riot_key")
@@ -52,25 +53,25 @@ class MyDiscordBot(Bot):
     async def sync_discord(self) -> None:
         print("Syncing users")
         guild = await self.fetch_guild(self.guildid)
-        async with sqa.connect(self.db_path) as db:
+        async with db.aconnect(self.db_path) as conn:
             async for member in guild.fetch_members():
                 nickname = member.nick if member.nick is not None else ""
-                await db.execute(
+                await conn.execute(
                     "REPLACE INTO users (user_id, nickname, discord_tag) VALUES (?, ?, ?)",
                     (member.id, nickname, member.name),
                 )
-                await db.commit()
+                await conn.commit()
 
             channels = await guild.fetch_channels()
 
             for channel in channels:
                 if str(channel.type) == "category":
                     continue
-                await db.execute(
+                await conn.execute(
                     "REPLACE INTO discord_channels (channel_id, name, type) VALUES (?, ?, ?)",
                     (int(channel.id), str(channel.name), str(channel.type)),
                 )
-            await db.commit()
+            await conn.commit()
         return
 
     async def on_connect(self) -> None:
@@ -97,7 +98,7 @@ def setup_db(logger: logging.Logger) -> None:
     if not os.path.isfile(db_path):
         logger.info("Creating empty database file")
         open(db_path, "x", encoding="utf-8").close()
-    with sq.connect(db_path) as connection:
+    with db.connect(db_path) as connection:
         with open("./db/setup.sql", encoding="utf-8") as f:
             connection.executescript(f.read())
     logger.info("Database schema applied")

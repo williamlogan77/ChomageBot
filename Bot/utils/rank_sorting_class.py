@@ -27,8 +27,11 @@ class Ranker:
         self._score = self._rankToScore()
 
     def _rankToScore(self):
-
-        actual_score = 1000 * Ranker.LEAGUES[self.league] + 100 * Ranker.SUBLEAGUE[self.subleague] + int(self.leaguePoints)
+        actual_score = (
+            1000 * Ranker.LEAGUES[self.league]
+            + 100 * Ranker.SUBLEAGUE[self.subleague]
+            + int(self.leaguePoints)
+        )
         adjustment_factor = Ranker.LEAGUES[self.league] * 599
         return actual_score - adjustment_factor
 

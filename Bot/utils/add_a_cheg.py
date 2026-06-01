@@ -1,6 +1,5 @@
 import cv2
 import numpy as np
-import os
 
 
 class ChegClass:
@@ -20,9 +19,7 @@ class ChegClass:
         def rotate_image(image, angle):
             image_center = tuple(np.array(image.shape[1::-1]) / 2)
             rot_mat = cv2.getRotationMatrix2D(image_center, angle, 1.0)
-            result = cv2.warpAffine(
-                image, rot_mat, image.shape[1::-1], flags=cv2.INTER_LINEAR
-            )
+            result = cv2.warpAffine(image, rot_mat, image.shape[1::-1], flags=cv2.INTER_LINEAR)
             return result
 
         foreground = rotate_image(foreground, np.random.randint(0, 360))
@@ -49,10 +46,7 @@ class ChegClass:
                 overlay = np.concatenate(
                     [
                         overlay,
-                        np.ones(
-                            (overlay.shape[0], overlay.shape[1], 1), dtype=overlay.dtype
-                        )
-                        * 255,
+                        np.ones((overlay.shape[0], overlay.shape[1], 1), dtype=overlay.dtype) * 255,
                     ],
                     axis=2,
                 )

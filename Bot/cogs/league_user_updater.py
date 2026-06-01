@@ -1,9 +1,9 @@
-import aiosqlite as sqa
 import discord
 from discord import app_commands
 from discord.ext import commands
 from main import MyDiscordBot
 from utils.autocomplete import DiscordAttachedLeagueNames
+from utils.db import aconnect
 
 
 class LeagueUsers(commands.Cog):
@@ -27,7 +27,7 @@ class LeagueUsers(commands.Cog):
         # Get PUUID from Account API - this is all we need now
         puuid = (await self.bot.lolapi.get_account_by_riotId(league_name, tagline))["puuid"]
 
-        async with sqa.connect(self.bot.db_path) as db:
+        async with aconnect(self.bot.db_path) as db:
             await db.execute(
                 """REPLACE INTO league_players (
                         discord_user_id,
@@ -62,7 +62,7 @@ class LeagueUsers(commands.Cog):
     ):
         if league_name != "":
             names = league_name.split(";")
-            async with sqa.connect(self.bot.db_path) as db:
+            async with aconnect(self.bot.db_path) as db:
                 for name in names:
                     await db.execute(
                         "DELETE FROM league_players WHERE league_username = ?", (name,)
@@ -71,7 +71,7 @@ class LeagueUsers(commands.Cog):
                     await ctx.response.send_message(f"{name} removed from list")
 
         else:
-            async with sqa.connect(self.bot.db_path) as db:
+            async with aconnect(self.bot.db_path) as db:
                 await db.execute("DELETE FROM league_players WHERE discord_user_id = ?", (user.id,))
                 await db.commit()
                 await ctx.response.send_message(
@@ -85,7 +85,7 @@ class LeagueUsers(commands.Cog):
         description="Shows all player currently stored in the league database",
     )
     async def show_all(self, ctx: discord.Interaction):
-        async with sqa.connect(self.bot.db_path) as db:
+        async with aconnect(self.bot.db_path) as db:
             to_show = await db.execute_fetchall("SELECT league_username, tag FROM league_players")
         to_print = ""
         for name in to_show:

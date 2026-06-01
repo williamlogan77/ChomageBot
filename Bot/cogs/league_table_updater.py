@@ -1,12 +1,12 @@
 import asyncio
 import datetime as dt
 
-import aiosqlite as sqa
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 from main import MyDiscordBot
 from pantheon.utils.exceptions import ServerError
+from utils.db import aconnect
 from utils.rank_sorting_class import Ranker
 from utils.riot_client import get_league_entries
 from utils.riot_stats import fetch_recent_kd
@@ -73,7 +73,7 @@ class FetchFromRiot(commands.Cog):
         return users_ranks
 
     async def fetch_ranks_from_db(self):
-        async with sqa.connect(self.bot.db_path) as connection:
+        async with aconnect(self.bot.db_path) as connection:
             async with connection.execute_fetchall(
                 """SELECT league_username,
                         lp,
@@ -110,7 +110,7 @@ class FetchFromRiot(commands.Cog):
         # self.bot.logging.info("fetching ranks")
         # fetch from db
         # await self.fetch_ranks_from_db()
-        async with sqa.connect(self.bot.db_path) as connection:
+        async with aconnect(self.bot.db_path) as connection:
             async with connection.execute_fetchall(
                 """SELECT puuid,
                         IIF(nickname = '', discord_tag, nickname),
@@ -134,7 +134,7 @@ class FetchFromRiot(commands.Cog):
         # (league_players.leagueId, ~47 chars), newer rows by the real
         # puuid (~78 chars). Query both so legacy-tracked players still
         # surface their game history.
-        async with sqa.connect(self.bot.db_path) as connection:
+        async with aconnect(self.bot.db_path) as connection:
             async with connection.execute(
                 "SELECT wins, losses FROM league_history "
                 "WHERE puuid IN ("
@@ -178,7 +178,7 @@ class FetchFromRiot(commands.Cog):
         if losses could have come last. False-negatives over false-positives
         for the ping.
         """
-        async with sqa.connect(self.bot.db_path) as connection:
+        async with aconnect(self.bot.db_path) as connection:
             async with connection.execute(
                 "SELECT wins, losses FROM league_history "
                 "WHERE puuid IN ("
@@ -228,7 +228,7 @@ class FetchFromRiot(commands.Cog):
         await channel.send(f"\U0001faf5\U0001f602 <@{user_id}>{extra}")
 
     async def get_name(self, puuid):
-        async with sqa.connect(self.bot.db_path) as connection:
+        async with aconnect(self.bot.db_path) as connection:
             async with connection.execute_fetchall(
                 "SELECT league_username FROM league_players WHERE puuid = ?",
                 (puuid,),
@@ -239,7 +239,7 @@ class FetchFromRiot(commands.Cog):
                     return "Unknown"
 
     async def check_name(self, puuid):
-        async with sqa.connect(self.bot.db_path) as connection:
+        async with aconnect(self.bot.db_path) as connection:
             async with connection.execute_fetchall(
                 "SELECT puuid, league_username FROM league_players WHERE puuid = ?",
                 (puuid,),
@@ -479,7 +479,7 @@ class FetchFromRiot(commands.Cog):
 
     # Needs updating to grab last match from the table
     async def update_table(self, user, user_stats_dict):
-        async with sqa.connect(database=self.bot.db_path) as connection:
+        async with aconnect(self.bot.db_path) as connection:
             try:
                 self.bot.logging.info(f"updating table, logging {user_stats_dict}")
                 last_values = await connection.execute_fetchall(
@@ -498,7 +498,7 @@ class FetchFromRiot(commands.Cog):
         except Exception as e:
             self.bot.logging.info(f"Exception as {e}")
 
-        async with sqa.connect(self.bot.db_path) as connection:
+        async with aconnect(self.bot.db_path) as connection:
             await connection.execute(
                 "INSERT INTO league_history (puuid, lp, division, tier, wins, losses) VALUES (?, ?, ?, ?, ?, ?)",
                 (

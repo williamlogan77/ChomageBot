@@ -2,7 +2,6 @@ import datetime as dt
 import os
 import pickle
 
-import aiosqlite as sqa
 import discord
 import matplotlib.pyplot as plt
 from discord import app_commands
@@ -10,6 +9,7 @@ from discord.ext import commands
 from main import MyDiscordBot
 from utils.add_a_cheg import ChegClass
 from utils.autocomplete import DiscordAttachedLeagueNames
+from utils.db import aconnect
 from utils.rank_sorting_class import Ranker
 
 # Start of the current ranked tracking window. Update manually when a new
@@ -34,7 +34,7 @@ class LeagueGraphs(commands.Cog):
         user: discord.User,
         league_name: app_commands.Transform[str, DiscordAttachedLeagueNames],
     ):
-        async with sqa.connect(self.bot.db_path) as connection:
+        async with aconnect(self.bot.db_path) as connection:
             summonerid = await connection.execute_fetchall(
                 "SELECT leagueId FROM league_players WHERE league_username = ?",
                 (league_name,),
@@ -55,7 +55,7 @@ class LeagueGraphs(commands.Cog):
             pickle.load(f)
 
             # plt._backend_mod.new_figure_manager_given_figure(1, fig)
-        async with sqa.connect(self.bot.db_path) as connection:
+        async with aconnect(self.bot.db_path) as connection:
             # Older history rows are keyed by the legacy 47-char summoner ID
             # (league_players.leagueId), newer rows by the real 78-char puuid.
             # Match on either via a UNION subquery so legacy-tracked players
@@ -81,7 +81,7 @@ class LeagueGraphs(commands.Cog):
             )
             return
 
-        async with sqa.connect(self.bot.db_path) as connection:
+        async with aconnect(self.bot.db_path) as connection:
             user = await connection.execute_fetchall(
                 "SELECT league_username FROM league_players WHERE leagueId = ?",
                 (summonerid[0][0],),
@@ -118,7 +118,7 @@ class LeagueGraphs(commands.Cog):
         user: discord.User,
         league_name: app_commands.Transform[str, DiscordAttachedLeagueNames],
     ):
-        async with sqa.connect(self.bot.db_path) as connection:
+        async with aconnect(self.bot.db_path) as connection:
             summonerid = await connection.execute_fetchall(
                 "SELECT leagueId FROM league_players WHERE league_username = ?",
                 (league_name,),
@@ -138,7 +138,7 @@ class LeagueGraphs(commands.Cog):
             pickle.load(f)
 
         # plt._backend_mod.new_figure_manager_given_figure(1, fig)
-        async with sqa.connect(self.bot.db_path) as connection:
+        async with aconnect(self.bot.db_path) as connection:
             # See generate_singular: match both legacy leagueId and modern
             # puuid via UNION so legacy-tracked players surface correctly.
             async with connection.execute(
@@ -157,7 +157,7 @@ class LeagueGraphs(commands.Cog):
                         score_dict[key] = []
                     score_dict[key].append(value)
 
-        async with sqa.connect(self.bot.db_path) as connection:
+        async with aconnect(self.bot.db_path) as connection:
             user = await connection.execute_fetchall(
                 "SELECT league_username FROM league_players WHERE leagueId = ?",
                 (summonerid[0][0],),

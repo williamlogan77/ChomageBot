@@ -1,8 +1,8 @@
-import aiosqlite as sqa
 import discord
 from discord import app_commands
 from discord.ext import commands
 from utils.autocomplete import DiscordAttachedLeagueNames
+from utils.db import aconnect
 from utils.riot_stats import fetch_recent_kd
 
 MATCH_COUNT = 20
@@ -31,7 +31,7 @@ class KdaCog(commands.Cog):
     ):
         await ctx.response.defer()
 
-        async with sqa.connect(self.bot.db_path) as db:
+        async with aconnect(self.bot.db_path) as db:
             row = await (
                 await db.execute(
                     "SELECT puuid FROM league_players WHERE league_username = ?",

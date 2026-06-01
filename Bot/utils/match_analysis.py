@@ -13,12 +13,13 @@ a fresh Figure that the caller is responsible for closing.
 from __future__ import annotations
 
 import math
-import sqlite3
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+
+from .db import connect
 
 DEFAULT_DB = Path(__file__).resolve().parent.parent / "db" / "database.sqlite"
 
@@ -501,7 +502,7 @@ def load_matches(db_path: Path = DEFAULT_DB) -> pd.DataFrame:
     available for per-account drill-downs (e.g. champion learning curve
     is meaningful per account, not per person).
     """
-    with sqlite3.connect(db_path) as con:
+    with connect(db_path) as con:
         # `position` was added late (scripts/migrate_add_position.py). Select
         # it only if present so a code deploy that lands before the migration
         # has run doesn't crash every chart with "no such column"; the role
@@ -609,7 +610,7 @@ def load_rank_history(db_path: Path = DEFAULT_DB) -> pd.DataFrame:
     """
     from utils.rank_sorting_class import Ranker
 
-    with sqlite3.connect(db_path) as con:
+    with connect(db_path) as con:
         df = pd.read_sql_query(
             """
             SELECT

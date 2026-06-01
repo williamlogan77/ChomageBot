@@ -14,10 +14,10 @@ from __future__ import annotations
 import datetime as dt
 import logging
 
-import aiosqlite as sqa
 import discord
 from discord import app_commands
 from discord.ext import commands
+from utils.db import aconnect
 
 # Match the role-name gate used in cogs.match_analysis for admin commands.
 # Duplicated here (rather than imported) so this cog has no cross-cog
@@ -96,7 +96,7 @@ class UsageLogger(commands.Cog):
             interaction.type.name if hasattr(interaction.type, "name") else str(interaction.type)
         )
         try:
-            async with sqa.connect(self.bot.db_path) as db:
+            async with aconnect(self.bot.db_path) as db:
                 await db.execute(
                     "INSERT INTO command_usage "
                     "(command_name, user_id, guild_id, interaction_type) "
@@ -137,7 +137,7 @@ class UsageLogger(commands.Cog):
 
         cutoff = (dt.datetime.now() - dt.timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
         try:
-            async with sqa.connect(self.bot.db_path) as db:
+            async with aconnect(self.bot.db_path) as db:
                 rows = await db.execute_fetchall(
                     "SELECT command_name, COUNT(*) AS n, "
                     "COUNT(DISTINCT user_id) AS uniq_users "

@@ -43,6 +43,16 @@ PLATFORM_HOST = "https://euw1.api.riotgames.com"  # league entries
 REGION_HOST = "https://europe.api.riotgames.com"  # match-v5
 
 RANKED_SOLO_QUEUE_ID = 420
+RANKED_5S_QUEUE_ID = 710  # match-v5 queue for the weekend Ranked 5s queue
+
+# League entries are consumed by two board cogs (solo + ranked 5s) on
+# independent 120s loops. A response lists ALL of a player's ranked queues,
+# so a short TTL cache lets the second consumer reuse the first's response
+# instead of doubling API spend. TTL sits just below the loops' 120s period
+# so each cycle still gets fresh data while tolerating the loops drifting
+# out of phase. ~20 tracked players → no eviction needed.
+_ENTRIES_TTL_SECONDS = 115.0
+_entries_cache: dict[str, tuple[float, list[dict]]] = {}
 
 log = logging.getLogger(__name__)
 
@@ -120,16 +130,26 @@ async def _get_json(url: str, params: dict | None = None) -> tuple[int, list | d
     return (429, None)
 
 
-async def get_league_entries(puuid: str) -> list[dict] | None:
+async def get_league_entries(puuid: str, *, fresh: bool = False) -> list[dict] | None:
     """Ranked league entries for a player.
 
     Returns the list of league entries (one per ranked queue type the player
-    has participated in), or ``None`` if the request failed.
+    has participated in), or ``None`` if the request failed. Responses are
+    cached for ``_ENTRIES_TTL_SECONDS``; pass ``fresh=True`` to bypass.
     """
+    cached = _entries_cache.get(puuid)
+    if not fresh and cached is not None:
+        age = time.monotonic() - cached[0]
+        if age < _ENTRIES_TTL_SECONDS:
+            # Copy per hit: callers mutate the entry dicts in place
+            # (board cogs inject Ranker/user_id keys), and a polluted
+            # cache would alias one board's state into the other's.
+            return [dict(entry) for entry in cached[1]]
     url = f"{PLATFORM_HOST}/lol/league/v4/entries/by-puuid/{puuid}"
     status, body = await _get_json(url)
     if status != 200 or not isinstance(body, list):
         return None
+    _entries_cache[puuid] = (time.monotonic(), [dict(entry) for entry in body])
     return body
 
 

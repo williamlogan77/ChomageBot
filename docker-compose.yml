@@ -2,6 +2,9 @@ version: '3'
 services:
   myapp:
     build: .
+    # .env must define DATABASE_URL pointing at the external Postgres
+    # (a dedicated LXC on the Proxmox host — see
+    # docs/postgres-migration-runbook.md). The bot has no bundled DB.
     env_file:
       - .env
     volumes:

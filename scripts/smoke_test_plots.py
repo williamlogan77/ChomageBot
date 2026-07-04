@@ -9,9 +9,9 @@ Catches regressions before they reach the ``/match_stats_panel`` view.
 Read-only — never writes to the DB.
 
 Usage:
-    python scripts/smoke_test_plots.py [path/to/database.sqlite]
+    python scripts/smoke_test_plots.py [postgres-dsn]
 
-Defaults to ``Bot/db/database.sqlite``.
+Defaults to the ``DATABASE_URL`` env var / the utils.db default DSN.
 """
 
 from __future__ import annotations
@@ -28,13 +28,13 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt  # noqa: E402
 
-# Make Bot.utils importable when running from project root.
+# Import the bot's `utils` package the same way the bot does (cwd=Bot), so
+# utils.match_analysis's lazy `from utils.db import dsn` resolves here too.
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(_PROJECT_ROOT))
+sys.path.insert(0, str(_PROJECT_ROOT / "Bot"))
 
-from Bot.utils.match_analysis import ALL_PLOTS, load_matches  # noqa: E402
+from utils.match_analysis import ALL_PLOTS, load_matches  # noqa: E402
 
-_DEFAULT_DB = _PROJECT_ROOT / "Bot" / "db" / "database.sqlite"
 _STEM_WIDTH = 35
 _ERR_WIDTH = 80
 
@@ -63,19 +63,18 @@ def _pick_sample_players(df) -> tuple[str, str, str]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
-        "db_path",
+        "db_dsn",
         nargs="?",
-        default=str(_DEFAULT_DB),
-        help=f"Path to SQLite DB (default: {_DEFAULT_DB})",
+        default=None,
+        help="Postgres DSN (default: DATABASE_URL env var / utils.db default)",
     )
     args = parser.parse_args()
 
-    db_path = Path(args.db_path)
     print("=== Chart smoke test ===")
-    print(f"DB: {db_path}")
+    print(f"DB: {args.db_dsn or 'DATABASE_URL / utils.db default'}")
 
     try:
-        df = load_matches(db_path)
+        df = load_matches(args.db_dsn)
     except Exception as exc:  # noqa: BLE001
         print(f"No data, can't smoke test: {_format_error(exc)}")
         return 1

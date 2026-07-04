@@ -63,7 +63,6 @@ async def main() -> None:
     bot = MyDiscordBot(
         command_prefix="!",
         intents=discord.Intents.all(),
-        db_path="./db/database.sqlite",
         serverid=guild_id,
     )
     bot.logging = log  # cogs reference this

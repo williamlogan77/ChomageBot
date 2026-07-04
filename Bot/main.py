@@ -2,14 +2,13 @@ import asyncio
 import glob
 import logging
 import os
-import sqlite3 as sq
+import sys
 
-import aiosqlite as sqa
 import discord
 import pantheon
 from discord.ext.commands import Bot
 from dotenv import load_dotenv
-from utils.db_utils import DButils
+from utils import db
 
 # Load .env from parent directory relative to this file's location
 env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".env")
@@ -21,12 +20,9 @@ class MyDiscordBot(Bot):
         self,
         command_prefix: str,
         intents: discord.Intents,
-        db_path: str,
         serverid: int,
     ) -> None:
         super().__init__(command_prefix, intents=intents)
-        self.dbutils = DButils(db_path=db_path)
-        self.db_path = db_path
         self.guildid = serverid
 
         riot_key = os.environ.get("riot_key")
@@ -52,25 +48,33 @@ class MyDiscordBot(Bot):
     async def sync_discord(self) -> None:
         print("Syncing users")
         guild = await self.fetch_guild(self.guildid)
-        async with sqa.connect(self.db_path) as db:
-            async for member in guild.fetch_members():
-                nickname = member.nick if member.nick is not None else ""
-                await db.execute(
-                    "REPLACE INTO users (user_id, nickname, discord_tag) VALUES (?, ?, ?)",
-                    (member.id, nickname, member.name),
-                )
-                await db.commit()
+        # Drain the Discord API iterators BEFORE touching the pool so no
+        # pooled connection (max 5) sits pinned across paginated network
+        # fetches, then upsert each table in one executemany batch.
+        members = [member async for member in guild.fetch_members()]
+        channels = await guild.fetch_channels()
 
-            channels = await guild.fetch_channels()
-
-            for channel in channels:
-                if str(channel.type) == "category":
-                    continue
-                await db.execute(
-                    "REPLACE INTO discord_channels (channel_id, name, type) VALUES (?, ?, ?)",
-                    (int(channel.id), str(channel.name), str(channel.type)),
-                )
-            await db.commit()
+        await db.executemany(
+            "INSERT INTO users (user_id, nickname, discord_tag) "
+            "VALUES (%s, %s, %s) "
+            "ON CONFLICT (user_id) DO UPDATE SET "
+            "nickname = EXCLUDED.nickname, discord_tag = EXCLUDED.discord_tag",
+            [
+                (member.id, member.nick if member.nick is not None else "", member.name)
+                for member in members
+            ],
+        )
+        await db.executemany(
+            "INSERT INTO discord_channels (channel_id, name, type) "
+            "VALUES (%s, %s, %s) "
+            "ON CONFLICT (channel_id) DO UPDATE SET "
+            "name = EXCLUDED.name, type = EXCLUDED.type",
+            [
+                (int(channel.id), str(channel.name), str(channel.type))
+                for channel in channels
+                if str(channel.type) != "category"
+            ],
+        )
         return
 
     async def on_connect(self) -> None:
@@ -88,24 +92,13 @@ class MyDiscordBot(Bot):
         return
 
 
-def setup_db(logger: logging.Logger) -> None:
-    """Apply ./db/setup.sql to the database. Safe to run on every boot —
-    every statement uses CREATE TABLE/INDEX IF NOT EXISTS, so this is a
-    no-op when the schema is already current.
-    """
-    db_path = "./db/database.sqlite"
-    if not os.path.isfile(db_path):
-        logger.info("Creating empty database file")
-        open(db_path, "x", encoding="utf-8").close()
-    with sq.connect(db_path) as connection:
-        with open("./db/setup.sql", encoding="utf-8") as f:
-            connection.executescript(f.read())
-    logger.info("Database schema applied")
-
-
 async def main(my_token: str) -> None:
-    setup_db(logging.getLogger())
-    dbpath = "./db/database.sqlite"
+    # Apply ./db/setup.postgres.sql on every boot. Safe — every statement
+    # uses CREATE TABLE/INDEX IF NOT EXISTS, so this is a no-op when the
+    # schema is already current.
+    await db.apply_schema("./db/setup.postgres.sql")
+    print("Database schema applied")
+
     server_id = int(os.environ.get("guild_id", "0"))
     if server_id == 0:
         raise ValueError("guild_id environment variable must be set in .env file")
@@ -113,14 +106,19 @@ async def main(my_token: str) -> None:
     bot = MyDiscordBot(
         command_prefix="!",
         intents=discord.Intents.all(),
-        db_path=dbpath,
         serverid=server_id,
     )
-    async with bot:
-        await bot.start(my_token)
+    try:
+        async with bot:
+            await bot.start(my_token)
+    finally:
+        await db.close()
 
 
 if __name__ == "__main__":
+    if sys.platform == "win32":
+        # psycopg's async pool can't run on Windows' default ProactorEventLoop.
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     token = os.environ.get("token")
     if not token:
         raise ValueError("token env var must be set in .env file")

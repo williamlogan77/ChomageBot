@@ -1,7 +1,7 @@
-import aiosqlite as sqa
 import discord
 from discord import app_commands
 from discord.ext import commands
+from utils import db
 from utils.autocomplete import DiscordAttachedLeagueNames
 from utils.riot_stats import fetch_recent_kd
 
@@ -31,13 +31,10 @@ class KdaCog(commands.Cog):
     ):
         await ctx.response.defer()
 
-        async with sqa.connect(self.bot.db_path) as db:
-            row = await (
-                await db.execute(
-                    "SELECT puuid FROM league_players WHERE league_username = ?",
-                    (league_name,),
-                )
-            ).fetchone()
+        row = await db.fetchone(
+            "SELECT puuid FROM league_players WHERE league_username = %s",
+            (league_name,),
+        )
 
         if not row or not row[0]:
             await ctx.followup.send(f"{league_name} not found in the database")

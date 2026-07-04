@@ -13,14 +13,38 @@ a fresh Figure that the caller is responsible for closing.
 from __future__ import annotations
 
 import math
-import sqlite3
-from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import psycopg
 
-DEFAULT_DB = Path(__file__).resolve().parent.parent / "db" / "database.sqlite"
+# DSN of the bot's Postgres database. ``None`` resolves to utils.db.dsn()
+# (the DATABASE_URL env var) at connect time — kept as a module constant so
+# notebooks can still point the loaders at a different database.
+DEFAULT_DB: str | None = None
+
+
+def _connect(db_dsn: str | None) -> psycopg.Connection:
+    """Open a short-lived SYNC connection for the pandas loaders.
+
+    These loaders run off the event loop (``asyncio.to_thread`` in the
+    cog, or plain scripts/notebooks), so a plain blocking connection is
+    the right tool — no pool, no async.
+    """
+    from utils.db import dsn as _default_dsn
+
+    return psycopg.connect(db_dsn if db_dsn else _default_dsn())
+
+
+def _read_sql(query: str, con: psycopg.Connection) -> pd.DataFrame:
+    """Run ``query`` and return a DataFrame named after the cursor columns."""
+    with con.cursor() as cur:
+        cur.execute(query)
+        columns = [d.name for d in cur.description]
+        rows = cur.fetchall()
+    return pd.DataFrame(rows, columns=columns)
+
 
 # Days of the week and their short labels, Monday=0 per pandas weekday().
 DOW_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
@@ -487,7 +511,7 @@ def _factors_verdict(r2: float) -> str:
     return "Factors are a strong driver of outcomes."
 
 
-def load_matches(db_path: Path = DEFAULT_DB) -> pd.DataFrame:
+def load_matches(db_path: str | None = DEFAULT_DB) -> pd.DataFrame:
     """Load match_stats joined with league_players + users; derive features.
 
     Each row is one (Riot account, match). Players with multiple Riot
@@ -501,15 +525,9 @@ def load_matches(db_path: Path = DEFAULT_DB) -> pd.DataFrame:
     available for per-account drill-downs (e.g. champion learning curve
     is meaningful per account, not per person).
     """
-    with sqlite3.connect(db_path) as con:
-        # `position` was added late (scripts/migrate_add_position.py). Select
-        # it only if present so a code deploy that lands before the migration
-        # has run doesn't crash every chart with "no such column"; the role
-        # derivation below already falls back to the heuristic when it's NULL.
-        ms_cols = {row[1] for row in con.execute("PRAGMA table_info(match_stats)").fetchall()}
-        position_select = "ms.position" if "position" in ms_cols else "NULL AS position"
-        df = pd.read_sql_query(
-            f"""
+    with _connect(db_path) as con:
+        df = _read_sql(
+            """
             SELECT
                 ms.match_id,
                 ms.puuid,
@@ -522,7 +540,7 @@ def load_matches(db_path: Path = DEFAULT_DB) -> pd.DataFrame:
                 ms.assists,
                 ms.duration_sec,
                 ms.patch_version,
-                {position_select},
+                ms.position,
                 lp.league_username AS riot_account,
                 lp.discord_user_id,
                 COALESCE(
@@ -538,7 +556,10 @@ def load_matches(db_path: Path = DEFAULT_DB) -> pd.DataFrame:
             con,
         )
 
-    df["game_start"] = pd.to_datetime(df["game_start"])
+    # TIMESTAMPTZ comes back tz-aware; normalise to tz-naive UTC so every
+    # downstream comparison against naive pd.Timestamp literals keeps
+    # working exactly as it did with sqlite's naive strings.
+    df["game_start"] = pd.to_datetime(df["game_start"], utc=True).dt.tz_localize(None)
     df["duration_min"] = df["duration_sec"] / 60.0
     df["kda"] = (df["kills"] + df["assists"]) / df["deaths"].clip(lower=1)
     df["kd"] = df["kills"] / df["deaths"].clip(lower=1)
@@ -595,7 +616,7 @@ def load_matches(db_path: Path = DEFAULT_DB) -> pd.DataFrame:
     return df
 
 
-def load_rank_history(db_path: Path = DEFAULT_DB) -> pd.DataFrame:
+def load_rank_history(db_path: str | None = DEFAULT_DB) -> pd.DataFrame:
     """Load league_history mapped to ``person`` keys + rank scores.
 
     league_history is keyed by either modern puuid OR the older encrypted
@@ -609,8 +630,8 @@ def load_rank_history(db_path: Path = DEFAULT_DB) -> pd.DataFrame:
     """
     from utils.rank_sorting_class import Ranker
 
-    with sqlite3.connect(db_path) as con:
-        df = pd.read_sql_query(
+    with _connect(db_path) as con:
+        df = _read_sql(
             """
             SELECT
                 lh.timestamp,
@@ -628,14 +649,16 @@ def load_rank_history(db_path: Path = DEFAULT_DB) -> pd.DataFrame:
             JOIN league_players lp
               ON lp.puuid = lh.puuid OR lp.leagueId = lh.puuid
             LEFT JOIN users u ON u.user_id = lp.discord_user_id
-            WHERE lh.tier IS NOT NULL AND lh.division IS NOT NULL AND lh.lp IS NOT NULL
+            WHERE lh.queue = 'RANKED_SOLO_5x5'
+              AND lh.tier IS NOT NULL AND lh.division IS NOT NULL AND lh.lp IS NOT NULL
             ORDER BY lh.timestamp ASC
             """,
             con,
         )
     if df.empty:
         return df
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    # tz-aware -> tz-naive UTC (see load_matches).
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_localize(None)
 
     def _score(tier: str, div: str, lp: int) -> float | None:
         try:
@@ -671,7 +694,7 @@ _RANK_TICK_LABELS: list[tuple[float, str]] = [
 ]
 
 
-def compute_lp_events(db_path: Path = DEFAULT_DB) -> pd.DataFrame:
+def compute_lp_events(db_path: str | None = DEFAULT_DB) -> pd.DataFrame:
     """Per-game LP events derived from league_history diffs.
 
     For each (person, consecutive snapshot pair) where exactly one game

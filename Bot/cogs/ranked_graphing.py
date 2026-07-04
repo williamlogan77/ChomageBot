@@ -2,12 +2,12 @@ import datetime as dt
 import os
 import pickle
 
-import aiosqlite as sqa
 import discord
 import matplotlib.pyplot as plt
 from discord import app_commands
 from discord.ext import commands
 from main import MyDiscordBot
+from utils import db
 from utils.add_a_cheg import ChegClass
 from utils.autocomplete import DiscordAttachedLeagueNames
 from utils.rank_sorting_class import Ranker
@@ -17,6 +17,10 @@ from utils.rank_sorting_class import Ranker
 # ('For Demacia', Season 1) — 2026-01-08 noon local server time per
 # Riot's annual cycle announcement. Includes all of 2026's ranked games.
 CURRENT_SPLIT_START = "2026-01-08 12:00:00"
+# TIMESTAMPTZ comparisons want a tz-aware datetime, not a string.
+_SPLIT_START_DT = dt.datetime.strptime(CURRENT_SPLIT_START, "%Y-%m-%d %H:%M:%S").replace(
+    tzinfo=dt.UTC
+)
 
 
 class LeagueGraphs(commands.Cog):
@@ -34,20 +38,19 @@ class LeagueGraphs(commands.Cog):
         user: discord.User,
         league_name: app_commands.Transform[str, DiscordAttachedLeagueNames],
     ):
-        async with sqa.connect(self.bot.db_path) as connection:
-            summonerid = await connection.execute_fetchall(
-                "SELECT leagueId FROM league_players WHERE league_username = ?",
-                (league_name,),
-            )
-            print(summonerid)
-            if summonerid is None:
-                await ctx.response.send_message(f"{league_name} does not exist in the database")
-                return
-            else:
-                await ctx.response.defer()
-            # msg = await ctx.followup.send("Refreshing ranks...",
-            #                               wait=True,
-            #                               ephemeral=True)
+        summonerid = await db.fetchall(
+            "SELECT leagueId FROM league_players WHERE league_username = %s",
+            (league_name,),
+        )
+        print(summonerid)
+        if not summonerid:
+            await ctx.response.send_message(f"{league_name} does not exist in the database")
+            return
+        else:
+            await ctx.response.defer()
+        # msg = await ctx.followup.send("Refreshing ranks...",
+        #                               wait=True,
+        #                               ephemeral=True)
 
         with open("utils/my_fig.pickle", "rb") as f:
             # Load registers the figure with matplotlib's pyplot manager;
@@ -55,25 +58,27 @@ class LeagueGraphs(commands.Cog):
             pickle.load(f)
 
             # plt._backend_mod.new_figure_manager_given_figure(1, fig)
-        async with sqa.connect(self.bot.db_path) as connection:
-            # Older history rows are keyed by the legacy 47-char summoner ID
-            # (league_players.leagueId), newer rows by the real 78-char puuid.
-            # Match on either via a UNION subquery so legacy-tracked players
-            # (e.g. DARWIN DARWIN N) actually see their post-migration games.
-            async with connection.execute(
-                "SELECT * FROM league_history WHERE timestamp > ? AND puuid IN ("
-                "    SELECT leagueId FROM league_players WHERE league_username = ?"
-                "    UNION"
-                "    SELECT puuid FROM league_players WHERE league_username = ?"
-                ") ORDER BY timestamp ASC",
-                (CURRENT_SPLIT_START, league_name, league_name),
-            ) as cursor:
-                x_to_plot = []
-                y_to_plot = []
-                async for point in cursor:
-                    x_to_plot.append(dt.datetime.strptime(point[2], "%Y-%m-%d %H:%M:%S"))
-                    # lp, division, tier = point[3:6]
-                    y_to_plot.append(Ranker(*point[3:6][::-1])._score)
+        # Older history rows are keyed by the legacy 47-char summoner ID
+        # (league_players.leagueId), newer rows by the real 78-char puuid.
+        # Match on either via a UNION subquery so legacy-tracked players
+        # (e.g. DARWIN DARWIN N) actually see their post-migration games.
+        # Solo queue only — Ranked 5s snapshots share league_history.
+        points = await db.fetchall(
+            "SELECT * FROM league_history WHERE timestamp > %s "
+            "AND queue = 'RANKED_SOLO_5x5' AND puuid IN ("
+            "    SELECT leagueId FROM league_players WHERE league_username = %s"
+            "    UNION"
+            "    SELECT puuid FROM league_players WHERE league_username = %s"
+            ") ORDER BY timestamp ASC",
+            (_SPLIT_START_DT, league_name, league_name),
+        )
+        x_to_plot = []
+        y_to_plot = []
+        for point in points:
+            # timestamp comes back as a tz-aware datetime already.
+            x_to_plot.append(point[2])
+            # lp, division, tier = point[3:6]
+            y_to_plot.append(Ranker(*point[3:6][::-1])._score)
         if not y_to_plot:
             await ctx.followup.send(
                 f"No ranked games for {league_name} since the current split "
@@ -81,11 +86,10 @@ class LeagueGraphs(commands.Cog):
             )
             return
 
-        async with sqa.connect(self.bot.db_path) as connection:
-            user = await connection.execute_fetchall(
-                "SELECT league_username FROM league_players WHERE leagueId = ?",
-                (summonerid[0][0],),
-            )
+        user = await db.fetchall(
+            "SELECT league_username FROM league_players WHERE leagueId = %s",
+            (summonerid[0][0],),
+        )
         plt.title(user[0][0])
 
         for idx in range(len(y_to_plot) - 1):
@@ -118,12 +122,11 @@ class LeagueGraphs(commands.Cog):
         user: discord.User,
         league_name: app_commands.Transform[str, DiscordAttachedLeagueNames],
     ):
-        async with sqa.connect(self.bot.db_path) as connection:
-            summonerid = await connection.execute_fetchall(
-                "SELECT leagueId FROM league_players WHERE league_username = ?",
-                (league_name,),
-            )
-        if summonerid is None:
+        summonerid = await db.fetchall(
+            "SELECT leagueId FROM league_players WHERE league_username = %s",
+            (league_name,),
+        )
+        if not summonerid:
             await ctx.response.send_message(f"{league_name} does not exist in the database")
             return
         else:
@@ -138,30 +141,30 @@ class LeagueGraphs(commands.Cog):
             pickle.load(f)
 
         # plt._backend_mod.new_figure_manager_given_figure(1, fig)
-        async with sqa.connect(self.bot.db_path) as connection:
-            # See generate_singular: match both legacy leagueId and modern
-            # puuid via UNION so legacy-tracked players surface correctly.
-            async with connection.execute(
-                "SELECT * FROM league_history WHERE timestamp > ? AND puuid IN ("
-                "    SELECT leagueId FROM league_players WHERE league_username = ?"
-                "    UNION"
-                "    SELECT puuid FROM league_players WHERE league_username = ?"
-                ") ORDER BY timestamp ASC",
-                (CURRENT_SPLIT_START, league_name, league_name),
-            ) as cursor:
-                score_dict = {}
-                async for point in cursor:
-                    key = dt.datetime.strptime(point[2][:10], "%Y-%m-%d")
-                    value = Ranker(*point[3:6][::-1])._score
-                    if key not in score_dict.keys():
-                        score_dict[key] = []
-                    score_dict[key].append(value)
+        # See generate_singular: match both legacy leagueId and modern
+        # puuid via UNION so legacy-tracked players surface correctly.
+        points = await db.fetchall(
+            "SELECT * FROM league_history WHERE timestamp > %s "
+            "AND queue = 'RANKED_SOLO_5x5' AND puuid IN ("
+            "    SELECT leagueId FROM league_players WHERE league_username = %s"
+            "    UNION"
+            "    SELECT puuid FROM league_players WHERE league_username = %s"
+            ") ORDER BY timestamp ASC",
+            (_SPLIT_START_DT, league_name, league_name),
+        )
+        score_dict = {}
+        for point in points:
+            # timestamp is a tz-aware datetime — bucket by calendar day.
+            key = point[2].date()
+            value = Ranker(*point[3:6][::-1])._score
+            if key not in score_dict.keys():
+                score_dict[key] = []
+            score_dict[key].append(value)
 
-        async with sqa.connect(self.bot.db_path) as connection:
-            user = await connection.execute_fetchall(
-                "SELECT league_username FROM league_players WHERE leagueId = ?",
-                (summonerid[0][0],),
-            )
+        user = await db.fetchall(
+            "SELECT league_username FROM league_players WHERE leagueId = %s",
+            (summonerid[0][0],),
+        )
 
         if not score_dict:
             await ctx.followup.send(

@@ -5,8 +5,7 @@ non-autocomplete interaction to the ``command_usage`` table. The
 ``/usage_stats`` admin slash command surfaces top commands by window
 so we can later prune the unused ones.
 
-Schema lives in ``Bot/db/setup.sql``; existing DBs migrate via
-``scripts/migrate_add_command_usage.py``.
+Schema lives in ``Bot/db/setup.postgres.sql``.
 """
 
 from __future__ import annotations
@@ -14,10 +13,10 @@ from __future__ import annotations
 import datetime as dt
 import logging
 
-import aiosqlite as sqa
 import discord
 from discord import app_commands
 from discord.ext import commands
+from utils import db
 
 # Match the role-name gate used in cogs.match_analysis for admin commands.
 # Duplicated here (rather than imported) so this cog has no cross-cog
@@ -96,23 +95,21 @@ class UsageLogger(commands.Cog):
             interaction.type.name if hasattr(interaction.type, "name") else str(interaction.type)
         )
         try:
-            async with sqa.connect(self.bot.db_path) as db:
-                await db.execute(
-                    "INSERT INTO command_usage "
-                    "(command_name, user_id, guild_id, interaction_type) "
-                    "VALUES (?, ?, ?, ?)",
-                    (
-                        name,
-                        str(interaction.user.id),
-                        str(interaction.guild_id) if interaction.guild_id else None,
-                        itype,
-                    ),
-                )
-                await db.commit()
+            await db.execute(
+                "INSERT INTO command_usage "
+                "(command_name, user_id, guild_id, interaction_type) "
+                "VALUES (%s, %s, %s, %s)",
+                (
+                    name,
+                    str(interaction.user.id),
+                    str(interaction.guild_id) if interaction.guild_id else None,
+                    itype,
+                ),
+            )
         except Exception as exc:
             # Never let logging failures break user interactions. The DB
-            # might be locked or the table might not exist yet (pre-
-            # migration). Log + carry on.
+            # might be briefly unreachable (e.g. postgres restart). Log +
+            # carry on.
             log.debug(f"usage_logger insert failed for {name!r}: {exc!r}")
 
     @app_commands.command(
@@ -135,21 +132,23 @@ class UsageLogger(commands.Cog):
         days = max(1, min(days, 365))
         top = max(1, min(top, 50))
 
-        cutoff = (dt.datetime.now() - dt.timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+        # TIMESTAMPTZ comparison wants a tz-aware datetime; keep a string
+        # copy purely for the footer display.
+        cutoff_dt = dt.datetime.now(dt.UTC) - dt.timedelta(days=days)
+        cutoff = cutoff_dt.strftime("%Y-%m-%d %H:%M:%S")
         try:
-            async with sqa.connect(self.bot.db_path) as db:
-                rows = await db.execute_fetchall(
-                    "SELECT command_name, COUNT(*) AS n, "
-                    "COUNT(DISTINCT user_id) AS uniq_users "
-                    "FROM command_usage WHERE timestamp >= ? "
-                    "GROUP BY command_name ORDER BY n DESC LIMIT ?",
-                    (cutoff, top),
-                )
-                total_row = await db.execute_fetchall(
-                    "SELECT COUNT(*) FROM command_usage WHERE timestamp >= ?",
-                    (cutoff,),
-                )
-                total = total_row[0][0] if total_row else 0
+            rows = await db.fetchall(
+                "SELECT command_name, COUNT(*) AS n, "
+                "COUNT(DISTINCT user_id) AS uniq_users "
+                "FROM command_usage WHERE timestamp >= %s "
+                "GROUP BY command_name ORDER BY n DESC LIMIT %s",
+                (cutoff_dt, top),
+            )
+            total_row = await db.fetchall(
+                "SELECT COUNT(*) FROM command_usage WHERE timestamp >= %s",
+                (cutoff_dt,),
+            )
+            total = total_row[0][0] if total_row else 0
         except Exception as exc:
             await interaction.followup.send(f"Failed to read usage stats: {exc!r}", ephemeral=True)
             return

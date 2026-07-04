@@ -1,8 +1,8 @@
-import aiosqlite as sqa
 import discord
 from discord import app_commands
 from discord.ext import commands
 from main import MyDiscordBot
+from utils import db
 from utils.autocomplete import DiscordAttachedLeagueNames
 
 
@@ -27,19 +27,22 @@ class LeagueUsers(commands.Cog):
         # Get PUUID from Account API - this is all we need now
         puuid = (await self.bot.lolapi.get_account_by_riotId(league_name, tagline))["puuid"]
 
-        async with sqa.connect(self.bot.db_path) as db:
-            await db.execute(
-                """REPLACE INTO league_players (
-                        discord_user_id,
-                        leagueId,
-                        puuid,
-                        league_username,
-                        tag
-                    )
-                    VALUES (?, ?, ?, ?, ?)""",
-                (user.id, puuid, puuid, league_name, tagline),
-            )
-            await db.commit()
+        await db.execute(
+            """INSERT INTO league_players (
+                    discord_user_id,
+                    leagueId,
+                    puuid,
+                    league_username,
+                    tag
+                )
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (leagueId) DO UPDATE SET
+                    discord_user_id = EXCLUDED.discord_user_id,
+                    puuid = EXCLUDED.puuid,
+                    league_username = EXCLUDED.league_username,
+                    tag = EXCLUDED.tag""",
+            (user.id, puuid, puuid, league_name, tagline),
+        )
         self.bot.logging.info(
             f"put {user.id, user.name, puuid, league_name, tagline} into db for {ctx.user}"
         )
@@ -61,22 +64,18 @@ class LeagueUsers(commands.Cog):
         league_name: app_commands.Transform[str, DiscordAttachedLeagueNames] = "",
     ):
         if league_name != "":
-            names = league_name.split(";")
-            async with sqa.connect(self.bot.db_path) as db:
-                for name in names:
-                    await db.execute(
-                        "DELETE FROM league_players WHERE league_username = ?", (name,)
-                    )
-                    await db.commit()
-                    await ctx.response.send_message(f"{name} removed from list")
+            names = [name for name in (part.strip() for part in league_name.split(";")) if name]
+            for name in names:
+                await db.execute("DELETE FROM league_players WHERE league_username = %s", (name,))
+            # One response per interaction — a second send_message raises
+            # InteractionResponded, which used to abort multi-name removals.
+            await ctx.response.send_message(f"{', '.join(names)} removed from list")
 
         else:
-            async with sqa.connect(self.bot.db_path) as db:
-                await db.execute("DELETE FROM league_players WHERE discord_user_id = ?", (user.id,))
-                await db.commit()
-                await ctx.response.send_message(
-                    f"successfully removed all accounts associated with {user.name}"
-                )
+            await db.execute("DELETE FROM league_players WHERE discord_user_id = %s", (user.id,))
+            await ctx.response.send_message(
+                f"successfully removed all accounts associated with {user.name}"
+            )
 
         return
 
@@ -85,8 +84,7 @@ class LeagueUsers(commands.Cog):
         description="Shows all player currently stored in the league database",
     )
     async def show_all(self, ctx: discord.Interaction):
-        async with sqa.connect(self.bot.db_path) as db:
-            to_show = await db.execute_fetchall("SELECT league_username, tag FROM league_players")
+        to_show = await db.fetchall("SELECT league_username, tag FROM league_players")
         to_print = ""
         for name in to_show:
             to_print += str(name[0]) + "#" + str(name[1]) + "\n"

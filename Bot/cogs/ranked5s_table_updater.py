@@ -1,6 +1,7 @@
 """Leaderboard for the 2026 limited-test "Ranked 5s" weekend queue.
 
-Mirrors cogs/league_table_updater.py (the solo-queue board) but:
+Shares its rendering/history core with the solo-queue board
+(cogs/league_table_updater.py) via utils/leaderboard.py, but:
   - only polls while the queue window is live (utils/queue_windows.py) —
     Fri/Sat/Sun 20:00-01:00 Europe/Paris plus a 2h post-close tail;
   - writes/reads league_history rows tagged queue = 'RANKED_5S';
@@ -27,7 +28,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 from main import MyDiscordBot
-from utils import db
+from utils import db, leaderboard
 from utils.loop_restart import restart_loop_later
 from utils.queue_windows import is_ranked5s_open, is_ranked5s_tracking, next_window_open
 from utils.rank_sorting_class import Ranker
@@ -173,58 +174,17 @@ class Ranked5sBoard(commands.Cog):
         encrypted-summoner-ID dual-key union the solo board needs for its
         pre-2024 rows does not apply here, so plain puuid equality is enough.
         """
-        last = await db.fetchone(
-            "SELECT wins, losses FROM league_history "
-            "WHERE puuid = %s AND queue = %s "
-            "ORDER BY id DESC LIMIT 1",
-            (entry["puuid"], QUEUE_KEY),
-        )
-        if last is not None and last == (entry["wins"], entry["losses"]):
-            return
-        self.bot.logging.info(
-            f"5s history insert for {entry['summonerName']}: "
-            f"{entry['tier']} {entry['rank']} {entry['leaguePoints']}lp "
-            f"{entry['wins']}W/{entry['losses']}L"
-        )
-        await db.execute(
-            "INSERT INTO league_history (puuid, lp, division, tier, wins, losses, queue) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s)",
-            (
-                entry["puuid"],
-                int(entry["leaguePoints"]),
-                entry["rank"],
-                entry["tier"],
-                int(entry["wins"]),
-                int(entry["losses"]),
-                QUEUE_KEY,
-            ),
-        )
+        if await leaderboard.record_history_snapshot(entry, QUEUE_KEY):
+            self.bot.logging.info(
+                f"5s history insert for {entry['summonerName']}: "
+                f"{entry['tier']} {entry['rank']} {entry['leaguePoints']}lp "
+                f"{entry['wins']}W/{entry['losses']}L"
+            )
 
     async def _get_last_five_games(self, puuid: str) -> str:
         """Green/red squares for the player's last 5 games on the 5s ladder."""
-        rows = await db.fetchall(
-            "SELECT wins, losses FROM league_history "
-            "WHERE puuid = %s AND queue = %s "
-            "AND wins IS NOT NULL AND losses IS NOT NULL "
-            "ORDER BY id DESC LIMIT 6",
-            (puuid, QUEUE_KEY),
-        )
-        if not rows:
-            return ""
-        sequence = []
-        for i in range(len(rows) - 1):
-            newer_w, newer_l = rows[i]
-            older_w, older_l = rows[i + 1]
-            delta_w = max(newer_w - older_w, 0)
-            delta_l = max(newer_l - older_l, 0)
-            sequence.extend(["\U0001f7e9"] * delta_w + ["\U0001f7e5"] * delta_l)
-        # Implicit (0,0) baseline — always valid on this ladder while the
-        # oldest stored row is within the first few games of the test.
-        oldest_w, oldest_l = rows[-1]
-        if oldest_w + oldest_l <= 5:
-            sequence.extend(["\U0001f7e9"] * oldest_w + ["\U0001f7e5"] * oldest_l)
-        # Cap to last 5; reverse so the newest game is on the right.
-        return "".join(reversed(sequence[:5]))
+        rows = await leaderboard.fetch_history_wl(puuid, QUEUE_KEY, 6)
+        return leaderboard.build_last_five(rows)
 
     # ---------------------------------------------------------------- channel
 
@@ -262,54 +222,15 @@ class Ranked5sBoard(commands.Cog):
             else:
                 header += " (queue closed — test window over)"
 
-        output_list = [header]
-        current_positions: dict[str, int] = {}
-        for index, posting in enumerate(sorted_results):
-            current_pos = index + 1
-            current_positions[posting["summonerName"]] = current_pos
-            prev_pos = self.previous_positions.get(posting["summonerName"])
-            # \U00002B06\U0000FE0F = up arrow, \U00002B07\U0000FE0F = down arrow
-            if prev_pos is None or prev_pos == current_pos:
-                position_arrow = ""
-            elif current_pos < prev_pos:
-                position_arrow = "\U00002b06\U0000fe0f "
-            else:
-                position_arrow = "\U00002b07\U0000fe0f "
-
-            updated_flag = " \U0001f6a9" if posting["summonerName"] in self.last_updated_by else ""
-            last_five = await self._get_last_five_games(posting["puuid"])
-            last_five_line = f"Last 5: {last_five}\n" if last_five else ""
-            # Apex tiers have no real division (league-v4 reports rank "I").
-            if posting["tier"].title() in ("Master", "Grandmaster", "Challenger"):
-                rank_line = f"Rank: {posting['tier'].title()} {posting['leaguePoints']}lp"
-            else:
-                rank_line = (
-                    f"Rank: {posting['tier'].title()} {posting['rank']} "
-                    f"{posting['leaguePoints']}lp"
-                )
-            post = (
-                position_arrow
-                + str(current_pos)
-                + ". "
-                + posting["summonerName"]
-                + f" - <@{posting['user_id']}>"
-                + updated_flag
-                + "\n"
-                + rank_line
-                + "\n"
-                + "Played: "
-                + str(posting["GamesPlayed"])
-                + " games with a "
-                + str("{:.2f}".format(posting["WinRate"]))
-                + "% winrate"
-                + "\n"
-                + last_five_line
-            )
-            output_list.append(post)
-
-        # Remember positions for next cycle's arrow comparisons.
-        self.previous_positions = current_positions
-        return "\n".join(output_list)
+        # previous_positions feeds next cycle's arrow comparisons. Unlike
+        # the solo board, apex entries here keep the " games " wording.
+        entries, self.previous_positions = await leaderboard.render_board_entries(
+            sorted_results,
+            self.previous_positions,
+            self.last_updated_by,
+            self._get_last_five_games,
+        )
+        return "\n".join([header] + entries)
 
     # ------------------------------------------------------------------- loop
 
@@ -344,19 +265,8 @@ class Ranked5sBoard(commands.Cog):
         self.bot.logging.info("Posting Ranked 5s board")
         sorted_results = sorted(ranked_dict.values(), key=lambda d: d["sorted_rank"], reverse=True)
         to_send = await self._render_board(sorted_results)
-
-        try:
-            async for message in channel.history():
-                await message.delete()
-        except discord.errors.Forbidden:
-            self.bot.logging.warning("Missing permissions to delete messages, skipping cleanup")
-
         # Ping-free board: silent send, no mentions resolved.
-        await channel.send(
-            to_send,
-            silent=True,
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
+        await leaderboard.wipe_and_post(channel, to_send, self.bot.logging)
 
     @tasks.loop(seconds=120)
     async def post_ranks_5s(self):

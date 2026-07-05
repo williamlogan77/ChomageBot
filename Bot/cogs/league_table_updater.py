@@ -6,7 +6,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from main import MyDiscordBot
 from pantheon.utils.exceptions import ServerError
-from utils import db
+from utils import db, leaderboard
 from utils.loop_restart import restart_loop_later
 from utils.rank_sorting_class import Ranker
 from utils.riot_client import get_league_entries
@@ -20,6 +20,9 @@ from utils.riot_stats import fetch_recent_kd
 # in this channel. The ping rearms after they win again.
 STREAK_PING_CHANNEL = 667751882260742167  # #general
 STREAK_THRESHOLD = 7
+
+# league_history.queue tag for this board's rows (also the column default).
+SOLO_QUEUE = "RANKED_SOLO_5x5"
 
 
 class FetchFromRiot(commands.Cog):
@@ -97,82 +100,23 @@ class FetchFromRiot(commands.Cog):
         return
 
     async def get_last_five_games(self, puuid):
-        # Older history rows are keyed by the legacy encrypted summoner ID
-        # (league_players.leagueId, ~47 chars), newer rows by the real
-        # puuid (~78 chars). Query both so legacy-tracked players still
-        # surface their game history. Solo queue only — Ranked 5s rows
-        # share the table and would corrupt the win/loss diffs.
-        rows = await db.fetchall(
-            "SELECT wins, losses FROM league_history "
-            "WHERE puuid IN ("
-            "    SELECT leagueId FROM league_players WHERE puuid = %s"
-            "    UNION"
-            "    SELECT puuid    FROM league_players WHERE puuid = %s"
-            ") "
-            "AND queue = 'RANKED_SOLO_5x5' "
-            "AND wins IS NOT NULL AND losses IS NOT NULL "
-            "ORDER BY id DESC LIMIT 6",
-            (puuid, puuid),
-        )
-        if not rows:
-            return ""
-        sequence = []
-        for i in range(len(rows) - 1):
-            newer_w, newer_l = rows[i]
-            older_w, older_l = rows[i + 1]
-            delta_w = max(newer_w - older_w, 0)
-            delta_l = max(newer_l - older_l, 0)
-            sequence.extend(["\U0001f7e9"] * delta_w + ["\U0001f7e5"] * delta_l)
-        # Implicit (0,0) baseline for brand-new accounts: only valid when the
-        # oldest fetched row's cumulative game count is small.
-        oldest_w, oldest_l = rows[-1]
-        if oldest_w + oldest_l <= 5:
-            sequence.extend(["\U0001f7e9"] * oldest_w + ["\U0001f7e5"] * oldest_l)
-        # Cap to last 5; reverse so newest game is on the right.
-        return "".join(reversed(sequence[:5]))
+        # legacy_dual_key: pre-2024 history rows are keyed by the legacy
+        # encrypted summoner ID (league_players.leagueId, ~47 chars), newer
+        # rows by the real puuid (~78 chars).
+        rows = await leaderboard.fetch_history_wl(puuid, SOLO_QUEUE, 6, legacy_dual_key=True)
+        return leaderboard.build_last_five(rows)
 
     async def get_recent_streak(self, puuid):
         """Return the count of consecutive losses ending at the most recent game.
 
-        Looks at the last ~15 history rows for the player (covering both
-        legacy-summonerId-keyed and real-puuid-keyed rows), reconstructs the
-        outcome sequence (newest first), and counts leading losses. Returns
-        0 if the most recent game was a win or there's no history.
-
-        Within a multi-game-per-cycle diff we don't know the in-cycle order;
-        we conservatively place wins BEFORE losses in the sequence, which
-        means a (1W, 2L) diff at the head reports a 0-game loss streak even
-        if losses could have come last. False-negatives over false-positives
-        for the ping.
+        Looks at the last ~15 history rows (both legacy-summonerId-keyed
+        and real-puuid-keyed). Returns 0 if the most recent game was a win
+        or there's no history — see leaderboard.count_leading_losses for
+        the in-cycle ordering caveat (false-negatives over false-positives
+        for the ping).
         """
-        rows = await db.fetchall(
-            "SELECT wins, losses FROM league_history "
-            "WHERE puuid IN ("
-            "    SELECT leagueId FROM league_players WHERE puuid = %s"
-            "    UNION"
-            "    SELECT puuid    FROM league_players WHERE puuid = %s"
-            ") "
-            "AND queue = 'RANKED_SOLO_5x5' "
-            "AND wins IS NOT NULL AND losses IS NOT NULL "
-            "ORDER BY id DESC LIMIT 15",
-            (puuid, puuid),
-        )
-        if len(rows) < 2:
-            return 0
-        sequence: list[str] = []
-        for i in range(len(rows) - 1):
-            newer_w, newer_l = rows[i]
-            older_w, older_l = rows[i + 1]
-            delta_w = max(newer_w - older_w, 0)
-            delta_l = max(newer_l - older_l, 0)
-            sequence.extend(["W"] * delta_w + ["L"] * delta_l)
-        streak = 0
-        for outcome in sequence:
-            if outcome == "L":
-                streak += 1
-            else:
-                break
-        return streak
+        rows = await leaderboard.fetch_history_wl(puuid, SOLO_QUEUE, 15, legacy_dual_key=True)
+        return leaderboard.count_leading_losses(rows)
 
     async def send_streak_ping(self, user_id: int, streak: int, puuid: str) -> None:
         channel = self.bot.get_channel(STREAK_PING_CHANNEL)
@@ -273,93 +217,19 @@ class FetchFromRiot(commands.Cog):
             #                         key=lambda d: d["WinRate"],
             #                         reverse=True)
 
-            output_list = []
-            current_positions: dict[str, int] = {}
-            for index, posting in enumerate(sorted_results):
-                current_pos = index + 1
-                current_positions[posting["summonerName"]] = current_pos
-                prev_pos = self.previous_positions.get(posting["summonerName"])
-                # \U00002B06\U0000FE0F = ⬆️, \U00002B07\U0000FE0F = ⬇️
-                if prev_pos is None or prev_pos == current_pos:
-                    position_arrow = ""
-                elif current_pos < prev_pos:
-                    position_arrow = "\U00002b06\U0000fe0f "
-                else:
-                    position_arrow = "\U00002b07\U0000fe0f "
-
-                updated_flag = (
-                    " \U0001f6a9" if posting["summonerName"] in self.last_updated_by else ""
-                )
-                last_five = await self.get_last_five_games(posting["puuid"])
-                last_five_line = f"Last 5: {last_five}\n" if last_five else ""
-                # Apex tiers have no real division (league-v4 reports rank "I").
-                if posting["tier"].title() in ("Master", "Grandmaster", "Challenger"):
-                    post = (
-                        position_arrow
-                        + str(index + 1)
-                        + ". "
-                        + posting["summonerName"]
-                        + f" - <@{posting['user_id']}>"
-                        + updated_flag
-                        + "\n"
-                        + "Rank: "
-                        + posting["tier"].title()
-                        + " "
-                        + str(posting["leaguePoints"])
-                        + "lp"
-                        + "\n"
-                        + "Played: "
-                        + str(posting["GamesPlayed"])
-                        + " with a "
-                        + str("{:.2f}".format(posting["WinRate"]))
-                        + "% winrate"
-                        + "\n"
-                        + last_five_line
-                    )
-                else:
-                    post = (
-                        position_arrow
-                        + str(index + 1)
-                        + ". "
-                        + posting["summonerName"]
-                        + f" - <@{posting['user_id']}>"
-                        + updated_flag
-                        + "\n"
-                        + "Rank: "
-                        + posting["tier"].title()
-                        + " "
-                        + posting["rank"]
-                        + " "
-                        + str(posting["leaguePoints"])
-                        + "lp"
-                        + "\n"
-                        + "Played: "
-                        + str(posting["GamesPlayed"])
-                        + " games with a "
-                        + str("{:.2f}".format(posting["WinRate"]))
-                        + "% winrate"
-                        + "\n"
-                        + last_five_line
-                    )
-                output_list.append(post)
-
-            # Remember positions for next cycle's arrow comparisons.
-            self.previous_positions = current_positions
+            # apex_omits_games_word: this board's apex entries have always
+            # read "Played: N with a ..." — see utils/leaderboard.py.
+            # previous_positions feeds next cycle's arrow comparisons.
+            output_list, self.previous_positions = await leaderboard.render_board_entries(
+                sorted_results,
+                self.previous_positions,
+                self.last_updated_by,
+                self.get_last_five_games,
+                apex_omits_games_word=True,
+            )
 
             paste = self.bot.get_channel(919981835428179988)
-            try:
-                async for message in paste.history():
-                    await message.delete()
-            except discord.errors.Forbidden:
-                self.bot.logging.warning("Missing permissions to delete messages, skipping cleanup")
-
-            if len(output_list) != 0:
-                to_send = "\n".join(output_list)
-                await paste.send(
-                    to_send,
-                    silent=True,
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
+            await leaderboard.wipe_and_post(paste, "\n".join(output_list), self.bot.logging)
 
         # Watchdog input: heartbeat cog reads this and reloads us if it
         # goes stale (typically because a Gateway disconnect left the
@@ -445,17 +315,12 @@ class FetchFromRiot(commands.Cog):
 
     # Needs updating to grab last match from the table
     async def update_table(self, user, user_stats_dict):
+        # Keeps this board's historical logging/except shape (including the
+        # harmless "Exception as list index out of range" info line on a
+        # player's first-ever insert) around the shared history helpers.
         try:
             self.bot.logging.info(f"updating table, logging {user_stats_dict}")
-            # Explicit columns (not SELECT *) so the new `queue` column can't
-            # shift the wins/losses positions; solo-queue rows only so a
-            # Ranked 5s snapshot never masks a pending solo insert.
-            last_values = await db.fetchall(
-                "SELECT wins, losses FROM league_history "
-                "WHERE puuid = %s AND queue = 'RANKED_SOLO_5x5' "
-                "ORDER BY id DESC LIMIT 1",
-                (user_stats_dict["puuid"],),
-            )
+            last_values = await leaderboard.latest_history_wl(user_stats_dict["puuid"], SOLO_QUEUE)
         except Exception as e:
             self.bot.logging.error(f"Failed to update table with error: {e}")
             return
@@ -468,20 +333,7 @@ class FetchFromRiot(commands.Cog):
         except Exception as e:
             self.bot.logging.info(f"Exception as {e}")
 
-        # `queue` is omitted — the column defaults to RANKED_SOLO_5x5.
-        # leaguePoints arrives as int from Riot; keep it int (psycopg will
-        # not cast str -> INTEGER the way sqlite silently did).
-        await db.execute(
-            "INSERT INTO league_history (puuid, lp, division, tier, wins, losses) VALUES (%s, %s, %s, %s, %s, %s)",
-            (
-                user_stats_dict["puuid"],
-                int(user_stats_dict["leaguePoints"]),
-                user_stats_dict["rank"],
-                user_stats_dict["tier"],
-                user_stats_dict["wins"],
-                user_stats_dict["losses"],
-            ),
-        )
+        await leaderboard.insert_history_snapshot(user_stats_dict, SOLO_QUEUE)
         return
 
 

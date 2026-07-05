@@ -22,13 +22,12 @@ so this loop reuses the solo board's fetches: near-zero extra API spend.
 """
 
 import datetime as dt
-import os
 
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 from main import MyDiscordBot
-from utils import db, leaderboard
+from utils import config, db, leaderboard
 from utils.loop_restart import restart_loop_later
 from utils.queue_windows import is_ranked5s_open, is_ranked5s_tracking, next_window_open
 from utils.rank_sorting_class import Ranker
@@ -104,7 +103,7 @@ class Ranked5sBoard(commands.Cog):
         be the 5s ladder, and its string is logged (once per process) so
         it can be pinned in .env.
         """
-        pinned = os.environ.get(QUEUE_TYPE_ENV)
+        pinned = config.ranked5s_queue_type()
         for entry in entries:
             queue_type = entry.get("queueType", "")
             if pinned:
@@ -334,7 +333,7 @@ class Ranked5sBoard(commands.Cog):
     )
     async def ranked5s_status(self, ctx: discord.Interaction):
         await ctx.response.defer(ephemeral=True)
-        pinned = os.environ.get(QUEUE_TYPE_ENV)
+        pinned = config.ranked5s_queue_type()
         if pinned:
             queue_type_line = f"queueType: pinned to `{pinned}`"
         elif self._seen_queue_types:

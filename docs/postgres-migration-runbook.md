@@ -25,8 +25,8 @@ Already provisioned:
 - **CT 105 `chomage-db`** — Debian 12 (`debian-12-standard_12.12-1`),
   1 GB RAM / 1 core / 8 GB on local-lvm, unprivileged, onboot.
 - Static **192.168.0.5/24** (below pihole's DHCP pool, which starts at
-  .10), gw 192.168.0.1, DNS 192.168.0.2. Avoid 192.168.0.4 — something
-  else on the LAN already sits there.
+  .10), gw 192.168.0.1, DNS 192.168.0.2. Avoid 192.168.0.4 — that's
+  CT 102 (`wireguard`).
 - PostgreSQL **15** (Debian package), `listen_addresses = '*'`, pg_hba
   allows `chomage` from 192.168.0.0/24 (scram-sha-256).
 - Role `chomage` + database `chomage` created; the password lives only in

@@ -144,6 +144,17 @@ def build_last_five(rows: list[tuple]) -> str:
     return "".join(reversed(sequence[:5]))
 
 
+def build_last_five_from_wins(wins_newest_first: list) -> str:
+    """Green/red squares straight from per-match win flags, newest right.
+
+    Used by the match-derived Ranked 5s fallback ladder, where exact
+    per-game outcomes are known from match_stats.win — no cumulative-diff
+    reconstruction (and none of its ordering caveats) needed.
+    """
+    squares = [WIN_SQUARE if win else LOSS_SQUARE for win in wins_newest_first[:5]]
+    return "".join(reversed(squares))
+
+
 def count_leading_losses(rows: list[tuple]) -> int:
     """Consecutive losses ending at the most recent game; 0 on a fresh win.
 

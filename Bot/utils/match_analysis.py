@@ -551,6 +551,10 @@ def load_matches(db_path: str | None = DEFAULT_DB) -> pd.DataFrame:
             FROM match_stats ms
             JOIN league_players lp USING (puuid)
             LEFT JOIN users u ON u.user_id = lp.discord_user_id
+            -- Solo/duo only. match_stats also carries Ranked 5s (queue 710)
+            -- rows since 2026-07-05; every chart in this module is a
+            -- solo-queue analysis, so premade-5 games must not leak in.
+            WHERE ms.queue_id = 420
             ORDER BY ms.game_start ASC
             """,
             con,

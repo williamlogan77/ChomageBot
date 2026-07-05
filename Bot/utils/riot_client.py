@@ -18,18 +18,21 @@ Public API:
   - :func:`get_league_entries` — solo/duo/flex ranked entries for a puuid.
   - :func:`get_match_ids` — recent match IDs for a puuid (Match-V5).
   - :func:`get_match` — full match details by match ID (Match-V5).
+  - :func:`get_account_by_riot_id` / :func:`get_account_by_puuid` —
+    account-v1 lookups (formerly via pantheon, which bypassed this budget).
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import random
 import time
 from collections import deque
+from urllib.parse import quote
 
 import aiohttp
+from utils import config
 
 # (max_requests, window_seconds)
 LIMITS: list[tuple[int, float]] = [
@@ -94,7 +97,7 @@ async def _get_json(url: str, params: dict | None = None) -> tuple[int, list | d
 
     On 429 honours ``Retry-After`` with small jitter and retries internally.
     """
-    riot_key = os.environ.get("riot_key")
+    riot_key = config.riot_api_key()
     if not riot_key:
         log.error("riot_key env var not set")
         return (0, None)
@@ -178,6 +181,31 @@ async def get_match_ids(
 async def get_match(match_id: str) -> dict | None:
     """Full match details by match ID. Match-V5."""
     url = f"{REGION_HOST}/lol/match/v5/matches/{match_id}"
+    status, body = await _get_json(url)
+    if status != 200 or not isinstance(body, dict):
+        return None
+    return body
+
+
+async def get_account_by_riot_id(game_name: str, tag_line: str) -> dict | None:
+    """Account-v1 lookup by Riot ID (gameName#tagLine). Regional host.
+
+    Returns the account dict ({"puuid", "gameName", "tagLine"}) or None on
+    failure / unknown account. Names can contain spaces — path-quoted.
+    """
+    url = (
+        f"{REGION_HOST}/riot/account/v1/accounts/by-riot-id/"
+        f"{quote(game_name, safe='')}/{quote(tag_line, safe='')}"
+    )
+    status, body = await _get_json(url)
+    if status != 200 or not isinstance(body, dict):
+        return None
+    return body
+
+
+async def get_account_by_puuid(puuid: str) -> dict | None:
+    """Account-v1 lookup by puuid (current gameName/tagLine). Regional host."""
+    url = f"{REGION_HOST}/riot/account/v1/accounts/by-puuid/{puuid}"
     status, body = await _get_json(url)
     if status != 200 or not isinstance(body, dict):
         return None

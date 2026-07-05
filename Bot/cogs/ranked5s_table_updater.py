@@ -31,7 +31,7 @@ from utils import config, db, leaderboard
 from utils.loop_restart import restart_loop_later
 from utils.queue_windows import is_ranked5s_open, is_ranked5s_tracking, next_window_open
 from utils.rank_sorting_class import Ranker
-from utils.riot_client import get_league_entries
+from utils.riot_client import RANKED_5S_QUEUE_ID, get_league_entries
 
 # Canonical internal tag for Ranked 5s rows in league_history.queue.
 # Decoupled from whatever league-v4 queueType string Riot ends up using.
@@ -70,6 +70,9 @@ class Ranked5sBoard(commands.Cog):
         # cog instance, not once per loop tick.
         self._seen_queue_types: set[str] = set()
         self._warned_no_channel = False
+        # Last match-derived fallback standings (used while Riot's league
+        # API exposes no 5s ladder) — change detection for reposts.
+        self.previous_fallback: list[dict] = []
 
     def cog_unload(self) -> None:
         # discord.py does NOT cancel @tasks.loop tasks on cog unload —
@@ -249,12 +252,18 @@ class Ranked5sBoard(commands.Cog):
         if updated_users:
             self.last_updated_by = updated_users
 
+        if not ranked_dict:
+            # Riot's league API doesn't expose the Ranked 5s ladder (no
+            # queue enum, no endpoint — verified 2026-07-05), so until it
+            # does, nobody has an entry here and the board falls back to
+            # match-derived standings. The moment Riot ships the ladder,
+            # ranked_dict fills and this path retires itself.
+            await self._post_fallback_board(force)
+            return
+
         changed = (ranked_dict != self.previous_ranks) or (not self.previous_ranks)
         self.previous_ranks = ranked_dict
         if not (changed or force):
-            return
-        if not ranked_dict:
-            # Nobody placed on the 5s ladder yet — leave the channel alone.
             return
 
         channel = await self._get_board_channel()
@@ -266,6 +275,85 @@ class Ranked5sBoard(commands.Cog):
         to_send = await self._render_board(sorted_results)
         # Ping-free board: silent send, no mentions resolved.
         await leaderboard.wipe_and_post(channel, to_send, self.bot.logging)
+
+    # ------------------------------------------------- match-derived fallback
+
+    async def _fetch_match_standings(self) -> list[dict]:
+        """Standings from our own queue-710 match results (match_stats).
+
+        Wins/losses/winrate per tracked player, best record first. The
+        ingestion stream records every 5s game (cogs/backfill.py fetches
+        queue 710 alongside solo), so this is complete even though no
+        rank/LP exists to show.
+        """
+        rows = await db.fetchall(
+            """SELECT lp.puuid,
+                    lp.league_username,
+                    lp.discord_user_id,
+                    COUNT(*) FILTER (WHERE ms.win = 1) AS wins,
+                    COUNT(*) AS games
+                FROM match_stats ms
+                    JOIN league_players lp ON lp.puuid = ms.puuid
+                WHERE ms.queue_id = %s
+                GROUP BY lp.puuid, lp.league_username, lp.discord_user_id""",
+            (RANKED_5S_QUEUE_ID,),
+        )
+        standings = [
+            {
+                "puuid": puuid,
+                "summonerName": name,
+                "user_id": user_id,
+                "wins": wins,
+                "losses": games - wins,
+                "GamesPlayed": games,
+                "WinRate": (wins / games) * 100 if games else 0.0,
+            }
+            for puuid, name, user_id, wins, games in rows
+        ]
+        standings.sort(key=lambda d: (d["wins"], d["WinRate"], d["GamesPlayed"]), reverse=True)
+        return standings
+
+    async def _post_fallback_board(self, force: bool) -> None:
+        standings = await self._fetch_match_standings()
+        changed = standings != self.previous_fallback
+        self.previous_fallback = standings
+        if not standings or not (changed or force):
+            return
+
+        channel = await self._get_board_channel()
+        if channel is None:
+            return
+
+        header = "**Ranked 5s** — weekend ladder"
+        if not is_ranked5s_open():
+            next_open = next_window_open()
+            if next_open is not None:
+                header += f" (queue closed — opens {next_open.strftime('%A')})"
+            else:
+                header += " (queue closed — test window over)"
+        note = (
+            "-# Riot's API doesn't expose 5s ranks yet — standings from "
+            "match results, sorted by wins."
+        )
+
+        lines = [header, note]
+        for index, entry in enumerate(standings):
+            wins_flags = await db.fetchall(
+                "SELECT win FROM match_stats "
+                "WHERE puuid = %s AND queue_id = %s "
+                "ORDER BY game_start DESC LIMIT 5",
+                (entry["puuid"], RANKED_5S_QUEUE_ID),
+            )
+            last_five = leaderboard.build_last_five_from_wins([w[0] for w in wins_flags])
+            lines.append(
+                f"{index + 1}. {entry['summonerName']} - <@{entry['user_id']}>\n"
+                f"Record: {entry['wins']}W / {entry['losses']}L "
+                f"({entry['WinRate']:.2f}% winrate)\n"
+                f"Last 5: {last_five}\n"
+            )
+
+        self.bot.logging.info("Posting Ranked 5s board (match-derived fallback)")
+        await leaderboard.wipe_and_post(channel, "\n".join(lines), self.bot.logging)
 
     @tasks.loop(seconds=120)
     async def post_ranks_5s(self):
@@ -345,6 +433,12 @@ class Ranked5sBoard(commands.Cog):
             (QUEUE_KEY,),
         )
         ladder_count = row[0] if row else 0
+        row = await db.fetchone(
+            "SELECT COUNT(DISTINCT ms.puuid) FROM match_stats ms "
+            "JOIN league_players lp ON lp.puuid = ms.puuid WHERE ms.queue_id = %s",
+            (RANKED_5S_QUEUE_ID,),
+        )
+        match_count = row[0] if row else 0
         next_open = next_window_open()
         next_open_line = (
             next_open.strftime("%A %Y-%m-%d %H:%M %Z") if next_open else "never (test over)"
@@ -354,7 +448,9 @@ class Ranked5sBoard(commands.Cog):
             f"Tracking: {'yes' if is_ranked5s_tracking() else 'no'}\n"
             f"Next window opens: {next_open_line}\n"
             f"{queue_type_line}\n"
-            f"Players on ladder: {ladder_count}",
+            f"Players with rank entries: {ladder_count} "
+            f"(Riot API exposes no 5s ladder yet — board falls back to match results)\n"
+            f"Players with recorded 5s matches: {match_count}",
             ephemeral=True,
         )
 

@@ -38,7 +38,12 @@ from discord.ext import commands, tasks
 from psycopg.types.json import Jsonb
 from utils import db
 from utils.loop_restart import restart_loop_later
-from utils.riot_client import get_match, get_match_ids
+from utils.riot_client import (
+    RANKED_5S_QUEUE_ID,
+    RANKED_SOLO_QUEUE_ID,
+    get_match,
+    get_match_ids,
+)
 
 log = logging.getLogger(__name__)
 
@@ -297,55 +302,61 @@ class Backfill(commands.Cog):
         puuid when not given (the stream loop always passes it).
         """
         inserted_total = 0
-        start = 0
-        page_num = 0
         label = name or f"{puuid[:8]}..."
 
-        while True:
-            page_num += 1
-            page_size = PAGE_SIZE if all_history else count
-            ids = await get_match_ids(puuid, count=page_size, start=start)
-            if not ids:
-                break
+        # Track BOTH queues: ranked solo/duo and the weekend Ranked 5s
+        # (710). Riot's league API doesn't expose the 5s ladder yet, so
+        # these match rows are also what the 5s board's fallback standings
+        # are built from. 5s history is tiny (limited-test queue): steady
+        # state costs one extra id-page request per player per pass.
+        for queue in (RANKED_SOLO_QUEUE_ID, RANKED_5S_QUEUE_ID):
+            start = 0
+            page_num = 0
+            while True:
+                page_num += 1
+                page_size = PAGE_SIZE if all_history else count
+                ids = await get_match_ids(puuid, count=page_size, queue=queue, start=start)
+                if not ids:
+                    break
 
-            # Skip a match only if BOTH extracts already exist:
-            #   - a match_stats row FOR THIS puuid. Filtering by match_id
-            #     alone would skip games where this puuid hasn't been
-            #     backfilled yet but another tracked friend already has —
-            #     exactly the "duo's second row" case we need to pick up.
-            #   - a match_raw row (raw payloads are per match, not per
-            #     puuid). Matches ingested before raw capture existed fail
-            #     this leg and get re-fetched once, healing the archive.
-            #     Steady state is unaffected: anything fetched after this
-            #     shipped has both rows, so the 5-min stream stays cheap.
-            placeholders = ",".join(["%s"] * len(ids))
-            existing_rows = await db.fetchall(
-                f"SELECT ms.match_id FROM match_stats ms "
-                f"JOIN match_raw mr ON mr.match_id = ms.match_id "
-                f"WHERE ms.puuid = %s AND ms.match_id IN ({placeholders})",
-                (puuid, *ids),
-            )
-            existing = {row[0] for row in existing_rows}
+                # Skip a match only if BOTH extracts already exist:
+                #   - a match_stats row FOR THIS puuid. Filtering by match_id
+                #     alone would skip games where this puuid hasn't been
+                #     backfilled yet but another tracked friend already has —
+                #     exactly the "duo's second row" case we need to pick up.
+                #   - a match_raw row (raw payloads are per match, not per
+                #     puuid). Matches ingested before raw capture existed fail
+                #     this leg and get re-fetched once, healing the archive.
+                #     Steady state is unaffected: anything fetched after this
+                #     shipped has both rows, so the 5-min stream stays cheap.
+                placeholders = ",".join(["%s"] * len(ids))
+                existing_rows = await db.fetchall(
+                    f"SELECT ms.match_id FROM match_stats ms "
+                    f"JOIN match_raw mr ON mr.match_id = ms.match_id "
+                    f"WHERE ms.puuid = %s AND ms.match_id IN ({placeholders})",
+                    (puuid, *ids),
+                )
+                existing = {row[0] for row in existing_rows}
 
-            to_fetch = [mid for mid in ids if mid not in existing]
-            if to_fetch:
-                page_new = await self._insert_matches(puuid, to_fetch)
-                inserted_total += page_new
-                # Page-level log only when the page actually delivered new rows.
-                # Steady-state stream calls (all matches already in DB) stay quiet.
-                if page_new > 0:
-                    self.bot.logging.info(
-                        f"Backfill: {label} page {page_num} "
-                        f"(start={start}, +{page_new} new, total {inserted_total})"
-                    )
+                to_fetch = [mid for mid in ids if mid not in existing]
+                if to_fetch:
+                    page_new = await self._insert_matches(puuid, to_fetch)
+                    inserted_total += page_new
+                    # Page-level log only when the page actually delivered new
+                    # rows. Steady-state stream calls stay quiet.
+                    if page_new > 0:
+                        self.bot.logging.info(
+                            f"Backfill: {label} queue {queue} page {page_num} "
+                            f"(start={start}, +{page_new} new, total {inserted_total})"
+                        )
 
-            # Stop when Riot returned less than we asked for (end of history)
-            # or when we've satisfied a bounded request.
-            if len(ids) < page_size:
-                break
-            if not all_history:
-                break
-            start += len(ids)
+                # Stop when Riot returned less than we asked for (end of
+                # history) or when we've satisfied a bounded request.
+                if len(ids) < page_size:
+                    break
+                if not all_history:
+                    break
+                start += len(ids)
 
         return inserted_total
 

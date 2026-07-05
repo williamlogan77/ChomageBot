@@ -215,7 +215,8 @@ class Ranked5sBoard(commands.Cog):
 
     # ----------------------------------------------------------------- render
 
-    async def _render_board(self, sorted_results: list[dict]) -> str:
+    async def _render_board(self, sorted_results: list[dict]) -> list[str]:
+        """Board blocks (header + one block per entry) for wipe_and_post."""
         header = "**Ranked 5s** — weekend ladder"
         if not is_ranked5s_open():
             next_open = next_window_open()
@@ -232,7 +233,7 @@ class Ranked5sBoard(commands.Cog):
             self.last_updated_by,
             self._get_last_five_games,
         )
-        return "\n".join([header] + entries)
+        return [header] + entries
 
     # ------------------------------------------------------------------- loop
 
@@ -253,17 +254,25 @@ class Ranked5sBoard(commands.Cog):
             self.last_updated_by = updated_users
 
         if not ranked_dict:
-            # Riot's league API doesn't expose the Ranked 5s ladder (no
-            # queue enum, no endpoint — verified 2026-07-05), so until it
-            # does, nobody has an entry here and the board falls back to
-            # match-derived standings. The moment Riot ships the ladder,
-            # ranked_dict fills and this path retires itself.
+            # League entries only exist for players who've completed
+            # placements (RANKED_PREMADE_5x5, shipped by Riot 2026-07-05).
+            # With nobody placed yet, the board is match-derived standings.
             await self._post_fallback_board(force)
             return
 
         changed = (ranked_dict != self.previous_ranks) or (not self.previous_ranks)
         self.previous_ranks = ranked_dict
-        if not (changed or force):
+
+        # Hybrid: tracked players with 5s games but no entry yet (still in
+        # placements) appear in a compact section under the ranked board —
+        # otherwise they vanish the moment the first friend gets a rank.
+        standings = await self._fetch_match_standings()
+        ranked_puuids = {entry["puuid"] for entry in ranked_dict.values()}
+        unplaced = [s for s in standings if s["puuid"] not in ranked_puuids]
+        unplaced_changed = unplaced != self.previous_fallback
+        self.previous_fallback = unplaced
+
+        if not (changed or unplaced_changed or force):
             return
 
         channel = await self._get_board_channel()
@@ -272,9 +281,16 @@ class Ranked5sBoard(commands.Cog):
 
         self.bot.logging.info("Posting Ranked 5s board")
         sorted_results = sorted(ranked_dict.values(), key=lambda d: d["sorted_rank"], reverse=True)
-        to_send = await self._render_board(sorted_results)
-        # Ping-free board: silent send, no mentions resolved.
-        await leaderboard.wipe_and_post(channel, to_send, self.bot.logging)
+        blocks = await self._render_board(sorted_results)
+        if unplaced:
+            blocks.append("-# In placements (no rank yet) — match record:")
+            for entry in unplaced:
+                blocks.append(
+                    f"{entry['summonerName']} - <@{entry['user_id']}>: "
+                    f"{entry['wins']}W / {entry['losses']}L"
+                )
+        # Ping-free board: silent sends, no mentions resolved.
+        await leaderboard.wipe_and_post(channel, blocks, self.bot.logging)
 
     # ------------------------------------------------- match-derived fallback
 
@@ -353,7 +369,7 @@ class Ranked5sBoard(commands.Cog):
             )
 
         self.bot.logging.info("Posting Ranked 5s board (match-derived fallback)")
-        await leaderboard.wipe_and_post(channel, "\n".join(lines), self.bot.logging)
+        await leaderboard.wipe_and_post(channel, lines, self.bot.logging)
 
     @tasks.loop(seconds=120)
     async def post_ranks_5s(self):

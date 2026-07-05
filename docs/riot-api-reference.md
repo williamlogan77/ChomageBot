@@ -65,19 +65,19 @@ Documented in Riot's API reference:
 - `RANKED_FLEX_TT` — legacy Twisted Treeline
 - `RANKED_TFT`, `RANKED_TFT_TURBO`, `RANKED_TFT_DOUBLE_UP` — TFT
 
-**Ranked 5s: the ladder is NOT exposed by the public league API at all —
-verified empirically 2026-07-05.** Evidence: a player with completed 710
-games gets no extra entry from `entries/by-puuid`, and league-exp-v4's own
-400 error enumerates every valid queue value — none is a 5s queue. The
-OpenAPI reference agrees (no new enum, no new endpoint).
+**Ranked 5s: `RANKED_PREMADE_5x5` — confirmed from live entries
+2026-07-05.** An entry appears in `entries/by-puuid` only once the player
+completes placements; before that the player has 710 matches but no entry.
+(Beware: league-exp-v4's queue enum still rejects the string, and the
+OpenAPI docs don't list it — live entries are the source of truth. The
+cog's auto-discovery heuristic caught it in prod logs.)
 
-Until Riot ships it, `cogs/ranked5s_table_updater.py` renders a
-**match-derived fallback board** (wins/losses/winrate/last-5 from
-`match_stats` queue 710, which `cogs/backfill.py` ingests alongside solo).
-The league-entry path stays in place ahead of it: the cog auto-discovers any
-new `RANKED_*` queueType at runtime, logs it, and can be pinned via the
-`ranked5s_queue_type` env var — the fallback retires itself the first cycle
-real entries appear.
+`cogs/ranked5s_table_updater.py` renders a **hybrid board**: real ranks for
+placed players, plus an "in placements" section from match results
+(`match_stats` queue 710, ingested alongside solo by `cogs/backfill.py`).
+With no entries at all it falls back to pure match-derived standings. The
+pinned string lives in `utils/config.py` (env `ranked5s_queue_type`
+overrides; empty value re-enables auto-discovery).
 
 Internally (in `league_history.queue`) Ranked 5s rows are always tagged with
 the repo's own constant **`RANKED_5S`**, decoupled from whatever string Riot

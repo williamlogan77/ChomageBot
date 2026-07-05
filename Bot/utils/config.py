@@ -57,5 +57,11 @@ def riot_api_key() -> str | None:
 
 
 def ranked5s_queue_type() -> str | None:
-    """Pinned league-v4 queueType for Ranked 5s (unset = auto-discover)."""
-    return os.environ.get("ranked5s_queue_type")
+    """league-v4 queueType for Ranked 5s entries.
+
+    Confirmed from live entries on 2026-07-05: entries appear once a
+    player finishes placements, tagged RANKED_PREMADE_5x5. The env var
+    overrides in case Riot renames it; setting it to an empty value
+    re-enables the cog's auto-discovery heuristic.
+    """
+    return os.environ.get("ranked5s_queue_type", "RANKED_PREMADE_5x5")

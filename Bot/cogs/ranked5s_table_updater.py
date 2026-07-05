@@ -365,7 +365,7 @@ class Ranked5sBoard(commands.Cog):
                 f"{index + 1}. {entry['summonerName']} - <@{entry['user_id']}>\n"
                 f"Record: {entry['wins']}W / {entry['losses']}L "
                 f"({entry['WinRate']:.2f}% winrate)\n"
-                f"Last 5: {last_five}\n"
+                f"{last_five}\n"
             )
 
         self.bot.logging.info("Posting Ranked 5s board (match-derived fallback)")

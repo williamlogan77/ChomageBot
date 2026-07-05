@@ -218,7 +218,9 @@ def render_board_entry(
     else:
         position_arrow = "\U00002b07\U0000fe0f "
     updated_flag = " \U0001f6a9" if updated else ""  # triangular flag
-    last_five_line = f"Last 5: {last_five}\n" if last_five else ""
+    # Bare squares, no "Last 5:" label — the boards carry a key up top and
+    # the squares are self-explanatory (William's call).
+    last_five_line = f"{last_five}\n" if last_five else ""
 
     tier = posting["tier"].title()
     is_apex = tier in APEX_TIERS

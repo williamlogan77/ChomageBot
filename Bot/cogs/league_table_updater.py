@@ -250,9 +250,12 @@ class FetchFromRiot(commands.Cog):
                 apex_omits_games_word=True,
             )
             if output_list:
-                # Discord small-text legend for the duo-aware Last 5.
-                output_list.append(
-                    "-# Last 5: \U0001f7e9/\U0001f7e5 solo · ❎/❌ duo with a tracked player"
+                # Key at the top of the board (William's call) — explains
+                # the per-entry squares, which carry no label of their own.
+                output_list.insert(
+                    0,
+                    "-# Key: \U0001f7e9 solo win · ❎ duo win · "
+                    "\U0001f7e5 solo loss · ❌ duo loss",
                 )
 
             paste = self.bot.get_channel(919981835428179988)

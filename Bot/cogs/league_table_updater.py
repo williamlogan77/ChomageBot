@@ -256,7 +256,9 @@ class FetchFromRiot(commands.Cog):
                 )
 
             paste = self.bot.get_channel(919981835428179988)
-            await leaderboard.wipe_and_post(paste, "\n".join(output_list), self.bot.logging)
+            # Blocks, not a joined string — the board can exceed Discord's
+            # 2000-char message cap and gets split on entry boundaries.
+            await leaderboard.wipe_and_post(paste, output_list, self.bot.logging)
 
         # Watchdog input: heartbeat cog reads this and reloads us if it
         # goes stale (typically because a Gateway disconnect left the

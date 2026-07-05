@@ -274,21 +274,53 @@ async def render_board_entries(
 # ------------------------------------------------------------------ posting
 
 
-async def wipe_and_post(channel, content: str, log) -> None:
+MESSAGE_CHAR_LIMIT = 2000  # Discord hard limit per message
+
+
+def chunk_blocks(blocks: list[str], limit: int = MESSAGE_CHAR_LIMIT) -> list[str]:
+    """Pack blocks into as few messages as possible without splitting one.
+
+    Blocks are joined with newlines. A single block longer than ``limit``
+    (shouldn't happen for board entries) is hard-split as a last resort
+    rather than dropped.
+    """
+    messages: list[str] = []
+    current = ""
+    for block in blocks:
+        candidate = f"{current}\n{block}" if current else block
+        if len(candidate) <= limit:
+            current = candidate
+            continue
+        if current:
+            messages.append(current)
+        while len(block) > limit:
+            messages.append(block[:limit])
+            block = block[limit:]
+        current = block
+    if current:
+        messages.append(current)
+    return messages
+
+
+async def wipe_and_post(channel, content, log) -> None:
     """Delete the channel's message history, then silently post ``content``.
 
-    Boards are ping-free: silent send + no mentions resolved. Empty
-    ``content`` still wipes but posts nothing (solo board with an empty
-    entry list).
+    ``content`` is a list of blocks (or a single string): a board that
+    outgrows Discord's 2000-char message limit is split across several
+    messages on block boundaries — a full board once silently failed with
+    a 400 after the wipe, leaving the channel empty. Boards are ping-free:
+    silent sends, no mentions resolved. Empty content still wipes but
+    posts nothing.
     """
+    blocks = [content] if isinstance(content, str) else [b for b in content if b]
     try:
         async for message in channel.history():
             await message.delete()
     except discord.errors.Forbidden:
         log.warning("Missing permissions to delete messages, skipping cleanup")
-    if content:
+    for message_text in chunk_blocks(blocks):
         await channel.send(
-            content,
+            message_text,
             silent=True,
             allowed_mentions=discord.AllowedMentions.none(),
         )

@@ -108,6 +108,72 @@ after the fact.
   board keeps polling for a 2 h tail after close so games in flight at 01:00
   and late LP settlement are still captured.
 
+## Raw payload capture (match_raw)
+
+Every Match-V5 payload the bot fetches is archived **verbatim** into the
+`match_raw` table (`Bot/db/setup.postgres.sql`):
+
+| column | type | meaning |
+|---|---|---|
+| `match_id` | TEXT PK | e.g. `EUW1_7371190121` — one row per **match**, not per participant |
+| `fetched_at` | TIMESTAMPTZ | when the bot pulled it |
+| `payload` | JSONB | the complete `GET /lol/match/v5/matches/{id}` response |
+
+**Why**: `match_stats` extracts only a dozen columns. When a new stat is
+wanted (the `position` column required a full, rate-limited re-fetch of ~8k
+matches), it should be a SQL query or one-off `UPDATE` against `payload`,
+never another Riot backfill. Both ingest paths in `cogs/backfill.py` (5-min
+stream and `/backfill_all`) write it with `ON CONFLICT (match_id) DO NOTHING`.
+
+### Extracting a new field with JSONB
+
+The full response shape is `metadata` (the 10 puuids) + `info` (game fields,
+`participants[10]`, `teams[2]`). To pull a participant-level field for every
+tracked-player row — here `goldEarned` — join on puuid inside the
+participants array:
+
+```sql
+SELECT ms.match_id,
+       ms.puuid,
+       (p ->> 'goldEarned')::int                 AS gold_earned,
+       (p ->> 'totalDamageDealtToChampions')::int AS champ_damage
+FROM match_stats ms
+JOIN match_raw mr ON mr.match_id = ms.match_id
+CROSS JOIN LATERAL jsonb_array_elements(mr.payload -> 'info' -> 'participants') AS p
+WHERE p ->> 'puuid' = ms.puuid;
+```
+
+Match-level fields are direct paths: `payload -> 'info' ->> 'gameVersion'`,
+`payload -> 'info' -> 'teams' -> 0 -> 'objectives' -> 'baron' ->> 'kills'`.
+
+### Auto-heal for pre-existing matches
+
+Matches ingested before `match_raw` existed have stats rows but no payload.
+The backfill pre-filter skips a match only when it is in **both**
+`match_stats` (for that puuid) **and** `match_raw`, so:
+
+- the 5-min stream stays cheap — anything fetched after this shipped has
+  both rows (it re-fetches at most the last 5 per player once, right after
+  deploy);
+- a manual `/backfill_all` with `all_history=True` re-fetches exactly the
+  old matches missing payloads, through the shared limiter, and the
+  `match_stats` conflict no-ops make the re-writes harmless. At the
+  developer-tier budget (100 req/120 s) a ~9k-match heal takes roughly
+  3 hours of residual budget, sharing with the live boards.
+
+### Storage
+
+A ranked Match-V5 payload is ~60–90 KB as JSON text (10 participants x
+~130 fields + ~110 `challenges` fields each). Stored as JSONB it lands in
+TOAST with pglz compression: a full-shape synthetic payload measured
+**44 KB `pg_column_size`** (77 KB as text); real payloads compress somewhat
+better (many zero/repeated values), so figure **~25–45 KB per match** on
+disk. For the ~9k matches in the live DB that is **~0.25–0.4 GB**, growing
+on the order of tens of MB per month at current tracked-player volume —
+comfortable on the DB container's 8 GB rootfs, but worth a
+`pg_total_relation_size('match_raw')` glance if the tracked-player list
+grows a lot.
+
 ## Sources
 
 - Riot dev blog — [/dev: The Return of Ranked 5s](https://www.leagueoflegends.com/en-us/news/dev/dev-the-return-of-ranked-5s/)

@@ -43,6 +43,11 @@ create table if not exists league_players (
 -- queue: league-v4 queueType this snapshot belongs to. Pre-existing rows
 -- migrate as RANKED_SOLO_5x5; the Ranked 5s board writes RANKED_5S
 -- (canonical internal constant — see cogs/ranked5s_table_updater.py).
+-- raw: the complete league-v4 entry this snapshot was extracted from,
+-- archived verbatim (same rationale as match_raw below: hotStreak,
+-- miniSeries, the real queueType string etc. stay queryable without a
+-- re-fetch). NULL on rows from before the column existed — league-v4 has
+-- no history endpoint, so those snapshots are unrecoverable by design.
 create table if not exists league_history (
     id BIGINT generated always as identity primary key,
     puuid TEXT not null,
@@ -52,7 +57,8 @@ create table if not exists league_history (
     tier TEXT,
     wins INTEGER,
     losses INTEGER,
-    queue TEXT not null default 'RANKED_SOLO_5x5'
+    queue TEXT not null default 'RANKED_SOLO_5x5',
+    raw JSONB
 );
 create index if not exists idx_league_history_puuid_id on league_history (puuid, id desc);
 create index if not exists idx_league_history_queue on league_history (queue);
@@ -80,6 +86,20 @@ create table if not exists match_stats (
     primary key (match_id, puuid)
 );
 create index if not exists idx_match_stats_puuid_time on match_stats (puuid, game_start desc);
+
+-- Complete Match-V5 JSON payload, archived verbatim at ingest. One row per
+-- MATCH (not per participant — tracked players often share a game; the
+-- per-player extract lives in match_stats). Exists so adding a new stat
+-- later is a JSONB query or one-off UPDATE against payload instead of a
+-- full Riot re-fetch backfill (the position column needed one; never again).
+-- Old matches ingested before this table existed are healed lazily: the
+-- backfill pre-filter re-fetches any match missing from here (see
+-- cogs/backfill.py), so a manual /backfill_all all_history=True fills it.
+create table if not exists match_raw (
+    match_id TEXT not null primary key,
+    fetched_at TIMESTAMPTZ not null default now(),
+    payload JSONB not null
+);
 
 -- Audit log of slash commands + button clicks + select-menu picks.
 create table if not exists command_usage (

@@ -19,6 +19,13 @@ Both paths share the same per-player routine and are fully idempotent:
 (match_id, puuid) is the table's PRIMARY KEY, we pre-filter against
 existing IDs before any match-detail fetch, and the write uses
 INSERT ... ON CONFLICT DO NOTHING as a belt-and-braces guard.
+
+Every fetched payload is also archived verbatim into ``match_raw``
+(one row per match, JSONB) so future stat columns can be filled from
+SQL instead of a Riot re-fetch backfill. The pre-filter skips a match
+only when it is in match_stats (for this puuid) AND in match_raw:
+matches ingested before match_raw existed are therefore re-fetched —
+through the shared limiter — exactly once, healing the raw archive.
 """
 
 import asyncio
@@ -28,6 +35,7 @@ import logging
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
+from psycopg.types.json import Jsonb
 from utils import db
 from utils.loop_restart import restart_loop_later
 from utils.riot_client import get_match, get_match_ids
@@ -87,7 +95,7 @@ class Backfill(commands.Cog):
     @app_commands.guild_only()
     @app_commands.describe(
         count="Max matches per player (max 100). Ignored if all_history=True.",
-        all_history="Paginate through Riot's entire exposed history (~2y). Slow.",
+        all_history="Paginate Riot's full history (~2y); also heals matches missing raw JSON. Slow.",
     )
     async def backfill_all(
         self,
@@ -95,6 +103,16 @@ class Backfill(commands.Cog):
         count: int = DEFAULT_BACKFILL_COUNT,
         all_history: bool = False,
     ):
+        """One-shot historical pull for every tracked player.
+
+        Besides inserting missing match_stats rows, this also auto-heals
+        the match_raw archive: matches stored before raw-payload capture
+        existed fail the pre-filter and get re-fetched (match_stats
+        re-writes are ON CONFLICT DO NOTHING no-ops, so this is harmless,
+        but progress counts include those healed matches). Run with
+        all_history=True once after deploying raw capture to backfill
+        payloads for the whole history window.
+        """
         await ctx.response.defer(ephemeral=True)
 
         if self._task is not None and not self._task.done():
@@ -290,14 +308,21 @@ class Backfill(commands.Cog):
             if not ids:
                 break
 
-            # Filter out match IDs we already have stored FOR THIS puuid.
-            # Filtering by match_id alone would skip games where this puuid
-            # hasn't been backfilled yet but another tracked friend already
-            # has — exactly the "duo's second row" case we need to pick up.
+            # Skip a match only if BOTH extracts already exist:
+            #   - a match_stats row FOR THIS puuid. Filtering by match_id
+            #     alone would skip games where this puuid hasn't been
+            #     backfilled yet but another tracked friend already has —
+            #     exactly the "duo's second row" case we need to pick up.
+            #   - a match_raw row (raw payloads are per match, not per
+            #     puuid). Matches ingested before raw capture existed fail
+            #     this leg and get re-fetched once, healing the archive.
+            #     Steady state is unaffected: anything fetched after this
+            #     shipped has both rows, so the 5-min stream stays cheap.
             placeholders = ",".join(["%s"] * len(ids))
             existing_rows = await db.fetchall(
-                f"SELECT match_id FROM match_stats "
-                f"WHERE puuid = %s AND match_id IN ({placeholders})",
+                f"SELECT ms.match_id FROM match_stats ms "
+                f"JOIN match_raw mr ON mr.match_id = ms.match_id "
+                f"WHERE ms.puuid = %s AND ms.match_id IN ({placeholders})",
                 (puuid, *ids),
             )
             existing = {row[0] for row in existing_rows}
@@ -326,19 +351,33 @@ class Backfill(commands.Cog):
 
     async def _insert_matches(self, puuid: str, match_ids: list[str]) -> int:
         """Fetch + insert match details one at a time, one short statement
-        per write.
+        per write (raw payload archive, then the per-player stats row).
 
         Why per-match: bundling the whole page under one transaction
         would hold a pooled connection across N network calls
         (~50-500ms each). A one-shot ``db.execute`` per insert returns
         the connection to the pool between Riot fetches, so other
         writers interleave freely.
+
+        Returns the number of matches fetched and written through. During
+        a raw-archive heal pass the match_stats write is a conflict no-op
+        but the match still counts — the fetch genuinely happened.
         """
         inserted = 0
         for mid in match_ids:
             match = await get_match(mid)
             if match is None:
                 continue
+            # Archive the complete payload first, before any per-participant
+            # parsing, so the raw JSON survives even if extraction below
+            # ever trips on a malformed match. One row per MATCH: when a
+            # second tracked player triggers a fetch of the same game the
+            # conflict clause makes this a no-op.
+            await db.execute(
+                "INSERT INTO match_raw (match_id, payload) VALUES (%s, %s) "
+                "ON CONFLICT (match_id) DO NOTHING",
+                (mid, Jsonb(match)),
+            )
             for participant in match["info"]["participants"]:
                 if participant["puuid"] != puuid:
                     continue

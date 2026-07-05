@@ -402,8 +402,8 @@ class Backfill(commands.Cog):
                     "INSERT INTO match_stats "
                     "(match_id, puuid, game_start, queue_id, champion, "
                     " win, kills, deaths, assists, duration_sec, patch_version, "
-                    " position) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                    " position, team_id) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
                     "ON CONFLICT (match_id, puuid) DO NOTHING",
                     (
                         mid,
@@ -418,6 +418,7 @@ class Backfill(commands.Cog):
                         match["info"]["gameDuration"],
                         match["info"].get("gameVersion"),
                         _participant_position(participant),
+                        participant.get("teamId"),
                     ),
                 )
                 inserted += 1

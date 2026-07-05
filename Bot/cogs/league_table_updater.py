@@ -8,7 +8,11 @@ from main import MyDiscordBot
 from utils import db, leaderboard
 from utils.loop_restart import restart_loop_later
 from utils.rank_sorting_class import Ranker
-from utils.riot_client import get_account_by_puuid, get_league_entries
+from utils.riot_client import (
+    RANKED_SOLO_QUEUE_ID,
+    get_account_by_puuid,
+    get_league_entries,
+)
 from utils.riot_stats import fetch_recent_kd
 
 # Want to fetch ranks to post from the database
@@ -97,11 +101,29 @@ class FetchFromRiot(commands.Cog):
         return
 
     async def get_last_five_games(self, puuid):
-        # legacy_dual_key: pre-2024 history rows are keyed by the legacy
-        # encrypted summoner ID (league_players.leagueId, ~47 chars), newer
-        # rows by the real puuid (~78 chars).
-        rows = await leaderboard.fetch_history_wl(puuid, SOLO_QUEUE, 6, legacy_dual_key=True)
-        return leaderboard.build_last_five(rows)
+        """Duo-aware Last 5 from actual match results (match_stats).
+
+        A game is a duo game when another tracked player has a row for the
+        same match on the same team (match_stats holds only tracked
+        players). Sourced from match data instead of the old
+        league_history diff reconstruction — exact per-game results and
+        ordering; a game finished within the last ~5 min (stream interval)
+        can show one refresh late. NULL team_id (rows predating the
+        column, not yet backfilled) never counts as duo.
+        """
+        rows = await db.fetchall(
+            "SELECT ms.win, EXISTS ("
+            "    SELECT 1 FROM match_stats o"
+            "    WHERE o.match_id = ms.match_id"
+            "      AND o.team_id = ms.team_id"
+            "      AND o.puuid <> ms.puuid"
+            ") AS duo "
+            "FROM match_stats ms "
+            "WHERE ms.puuid = %s AND ms.queue_id = %s "
+            "ORDER BY ms.game_start DESC LIMIT 5",
+            (puuid, RANKED_SOLO_QUEUE_ID),
+        )
+        return leaderboard.build_last_five_with_duo(rows)
 
     async def get_recent_streak(self, puuid):
         """Return the count of consecutive losses ending at the most recent game.
@@ -227,6 +249,11 @@ class FetchFromRiot(commands.Cog):
                 self.get_last_five_games,
                 apex_omits_games_word=True,
             )
+            if output_list:
+                # Discord small-text legend for the duo-aware Last 5.
+                output_list.append(
+                    "-# Last 5: \U0001f7e9/\U0001f7e5 solo · ❎/❌ duo with a tracked player"
+                )
 
             paste = self.bot.get_channel(919981835428179988)
             await leaderboard.wipe_and_post(paste, "\n".join(output_list), self.bot.logging)

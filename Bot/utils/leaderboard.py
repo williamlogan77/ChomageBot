@@ -21,6 +21,8 @@ APEX_TIERS = ("Master", "Grandmaster", "Challenger")
 
 WIN_SQUARE = "\U0001f7e9"  # green square
 LOSS_SQUARE = "\U0001f7e5"  # red square
+DUO_WIN_SQUARE = "❎"  # green box with an X — duo win
+DUO_LOSS_SQUARE = "❌"  # red X — duo loss
 
 
 # ------------------------------------------------------------------ history
@@ -152,6 +154,23 @@ def build_last_five_from_wins(wins_newest_first: list) -> str:
     reconstruction (and none of its ordering caveats) needed.
     """
     squares = [WIN_SQUARE if win else LOSS_SQUARE for win in wins_newest_first[:5]]
+    return "".join(reversed(squares))
+
+
+def build_last_five_with_duo(games_newest_first: list[tuple]) -> str:
+    """Squares for up to 5 games with duo marking, newest on the right.
+
+    ``games_newest_first`` are (win, duo) pairs straight from match_stats:
+    win 1/0, duo True when another tracked player shared the player's team
+    in that game. Duo games swap the plain square for the X'd variant:
+    solo win 🟩 / duo win ❎ / solo loss 🟥 / duo loss ❌.
+    """
+    squares = []
+    for win, duo in games_newest_first[:5]:
+        if win:
+            squares.append(DUO_WIN_SQUARE if duo else WIN_SQUARE)
+        else:
+            squares.append(DUO_LOSS_SQUARE if duo else LOSS_SQUARE)
     return "".join(reversed(squares))
 
 

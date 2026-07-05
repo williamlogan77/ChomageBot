@@ -83,9 +83,16 @@ create table if not exists match_stats (
     -- actual role played that game. Empty "" on remakes / very old matches;
     -- NULL on rows inserted before this column existed.
     position TEXT,
+    -- Riot Match-V5 teamId (100 blue / 200 red). Two tracked players with
+    -- the same match_id AND team_id played together (duo detection for the
+    -- board's Last 5). NULL on rows from before this column existed —
+    -- backfillable from match_raw payloads with a single UPDATE, no API.
+    team_id SMALLINT,
     primary key (match_id, puuid)
 );
 create index if not exists idx_match_stats_puuid_time on match_stats (puuid, game_start desc);
+-- Existing installs predate the column; CREATE IF NOT EXISTS won't add it.
+alter table match_stats add column if not exists team_id SMALLINT;
 
 -- Complete Match-V5 JSON payload, archived verbatim at ingest. One row per
 -- MATCH (not per participant — tracked players often share a game; the

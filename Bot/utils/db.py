@@ -4,8 +4,8 @@ Every DB touch in the codebase goes through this module so there is exactly
 one pool, one DSN source, and one place to change if the database moves
 (e.g. the planned RDS migration).
 
-Connection string comes from the ``DATABASE_URL`` env var; the default
-matches the ``db`` service in docker-compose.yml.
+Connection string comes from ``DATABASE_URL`` via utils/config.py —
+required, no baked-in credential fallback.
 
 Postgres notes for query authors:
   - placeholders are ``%s`` (psycopg3), not sqlite's ``?``
@@ -16,10 +16,10 @@ Postgres notes for query authors:
 
 from __future__ import annotations
 
-import os
 from contextlib import asynccontextmanager
 
 from psycopg_pool import AsyncConnectionPool
+from utils import config
 
 # Survive auto_reload's importlib.reload of utils modules: re-executing this
 # module body must not orphan a live pool (leaked connections would pile up
@@ -28,13 +28,7 @@ _pool: AsyncConnectionPool | None = globals().get("_pool")
 
 
 def dsn() -> str:
-    # Prod sets DATABASE_URL in .env, pointing at the dedicated Postgres
-    # LXC on the Proxmox host. The localhost fallback only serves local
-    # development against a throwaway Postgres.
-    return os.environ.get(
-        "DATABASE_URL",
-        "postgresql://chomage:chomage@localhost:5432/chomage",
-    )
+    return config.database_url()
 
 
 async def get_pool() -> AsyncConnectionPool:

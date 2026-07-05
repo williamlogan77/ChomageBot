@@ -5,11 +5,10 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 from main import MyDiscordBot
-from pantheon.utils.exceptions import ServerError
 from utils import db, leaderboard
 from utils.loop_restart import restart_loop_later
 from utils.rank_sorting_class import Ranker
-from utils.riot_client import get_league_entries
+from utils.riot_client import get_account_by_puuid, get_league_entries
 from utils.riot_stats import fetch_recent_kd
 
 # Want to fetch ranks to post from the database
@@ -91,12 +90,10 @@ class FetchFromRiot(commands.Cog):
                 FROM league_players
                     LEFT JOIN users ON user_id = discord_user_id"""
         )
-        # Fetch current ranks and store them in a dict with updated values
-        try:
-            self.ranked_dict = await self.fetch_users_rank(rows)
-        except ServerError as exc:
-            self.bot.logging.error(f"Error of: {exc}, trying again in 60 seconds")
-            await asyncio.sleep(60)
+        # Fetch current ranks and store them in a dict with updated values.
+        # Per-player API failures are handled inside fetch_users_rank
+        # (riot_client returns None rather than raising).
+        self.ranked_dict = await self.fetch_users_rank(rows)
         return
 
     async def get_last_five_games(self, puuid):
@@ -155,7 +152,10 @@ class FetchFromRiot(commands.Cog):
             return
         puuid, stored_name = row
 
-        name = (await self.bot.lolapi.get_account_by_puuId(puuid))["gameName"]
+        account = await get_account_by_puuid(puuid)
+        if account is None:
+            return  # transient account-v1 failure; retry next cycle
+        name = account["gameName"]
 
         if name != stored_name:
             self.bot.logging.info(f"updating {stored_name} to {name}")

@@ -3,9 +3,7 @@ discord.py
 asyncio
 psycopg[binary]>=3.1
 psycopg-pool
-riotwatcher
 python-dotenv
-pantheon
 matplotlib==3.7
 opencv-python
 numpy<2

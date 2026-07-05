@@ -48,8 +48,9 @@ BATCH_SIZE = 1000
 # wrongly resolve to /Bot/Bot/db/... . /scripts/..  ->  /Bot/db/... works.
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_SQLITE = os.path.join(_REPO_ROOT, "Bot", "db", "database.sqlite")
-# Fallback mirrors utils/db.dsn(); prod passes the Postgres LXC's URL.
-DEFAULT_DSN = os.environ.get("DATABASE_URL", "postgresql://chomage:chomage@localhost:5432/chomage")
+# DSN comes from --database-url or the DATABASE_URL env var — like
+# utils/config.py, no baked-in credential fallback.
+DEFAULT_DSN = os.environ.get("DATABASE_URL")
 DEFAULT_SCHEMA = os.path.join(_REPO_ROOT, "Bot", "db", "setup.postgres.sql")
 
 # (table, identity column to preserve or None, timestamp columns)
@@ -163,7 +164,7 @@ def main() -> int:
     parser.add_argument(
         "--database-url",
         default=DEFAULT_DSN,
-        help="Postgres DSN (default: DATABASE_URL env var, else localhost test DSN)",
+        help="Postgres DSN (default: the DATABASE_URL env var; required one way or the other)",
     )
     parser.add_argument(
         "--apply-schema",
@@ -172,6 +173,9 @@ def main() -> int:
         help="schema file applied (idempotently) before copying",
     )
     args = parser.parse_args()
+
+    if not args.database_url:
+        parser.error("no DSN: pass --database-url or set the DATABASE_URL env var")
 
     if not os.path.isfile(args.sqlite):
         print(f"sqlite file not found: {args.sqlite}", file=sys.stderr)

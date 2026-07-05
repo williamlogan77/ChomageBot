@@ -1,37 +1,26 @@
-from utils.riot_client import get_match, get_match_ids
+from utils import db
+from utils.riot_client import RANKED_SOLO_QUEUE_ID
 
 
 async def fetch_recent_kd(puuid: str, count: int = 20) -> tuple[int, int, int, int, int]:
     """Totals across a player's last N ranked solo/duo matches.
 
-    Returns ``(kills, deaths, assists, wins, games_counted)``. On any API
-    failure returns ``(0, 0, 0, 0, 0)``; callers should treat
+    Returns ``(kills, deaths, assists, wins, games_counted)``; callers treat
     ``games_counted == 0`` as "no data".
 
-    Each call hits Riot's Match-V5 ~N+1 times via the shared rate-limited
-    client. Safe to call concurrently — callers serialise behind the global
-    limiter rather than racing.
+    Reads match_stats instead of Riot — this used to burn ~N+1 Match-V5
+    calls per invocation for numbers the stream already ingests. The 5-min
+    stream means a game finished moments ago may not be counted yet; at
+    N=20 that skews nothing worth an API round-trip.
     """
-    match_ids = await get_match_ids(puuid, count=count)
-    if not match_ids:
-        return (0, 0, 0, 0, 0)
-
-    kills = 0
-    deaths = 0
-    assists = 0
-    wins = 0
-    games = 0
-    for match_id in match_ids:
-        match = await get_match(match_id)
-        if match is None:
-            continue
-        for p in match["info"]["participants"]:
-            if p["puuid"] == puuid:
-                kills += p["kills"]
-                deaths += p["deaths"]
-                assists += p["assists"]
-                wins += 1 if p["win"] else 0
-                games += 1
-                break
-
-    return (kills, deaths, assists, wins, games)
+    rows = await db.fetchall(
+        "SELECT kills, deaths, assists, win FROM match_stats "
+        "WHERE puuid = %s AND queue_id = %s "
+        "ORDER BY game_start DESC LIMIT %s",
+        (puuid, RANKED_SOLO_QUEUE_ID, count),
+    )
+    kills = sum(row[0] for row in rows)
+    deaths = sum(row[1] for row in rows)
+    assists = sum(row[2] for row in rows)
+    wins = sum(1 for row in rows if row[3])
+    return (kills, deaths, assists, wins, len(rows))

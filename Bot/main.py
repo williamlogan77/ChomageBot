@@ -5,14 +5,10 @@ import os
 import sys
 
 import discord
-import pantheon
 from discord.ext.commands import Bot
-from dotenv import load_dotenv
-from utils import db
+from utils import config, db
 
-# Load .env from parent directory relative to this file's location
-env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".env")
-load_dotenv(env_path)
+# .env loading + every env read lives in utils/config.py.
 
 
 class MyDiscordBot(Bot):
@@ -25,15 +21,15 @@ class MyDiscordBot(Bot):
         super().__init__(command_prefix, intents=intents)
         self.guildid = serverid
 
-        riot_key = os.environ.get("riot_key")
-        # Log API key info (first/last few chars only for security)
+        riot_key = config.riot_api_key()
+        # Log API key info (first/last few chars only for security). All
+        # Riot calls go through utils/riot_client (shared rate budget).
         if riot_key:
             key_preview = f"{riot_key[:10]}...{riot_key[-4:]}" if len(riot_key) > 14 else "***"
             print(f"Riot API Key loaded: {key_preview}")
         else:
             print("WARNING: Riot API Key not found in environment variables!")
 
-        self.lolapi = pantheon.Pantheon("euw1", riot_key, debug=True)
         self.logging: logging.Logger = None
 
     async def setup_hook(self) -> None:
@@ -99,9 +95,7 @@ async def main(my_token: str) -> None:
     await db.apply_schema("./db/setup.postgres.sql")
     print("Database schema applied")
 
-    server_id = int(os.environ.get("guild_id", "0"))
-    if server_id == 0:
-        raise ValueError("guild_id environment variable must be set in .env file")
+    server_id = config.guild_id()
 
     bot = MyDiscordBot(
         command_prefix="!",
@@ -119,10 +113,7 @@ if __name__ == "__main__":
     if sys.platform == "win32":
         # psycopg's async pool can't run on Windows' default ProactorEventLoop.
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    token = os.environ.get("token")
-    if not token:
-        raise ValueError("token env var must be set in .env file")
-    asyncio.run(main(token))
+    asyncio.run(main(config.discord_token()))
 
 #
 # bot.start(token)

@@ -4,6 +4,7 @@ from discord.ext import commands
 from main import MyDiscordBot
 from utils import db
 from utils.autocomplete import DiscordAttachedLeagueNames
+from utils.riot_client import get_account_by_riot_id
 
 
 class LeagueUsers(commands.Cog):
@@ -25,7 +26,13 @@ class LeagueUsers(commands.Cog):
         user: discord.User,
     ):
         # Get PUUID from Account API - this is all we need now
-        puuid = (await self.bot.lolapi.get_account_by_riotId(league_name, tagline))["puuid"]
+        account = await get_account_by_riot_id(league_name, tagline)
+        if account is None:
+            await ctx.response.send_message(
+                f"Couldn't find {league_name}#{tagline} on Riot's account API"
+            )
+            return
+        puuid = account["puuid"]
 
         await db.execute(
             """INSERT INTO league_players (

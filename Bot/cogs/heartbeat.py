@@ -81,6 +81,13 @@ class Heartbeat(commands.Cog):
             stale_after=STICKY_PANEL_STALE_AFTER,
             now=now,
         )
+        await self._check_one(
+            cog_name="Ranked5sBoard",
+            extension="cogs.ranked5s_table_updater",
+            attr="post_ranks_5s_last_fired",
+            stale_after=POST_RANKS_STALE_AFTER,
+            now=now,
+        )
 
     async def _check_one(
         self,

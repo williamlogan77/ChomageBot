@@ -16,19 +16,20 @@ limiter in :mod:`utils.riot_client`. Two flows:
   manual trigger.
 
 Both paths share the same per-player routine and are fully idempotent:
-match_id is the table's PRIMARY KEY, we pre-filter against existing IDs
-before any match-detail fetch, and the write uses INSERT OR IGNORE as a
-belt-and-braces guard.
+(match_id, puuid) is the table's PRIMARY KEY, we pre-filter against
+existing IDs before any match-detail fetch, and the write uses
+INSERT ... ON CONFLICT DO NOTHING as a belt-and-braces guard.
 """
 
 import asyncio
 import datetime as dt
 import logging
 
-import aiosqlite as sqa
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
+from utils import db
+from utils.loop_restart import restart_loop_later
 from utils.riot_client import get_match, get_match_ids
 
 log = logging.getLogger(__name__)
@@ -104,11 +105,10 @@ class Backfill(commands.Cog):
 
         count = max(1, min(count, PAGE_SIZE))
 
-        async with sqa.connect(self.bot.db_path) as db:
-            rows = await db.execute_fetchall(
-                "SELECT puuid, league_username FROM league_players "
-                "WHERE puuid IS NOT NULL AND puuid != ''"
-            )
+        rows = await db.fetchall(
+            "SELECT puuid, league_username FROM league_players "
+            "WHERE puuid IS NOT NULL AND puuid != ''"
+        )
 
         if not rows:
             await ctx.followup.send("No players to backfill.", ephemeral=True)
@@ -205,11 +205,10 @@ class Backfill(commands.Cog):
         player and insert anything new. Cheap on steady state — most calls
         return IDs we already have and skip the match-detail fetch.
         """
-        async with sqa.connect(self.bot.db_path) as db:
-            rows = await db.execute_fetchall(
-                "SELECT puuid, league_username FROM league_players "
-                "WHERE puuid IS NOT NULL AND puuid != ''"
-            )
+        rows = await db.fetchall(
+            "SELECT puuid, league_username FROM league_players "
+            "WHERE puuid IS NOT NULL AND puuid != ''"
+        )
         for puuid, name in rows:
             try:
                 inserted = await self._backfill_player(
@@ -236,9 +235,14 @@ class Backfill(commands.Cog):
         being recorded.
         """
         self.bot.logging.error(f"stream_matches errored: {exc!r}, restarting in 60s")
-        await asyncio.sleep(60)
-        if not self.stream_matches.is_running():
-            self.stream_matches.start()
+        # Detached: this callback runs inside the dying loop task, where
+        # is_running() is still True and a direct start() would be skipped.
+        restart_loop_later(
+            self.stream_matches,
+            name="stream_matches",
+            log=self.bot.logging,
+            still_active=lambda: self.bot.get_cog("Backfill") is self,
+        )
 
     # --- shared per-player routine ------------------------------------
 
@@ -290,14 +294,13 @@ class Backfill(commands.Cog):
             # Filtering by match_id alone would skip games where this puuid
             # hasn't been backfilled yet but another tracked friend already
             # has — exactly the "duo's second row" case we need to pick up.
-            async with sqa.connect(self.bot.db_path) as db:
-                placeholders = ",".join("?" * len(ids))
-                existing_rows = await db.execute_fetchall(
-                    f"SELECT match_id FROM match_stats "
-                    f"WHERE puuid = ? AND match_id IN ({placeholders})",
-                    (puuid, *ids),
-                )
-                existing = {row[0] for row in existing_rows}
+            placeholders = ",".join(["%s"] * len(ids))
+            existing_rows = await db.fetchall(
+                f"SELECT match_id FROM match_stats "
+                f"WHERE puuid = %s AND match_id IN ({placeholders})",
+                (puuid, *ids),
+            )
+            existing = {row[0] for row in existing_rows}
 
             to_fetch = [mid for mid in ids if mid not in existing]
             if to_fetch:
@@ -322,15 +325,14 @@ class Backfill(commands.Cog):
         return inserted_total
 
     async def _insert_matches(self, puuid: str, match_ids: list[str]) -> int:
-        """Fetch + insert match details one at a time, opening a fresh
-        connection per write.
+        """Fetch + insert match details one at a time, one short statement
+        per write.
 
         Why per-match: bundling the whole page under one transaction
-        held the writer lock across N network calls (~50-500ms each),
-        which starved /refresh_ranks and other writers and tripped the
-        5-second busy_timeout. Opening a new connection only around the
-        insert holds the lock for milliseconds — other writers can
-        interleave freely under WAL.
+        would hold a pooled connection across N network calls
+        (~50-500ms each). A one-shot ``db.execute`` per insert returns
+        the connection to the pool between Riot fetches, so other
+        writers interleave freely.
         """
         inserted = 0
         for mid in match_ids:
@@ -340,32 +342,34 @@ class Backfill(commands.Cog):
             for participant in match["info"]["participants"]:
                 if participant["puuid"] != puuid:
                     continue
+                # game_start is TIMESTAMPTZ — insert a tz-aware datetime
+                # (Riot's gameStartTimestamp is epoch millis, i.e. UTC).
                 game_start = dt.datetime.fromtimestamp(
-                    match["info"]["gameStartTimestamp"] / 1000.0
-                ).strftime("%Y-%m-%d %H:%M:%S")
-                async with sqa.connect(self.bot.db_path) as db:
-                    await db.execute(
-                        "INSERT OR IGNORE INTO match_stats "
-                        "(match_id, puuid, game_start, queue_id, champion, "
-                        " win, kills, deaths, assists, duration_sec, patch_version, "
-                        " position) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        (
-                            mid,
-                            puuid,
-                            game_start,
-                            match["info"]["queueId"],
-                            participant["championName"],
-                            1 if participant["win"] else 0,
-                            participant["kills"],
-                            participant["deaths"],
-                            participant["assists"],
-                            match["info"]["gameDuration"],
-                            match["info"].get("gameVersion"),
-                            _participant_position(participant),
-                        ),
-                    )
-                    await db.commit()
+                    match["info"]["gameStartTimestamp"] / 1000.0,
+                    tz=dt.UTC,
+                )
+                await db.execute(
+                    "INSERT INTO match_stats "
+                    "(match_id, puuid, game_start, queue_id, champion, "
+                    " win, kills, deaths, assists, duration_sec, patch_version, "
+                    " position) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                    "ON CONFLICT (match_id, puuid) DO NOTHING",
+                    (
+                        mid,
+                        puuid,
+                        game_start,
+                        match["info"]["queueId"],
+                        participant["championName"],
+                        1 if participant["win"] else 0,
+                        participant["kills"],
+                        participant["deaths"],
+                        participant["assists"],
+                        match["info"]["gameDuration"],
+                        match["info"].get("gameVersion"),
+                        _participant_position(participant),
+                    ),
+                )
                 inserted += 1
                 break
         return inserted

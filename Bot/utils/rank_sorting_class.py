@@ -12,6 +12,8 @@ class Ranker:
         "Emerald": 5,
         "Diamond": 6,
         "Master": 7,
+        "Grandmaster": 8,
+        "Challenger": 9,
     }
     SUBLEAGUE = {
         "IV": 0,

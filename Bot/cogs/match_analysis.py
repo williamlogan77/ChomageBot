@@ -29,7 +29,6 @@ import datetime as dt
 import io
 import logging
 import re
-import sqlite3
 import time
 
 import discord
@@ -40,34 +39,37 @@ matplotlib.use("Agg")  # headless render — no display backend needed
 import matplotlib.pyplot as plt
 from discord import app_commands
 from discord.ext import commands, tasks
+from utils import db
 from utils import match_analysis as analysis
+from utils.loop_restart import restart_loop_later
 
 log = logging.getLogger(__name__)
 
 PNG_DPI = 110
 
 # 5-minute TTL cache around analysis.load_matches. Every chart click used
-# to do a full SQLite read (~6500 rows into pandas) — the cache collapses
+# to do a full DB read (~6500 rows into pandas) — the cache collapses
 # bursts of clicks within the TTL down to a single read.
 _DF_CACHE_TTL_SECONDS = 300
+_DF_CACHE_KEY = "matches"
 _df_cache: dict[str, tuple[float, pd.DataFrame]] = {}
 _df_cache_lock = asyncio.Lock()
 
 
-async def _load_matches_cached(db_path: str) -> pd.DataFrame:
+async def _load_matches_cached() -> pd.DataFrame:
     """5-minute TTL cache around ``analysis.load_matches``.
 
     Lock-around-read-and-write is intentional: under a thundering-herd of
     simultaneous chart clicks (e.g. after a sticky-pin repost) we want
     one reader to land and the others to wait for the result rather than
-    all doing parallel SQLite reads.
+    all doing parallel Postgres reads.
 
     The cache holds the DataFrame by reference — callers MUST NOT mutate
     it. Current plot helpers only slice (no in-place ops), so this is
     safe today; any future mutation site must ``df.copy()`` first.
     """
     async with _df_cache_lock:
-        entry = _df_cache.get(db_path)
+        entry = _df_cache.get(_DF_CACHE_KEY)
         now = time.monotonic()
         if entry is not None:
             cached_at, df = entry
@@ -75,8 +77,8 @@ async def _load_matches_cached(db_path: str) -> pd.DataFrame:
                 log.info(f"DF cache hit, age={now - cached_at:.1f}s")
                 return df
         log.info("DF cache miss, loading…")
-        df = await asyncio.to_thread(analysis.load_matches, db_path)
-        _df_cache[db_path] = (now, df)
+        df = await asyncio.to_thread(analysis.load_matches)
+        _df_cache[_DF_CACHE_KEY] = (now, df)
         return df
 
 
@@ -365,7 +367,7 @@ _CHART_CUSTOM_ID_RE = re.compile(r"^ms:(?:panel|expl):c(\d+)$")
 _PINNED_CHART_IDX = 0
 
 
-def _chart_display_order(db_path: str) -> list[int]:
+async def _chart_display_order() -> list[int]:
     """Canonical CHART_DEFS indices ordered most-clicked-first for display.
 
     Reads click counts from ``command_usage`` (both panel and in-explorer
@@ -378,21 +380,23 @@ def _chart_display_order(db_path: str) -> list[int]:
         the canonical order, and the layout only diverges as real clicks
         accumulate.
 
-    Never raises: any DB error (missing table pre-migration, locked file)
-    falls back to canonical order. Returns CANONICAL indices, not slots —
-    the caller keeps ``custom_id``/callbacks bound to these so dispatch,
-    the usage decoder, and historical rows all stay valid.
+    Never raises: any DB error falls back to canonical order. Returns
+    CANONICAL indices, not slots — the caller keeps ``custom_id``/callbacks
+    bound to these so dispatch, the usage decoder, and historical rows all
+    stay valid.
     """
     n = len(CHART_DEFS)
     canonical = list(range(n))
     counts: dict[int, int] = {}
     try:
-        with sqlite3.connect(db_path) as con:
-            rows = con.execute(
-                "SELECT command_name, COUNT(*) FROM command_usage "
-                "WHERE command_name LIKE 'ms:panel:c%' OR command_name LIKE 'ms:expl:c%' "
-                "GROUP BY command_name"
-            ).fetchall()
+        # LIKE patterns go in as parameters — a literal % in the SQL text
+        # would need doubling for psycopg's placeholder scanner.
+        rows = await db.fetchall(
+            "SELECT command_name, COUNT(*) FROM command_usage "
+            "WHERE command_name LIKE %s OR command_name LIKE %s "
+            "GROUP BY command_name",
+            ("ms:panel:c%", "ms:expl:c%"),
+        )
         for name, cnt in rows:
             m = _CHART_CUSTOM_ID_RE.match(name or "")
             if m:
@@ -1514,15 +1518,11 @@ class MatchAnalysis(commands.Cog):
     async def whois(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
 
-        import os
-
-        db_path = self.bot.db_path
         try:
-            db_size_mb = os.path.getsize(db_path) / (1024 * 1024)
-            db_modified = dt.datetime.fromtimestamp(os.path.getmtime(db_path))
-        except FileNotFoundError:
+            size_row = await db.fetchone("SELECT pg_database_size(current_database())")
+            db_size_mb = size_row[0] / (1024 * 1024)
+        except Exception:
             db_size_mb = None
-            db_modified = None
 
         cache_entries = len(_df_cache)
         cache_age_s = None
@@ -1554,12 +1554,12 @@ class MatchAnalysis(commands.Cog):
 
         lines = []
         if db_size_mb is not None:
-            lines.append(f"`db file       ` {db_size_mb:.1f} MB · modified {fmt_ts(db_modified)}")
+            lines.append(f"`db            ` postgres · {db_size_mb:.1f} MB")
         else:
-            lines.append(f"`db file       ` MISSING ({db_path})")
+            lines.append("`db            ` UNREACHABLE")
 
         try:
-            df = await _load_matches_cached(self.bot.db_path)
+            df = await _load_matches_cached()
             lines.append(f"`match_stats   ` {len(df):,} rows · {df['person'].nunique()} people")
         except Exception as exc:
             lines.append(f"`match_stats   ` load failed: {exc!r}")
@@ -1589,11 +1589,10 @@ class MatchAnalysis(commands.Cog):
         Returns ``(message, df)``. Raises ``discord.Forbidden`` if the
         bot lacks send permission; other exceptions propagate.
         """
-        df = await _load_matches_cached(self.bot.db_path)
+        df = await _load_matches_cached()
         # Order the chart buttons most-clicked-first (Summary pinned),
-        # recomputed on every (re)post from the live usage log. Off the
-        # event loop — it's a quick read but still touches disk.
-        display_order = await asyncio.to_thread(_chart_display_order, self.bot.db_path)
+        # recomputed on every (re)post from the live usage log.
+        display_order = await _chart_display_order()
         view = MatchStatsPanel(
             df=df if not df.empty else None,
             display_order=display_order,
@@ -1706,9 +1705,14 @@ class MatchAnalysis(commands.Cog):
         sticky behaviour.
         """
         self.bot.logging.error(f"sticky_panel errored: {exc!r}, restarting in 60s")
-        await asyncio.sleep(60)
-        if not self.sticky_panel.is_running():
-            self.sticky_panel.start()
+        # Detached: this callback runs inside the dying loop task, where
+        # is_running() is still True and a direct start() would be skipped.
+        restart_loop_later(
+            self.sticky_panel,
+            name="sticky_panel",
+            log=self.bot.logging,
+            still_active=lambda: self.bot.get_cog("MatchAnalysis") is self,
+        )
 
     @app_commands.command(
         name="chart_index",
@@ -1813,7 +1817,7 @@ class MatchAnalysis(commands.Cog):
         target = user or interaction.user
 
         try:
-            df = await _load_matches_cached(self.bot.db_path)
+            df = await _load_matches_cached()
         except Exception as exc:
             self.bot.logging.error(f"/me data load failed: {exc!r}")
             await interaction.followup.send(f"Failed to load match data: {exc!r}", ephemeral=True)
@@ -1825,8 +1829,8 @@ class MatchAnalysis(commands.Cog):
             )
             return
 
-        # discord_user_id is stored as TEXT in SQLite for legacy reasons;
-        # cast both sides to str so we don't miss matches on dtype mismatch.
+        # Cast both sides to str so we don't miss matches on dtype
+        # mismatch (int64 column vs Discord's int id).
         matches = df[df["discord_user_id"].astype(str) == str(target.id)]
         if matches.empty:
             await interaction.followup.send(
@@ -1873,7 +1877,7 @@ class MatchAnalysis(commands.Cog):
         target = user or interaction.user
 
         try:
-            df = await _load_matches_cached(self.bot.db_path)
+            df = await _load_matches_cached()
         except Exception as exc:
             self.bot.logging.error(f"/me_text data load failed: {exc!r}")
             await interaction.followup.send(f"Failed to load match data: {exc!r}", ephemeral=True)
@@ -1923,7 +1927,7 @@ class MatchAnalysis(commands.Cog):
         target = user or interaction.user
 
         try:
-            df = await _load_matches_cached(self.bot.db_path)
+            df = await _load_matches_cached()
         except Exception as exc:
             self.bot.logging.error(f"/me_todo data load failed: {exc!r}")
             await interaction.followup.send(f"Failed to load match data: {exc!r}", ephemeral=True)
@@ -1969,7 +1973,7 @@ class MatchAnalysis(commands.Cog):
         target = user or interaction.user
         await interaction.response.defer(ephemeral=True)
 
-        df = await _load_matches_cached(self.bot.db_path)
+        df = await _load_matches_cached()
         matched = df[df["discord_user_id"].astype(str) == str(target.id)]
         if matched.empty:
             await interaction.followup.send(
@@ -2012,7 +2016,7 @@ class MatchAnalysis(commands.Cog):
         days = max(1, min(days, 90))
 
         try:
-            df = await _load_matches_cached(self.bot.db_path)
+            df = await _load_matches_cached()
         except Exception as exc:
             self.bot.logging.error(f"/leaderboard_week data load failed: {exc!r}")
             await interaction.followup.send(f"Failed to load match data: {exc!r}", ephemeral=True)
@@ -2086,7 +2090,7 @@ class MatchAnalysis(commands.Cog):
     ) -> list[app_commands.Choice[str]]:
         """Suggest up to 25 champions matching the user's typed substring."""
         try:
-            df = await _load_matches_cached(self.bot.db_path)
+            df = await _load_matches_cached()
         except Exception:
             return []
 
@@ -2112,7 +2116,7 @@ class MatchAnalysis(commands.Cog):
         await interaction.response.defer(ephemeral=True)
 
         try:
-            df = await _load_matches_cached(self.bot.db_path)
+            df = await _load_matches_cached()
         except Exception as exc:
             self.bot.logging.error(f"/champ data load failed: {exc!r}")
             await interaction.followup.send(f"Failed to load match data: {exc!r}", ephemeral=True)
@@ -2239,7 +2243,7 @@ class MatchAnalysis(commands.Cog):
             return
 
         try:
-            df = await _load_matches_cached(self.bot.db_path)
+            df = await _load_matches_cached()
         except Exception as exc:
             self.bot.logging.error(f"/compare data load failed: {exc!r}")
             await interaction.followup.send(f"Failed to load match data: {exc!r}", ephemeral=True)
@@ -2356,7 +2360,7 @@ class MatchAnalysis(commands.Cog):
         interaction_check."""
         await interaction.response.defer(ephemeral=True)
         try:
-            df = await _load_matches_cached(self.bot.db_path)
+            df = await _load_matches_cached()
         except Exception as exc:
             self.bot.logging.error(f"match_stats data load failed: {exc!r}")
             await interaction.followup.send(f"Failed to load match data: {exc!r}", ephemeral=True)
@@ -2397,7 +2401,7 @@ class MatchAnalysis(commands.Cog):
         ephemeral post. Used by the board's More-analytics dropdown."""
         await interaction.response.defer(ephemeral=True)
         try:
-            df = await _load_matches_cached(self.bot.db_path)
+            df = await _load_matches_cached()
         except Exception as exc:
             self.bot.logging.error(f"more-chart data load failed: {exc!r}")
             await interaction.followup.send(f"Failed to load match data: {exc!r}", ephemeral=True)
@@ -2438,7 +2442,7 @@ class MatchAnalysis(commands.Cog):
         # followup.send (which carries views fine).
         await interaction.response.defer(ephemeral=True)
         try:
-            df = await _load_matches_cached(self.bot.db_path)
+            df = await _load_matches_cached()
         except Exception as exc:
             self.bot.logging.error(f"more-menu data load failed: {exc!r}")
             await interaction.followup.send(f"Failed to load match data: {exc!r}", ephemeral=True)

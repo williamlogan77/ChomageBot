@@ -14,8 +14,9 @@ we assume the loop is frozen and reload the parent cog so a fresh
 instance starts a fresh @tasks.loop task.
 
 The cog reload is the same hard-reset that ``touch <cog>.py`` triggers
-via auto_reload — discord.py cancels every @tasks.loop bound to the
-cog, then ``__init__`` calls ``.start()`` again on the new instance.
+via auto_reload — the old instance's ``cog_unload`` cancels its
+@tasks.loop tasks (discord.py does NOT do that automatically), then the
+new instance's ``__init__`` calls ``.start()`` on a fresh loop.
 """
 
 import datetime as dt
@@ -48,6 +49,9 @@ class Heartbeat(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.bot.logging.info(f"{__name__} loaded")
+        # When we first observed a watched attr as None, per cog — lets us
+        # catch loops that die before their first completed iteration.
+        self._none_since: dict[str, dt.datetime] = {}
         self.watchdog.start()
 
     def cog_unload(self) -> None:
@@ -91,21 +95,31 @@ class Heartbeat(commands.Cog):
             return  # cog not loaded; nothing to watchdog
         last = getattr(cog, attr, None)
         if last is None:
-            # The loop hasn't completed an iteration yet — could be a
-            # fresh start, give it one full stale-window before forcing
-            # a reload.
-            return
-        elapsed = now - last
-        if elapsed <= stale_after:
-            return  # healthy
+            # The loop hasn't completed a single iteration yet. A fresh
+            # start is fine, but a loop that died BEFORE its first
+            # completed tick (e.g. DB unreachable at boot) reads None
+            # forever — so allow one full stale-window from when we first
+            # noticed, then force the reload anyway.
+            first_seen = self._none_since.setdefault(cog_name, now)
+            elapsed = now - first_seen
+            if elapsed <= stale_after:
+                return
+            detail = f"no first fire {elapsed} after load"
+        else:
+            self._none_since.pop(cog_name, None)
+            elapsed = now - last
+            if elapsed <= stale_after:
+                return  # healthy
+            detail = f"{elapsed} since last fire"
 
         self.bot.logging.warning(
-            f"Heartbeat: {cog_name}.{attr} stale ({elapsed} since last fire); "
-            f"reloading {extension}"
+            f"Heartbeat: {cog_name}.{attr} stale ({detail}); reloading {extension}"
         )
         try:
             await self.bot.reload_extension(extension)
             self.bot.logging.info(f"Heartbeat: reloaded {extension}")
+            # Fresh instance: restart the None grace window from scratch.
+            self._none_since.pop(cog_name, None)
         except Exception as exc:
             self.bot.logging.error(f"Heartbeat: reload of {extension} failed: {exc!r}")
 

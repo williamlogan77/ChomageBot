@@ -1,12 +1,13 @@
 import asyncio
 import datetime as dt
 
-import aiosqlite as sqa
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 from main import MyDiscordBot
 from pantheon.utils.exceptions import ServerError
+from utils import db
+from utils.loop_restart import restart_loop_later
 from utils.rank_sorting_class import Ranker
 from utils.riot_client import get_league_entries
 from utils.riot_stats import fetch_recent_kd
@@ -35,6 +36,12 @@ class FetchFromRiot(commands.Cog):
         self.post_ranks_last_fired: dt.datetime | None = None
 
         self.ranked_dict: dict | None = None
+
+    def cog_unload(self) -> None:
+        # discord.py does NOT cancel @tasks.loop tasks on cog unload —
+        # without this, every hot reload (auto_reload / heartbeat) leaves
+        # the old instance's loop running next to the new one's.
+        self.post_ranks.cancel()
 
     async def fetch_users_rank(self, users):
         users_ranks = {}
@@ -72,81 +79,41 @@ class FetchFromRiot(commands.Cog):
 
         return users_ranks
 
-    async def fetch_ranks_from_db(self):
-        async with sqa.connect(self.bot.db_path) as connection:
-            async with connection.execute_fetchall(
-                """SELECT league_username,
-                        lp,
-                        division,
-                        tier
-                    FROM (
-                            SELECT DISTINCT puuid,
-                                MAX(timestamp),
-                                lp,
-                                division,
-                                tier
-                            FROM league_history
-                            GROUP BY puuid
-                        ) as history,
-                        (
-                            SELECT *
-                            FROM league_players
-                        ) as players
-                    WHERE history.puuid = players.leagueId"""
-            ) as cursor:
-                db_dict = {}
-                for user in cursor:
-                    current_user, lp, tier, div = user
-                    db_dict[current_user] = {}
-                    db_dict[current_user]["queueType"] = "RANKED_SOLO_5x5"
-                    db_dict[current_user]["leaguePoints"] = lp
-                    db_dict[current_user]["tier"] = tier
-                    db_dict[current_user]["rank"] = div
-
-            return db_dict
-
     # @tasks.loop(seconds=30)
     async def fetch_ranks_from_riot(self):
-        # self.bot.logging.info("fetching ranks")
-        # fetch from db
-        # await self.fetch_ranks_from_db()
-        async with sqa.connect(self.bot.db_path) as connection:
-            async with connection.execute_fetchall(
-                """SELECT puuid,
-                        IIF(nickname = '', discord_tag, nickname),
-                        discord_user_id
-                    FROM (
-                            SELECT *
-                            FROM league_players
-                                LEFT JOIN users ON user_id = discord_user_id
-                        )"""
-            ) as cursor:
-                # Fetch current ranks and store them in a dict with updated values
-                try:
-                    self.ranked_dict = await self.fetch_users_rank(cursor)
-                except ServerError as exc:
-                    self.bot.logging.error(f"Error of: {exc}, trying again in 60 seconds")
-                    await asyncio.sleep(60)
+        rows = await db.fetchall(
+            """SELECT puuid,
+                    CASE WHEN nickname = '' THEN discord_tag ELSE nickname END,
+                    discord_user_id
+                FROM league_players
+                    LEFT JOIN users ON user_id = discord_user_id"""
+        )
+        # Fetch current ranks and store them in a dict with updated values
+        try:
+            self.ranked_dict = await self.fetch_users_rank(rows)
+        except ServerError as exc:
+            self.bot.logging.error(f"Error of: {exc}, trying again in 60 seconds")
+            await asyncio.sleep(60)
         return
 
     async def get_last_five_games(self, puuid):
         # Older history rows are keyed by the legacy encrypted summoner ID
         # (league_players.leagueId, ~47 chars), newer rows by the real
         # puuid (~78 chars). Query both so legacy-tracked players still
-        # surface their game history.
-        async with sqa.connect(self.bot.db_path) as connection:
-            async with connection.execute(
-                "SELECT wins, losses FROM league_history "
-                "WHERE puuid IN ("
-                "    SELECT leagueId FROM league_players WHERE puuid = ?"
-                "    UNION"
-                "    SELECT puuid    FROM league_players WHERE puuid = ?"
-                ") "
-                "AND wins IS NOT NULL AND losses IS NOT NULL "
-                "ORDER BY id DESC LIMIT 6",
-                (puuid, puuid),
-            ) as cursor:
-                rows = await cursor.fetchall()
+        # surface their game history. Solo queue only — Ranked 5s rows
+        # share the table and would corrupt the win/loss diffs.
+        rows = await db.fetchall(
+            "SELECT wins, losses FROM league_history "
+            "WHERE puuid IN ("
+            "    SELECT leagueId FROM league_players WHERE puuid = %s"
+            "    UNION"
+            "    SELECT puuid    FROM league_players WHERE puuid = %s"
+            ") "
+            "AND queue = 'RANKED_SOLO_5x5' "
+            "AND wins IS NOT NULL AND losses IS NOT NULL "
+            "ORDER BY id DESC LIMIT 6",
+            (puuid, puuid),
+        )
         if not rows:
             return ""
         sequence = []
@@ -178,19 +145,18 @@ class FetchFromRiot(commands.Cog):
         if losses could have come last. False-negatives over false-positives
         for the ping.
         """
-        async with sqa.connect(self.bot.db_path) as connection:
-            async with connection.execute(
-                "SELECT wins, losses FROM league_history "
-                "WHERE puuid IN ("
-                "    SELECT leagueId FROM league_players WHERE puuid = ?"
-                "    UNION"
-                "    SELECT puuid    FROM league_players WHERE puuid = ?"
-                ") "
-                "AND wins IS NOT NULL AND losses IS NOT NULL "
-                "ORDER BY id DESC LIMIT 15",
-                (puuid, puuid),
-            ) as cursor:
-                rows = await cursor.fetchall()
+        rows = await db.fetchall(
+            "SELECT wins, losses FROM league_history "
+            "WHERE puuid IN ("
+            "    SELECT leagueId FROM league_players WHERE puuid = %s"
+            "    UNION"
+            "    SELECT puuid    FROM league_players WHERE puuid = %s"
+            ") "
+            "AND queue = 'RANKED_SOLO_5x5' "
+            "AND wins IS NOT NULL AND losses IS NOT NULL "
+            "ORDER BY id DESC LIMIT 15",
+            (puuid, puuid),
+        )
         if len(rows) < 2:
             return 0
         sequence: list[str] = []
@@ -228,41 +194,36 @@ class FetchFromRiot(commands.Cog):
         await channel.send(f"\U0001faf5\U0001f602 <@{user_id}>{extra}")
 
     async def get_name(self, puuid):
-        async with sqa.connect(self.bot.db_path) as connection:
-            async with connection.execute_fetchall(
-                "SELECT league_username FROM league_players WHERE puuid = ?",
-                (puuid,),
-            ) as cursor:
-                if cursor and len(cursor) > 0:
-                    return cursor[0][0]
-                else:
-                    return "Unknown"
+        row = await db.fetchone(
+            "SELECT league_username FROM league_players WHERE puuid = %s",
+            (puuid,),
+        )
+        if row is not None:
+            return row[0]
+        return "Unknown"
 
     async def check_name(self, puuid):
-        async with sqa.connect(self.bot.db_path) as connection:
-            async with connection.execute_fetchall(
-                "SELECT puuid, league_username FROM league_players WHERE puuid = ?",
-                (puuid,),
-            ) as cursor:
-                if not cursor or len(cursor) == 0:
-                    return
-                puuid, stored_name = cursor[0]
+        row = await db.fetchone(
+            "SELECT puuid, league_username FROM league_players WHERE puuid = %s",
+            (puuid,),
+        )
+        if row is None:
+            return
+        puuid, stored_name = row
 
-            name = (await self.bot.lolapi.get_account_by_puuId(puuid))["gameName"]
+        name = (await self.bot.lolapi.get_account_by_puuId(puuid))["gameName"]
 
-            if name != stored_name:
-                self.bot.logging.info(f"updating {stored_name} to {name}")
-                await connection.execute(
-                    "UPDATE league_players SET league_username = ? WHERE puuid = ?",
-                    (name, puuid),
-                )
-                await connection.commit()
+        if name != stored_name:
+            self.bot.logging.info(f"updating {stored_name} to {name}")
+            await db.execute(
+                "UPDATE league_players SET league_username = %s WHERE puuid = %s",
+                (name, puuid),
+            )
 
     @tasks.loop(seconds=120)
     async def post_ranks(self):
         await self.bot.wait_until_ready()
         await self.fetch_ranks_from_riot()
-        # self.ranked_dict = await self.fetch_ranks_from_db()
         # if len(self.previous_ranks) == 0:
         #     self.previous_ranks = self.ranked_dict
         #     return
@@ -331,7 +292,8 @@ class FetchFromRiot(commands.Cog):
                 )
                 last_five = await self.get_last_five_games(posting["puuid"])
                 last_five_line = f"Last 5: {last_five}\n" if last_five else ""
-                if posting["tier"].title() == "Master":
+                # Apex tiers have no real division (league-v4 reports rank "I").
+                if posting["tier"].title() in ("Master", "Grandmaster", "Challenger"):
                     post = (
                         position_arrow
                         + str(index + 1)
@@ -411,13 +373,17 @@ class FetchFromRiot(commands.Cog):
 
         Default @tasks.loop behaviour on exception is to log + stop the
         loop. That leaves the leaderboard frozen until manual recovery.
-        Log, back off briefly, then restart so transient errors heal
-        themselves.
+        The restart must run detached — this callback executes inside the
+        dying loop task, where is_running() is still True (see
+        utils/loop_restart.py).
         """
         self.bot.logging.error(f"post_ranks errored: {exc!r}, restarting in 60s")
-        await asyncio.sleep(60)
-        if not self.post_ranks.is_running():
-            self.post_ranks.start()
+        restart_loop_later(
+            self.post_ranks,
+            name="post_ranks",
+            log=self.bot.logging,
+            still_active=lambda: self.bot.get_cog("FetchFromRiot") is self,
+        )
 
     @app_commands.command(
         name="set_minimum_games_played",
@@ -479,18 +445,22 @@ class FetchFromRiot(commands.Cog):
 
     # Needs updating to grab last match from the table
     async def update_table(self, user, user_stats_dict):
-        async with sqa.connect(database=self.bot.db_path) as connection:
-            try:
-                self.bot.logging.info(f"updating table, logging {user_stats_dict}")
-                last_values = await connection.execute_fetchall(
-                    "SELECT * FROM league_history WHERE puuid = ? ORDER BY id DESC",
-                    (user_stats_dict["puuid"],),
-                )
-            except Exception as e:
-                self.bot.logging.error(f"Failed to update table with error: {e}")
-                return
         try:
-            if last_values[0][-2:] == (
+            self.bot.logging.info(f"updating table, logging {user_stats_dict}")
+            # Explicit columns (not SELECT *) so the new `queue` column can't
+            # shift the wins/losses positions; solo-queue rows only so a
+            # Ranked 5s snapshot never masks a pending solo insert.
+            last_values = await db.fetchall(
+                "SELECT wins, losses FROM league_history "
+                "WHERE puuid = %s AND queue = 'RANKED_SOLO_5x5' "
+                "ORDER BY id DESC LIMIT 1",
+                (user_stats_dict["puuid"],),
+            )
+        except Exception as e:
+            self.bot.logging.error(f"Failed to update table with error: {e}")
+            return
+        try:
+            if last_values[0] == (
                 user_stats_dict["wins"],
                 user_stats_dict["losses"],
             ):
@@ -498,19 +468,20 @@ class FetchFromRiot(commands.Cog):
         except Exception as e:
             self.bot.logging.info(f"Exception as {e}")
 
-        async with sqa.connect(self.bot.db_path) as connection:
-            await connection.execute(
-                "INSERT INTO league_history (puuid, lp, division, tier, wins, losses) VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    user_stats_dict["puuid"],
-                    str(user_stats_dict["leaguePoints"]),
-                    user_stats_dict["rank"],
-                    user_stats_dict["tier"],
-                    user_stats_dict["wins"],
-                    user_stats_dict["losses"],
-                ),
-            )
-            await connection.commit()
+        # `queue` is omitted — the column defaults to RANKED_SOLO_5x5.
+        # leaguePoints arrives as int from Riot; keep it int (psycopg will
+        # not cast str -> INTEGER the way sqlite silently did).
+        await db.execute(
+            "INSERT INTO league_history (puuid, lp, division, tier, wins, losses) VALUES (%s, %s, %s, %s, %s, %s)",
+            (
+                user_stats_dict["puuid"],
+                int(user_stats_dict["leaguePoints"]),
+                user_stats_dict["rank"],
+                user_stats_dict["tier"],
+                user_stats_dict["wins"],
+                user_stats_dict["losses"],
+            ),
+        )
         return
 
 

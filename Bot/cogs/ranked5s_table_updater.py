@@ -60,9 +60,13 @@ class Ranked5sBoard(commands.Cog):
         self.bot = bot
         self.bot.logging.info(f"{__name__} loaded")
         self.post_ranks_5s.start()
-        self.previous_ranks: dict = {}
-        self.last_updated_by: list[str] = []
+        # Arrow state + post gate, same contract as FetchFromRiot — see
+        # leaderboard.render_board_entries. previous_output covers both
+        # the ranked board and the match-derived fallback (they share the
+        # channel, so only one is ever the "last posted board").
         self.previous_positions: dict[str, int] = {}
+        self.last_positions: dict[str, int] = {}
+        self.previous_output: list[str] | None = None
         # Watchdog input, same contract as FetchFromRiot.post_ranks_last_fired
         # (cogs/heartbeat.py reloads us if this goes stale).
         self.post_ranks_5s_last_fired: dt.datetime | None = None
@@ -70,9 +74,6 @@ class Ranked5sBoard(commands.Cog):
         # cog instance, not once per loop tick.
         self._seen_queue_types: set[str] = set()
         self._warned_no_channel = False
-        # Last match-derived fallback standings (used while Riot's league
-        # API exposes no 5s ladder) — change detection for reposts.
-        self.previous_fallback: list[dict] = []
 
     def cog_unload(self) -> None:
         # discord.py does NOT cancel @tasks.loop tasks on cog unload —
@@ -183,10 +184,19 @@ class Ranked5sBoard(commands.Cog):
                 f"{entry['wins']}W/{entry['losses']}L"
             )
 
-    async def _get_last_five_games(self, puuid: str) -> str:
-        """Green/red squares for the player's last 5 games on the 5s ladder."""
+    async def _get_last_five_games(self, puuid: str) -> tuple[str, dt.datetime | None]:
+        """Squares + last-played for the player's games on the 5s ladder.
+
+        Squares still come from league_history diffs; the last-played
+        timestamp needs a real clock, which only match_stats has (queue-710
+        rows from the ingestion stream), so it's a separate lookup.
+        """
         rows = await leaderboard.fetch_history_wl(puuid, QUEUE_KEY, 6)
-        return leaderboard.build_last_five(rows)
+        latest = await db.fetchone(
+            "SELECT MAX(game_start) FROM match_stats WHERE puuid = %s AND queue_id = %s",
+            (puuid, RANKED_5S_QUEUE_ID),
+        )
+        return leaderboard.build_last_five(rows), latest[0] if latest else None
 
     # ---------------------------------------------------------------- channel
 
@@ -225,12 +235,16 @@ class Ranked5sBoard(commands.Cog):
             else:
                 header += " (queue closed — test window over)"
 
-        # previous_positions feeds next cycle's arrow comparisons. Unlike
+        # previous_positions/last_positions feed the arrow baseline. Unlike
         # the solo board, apex entries here keep the " games " wording.
-        entries, self.previous_positions = await leaderboard.render_board_entries(
+        (
+            entries,
+            self.previous_positions,
+            self.last_positions,
+        ) = await leaderboard.render_board_entries(
             sorted_results,
             self.previous_positions,
-            self.last_updated_by,
+            self.last_positions,
             self._get_last_five_games,
         )
         return [header] + entries
@@ -239,19 +253,13 @@ class Ranked5sBoard(commands.Cog):
 
     async def _run_cycle(self, force: bool = False) -> None:
         """One full fetch -> history -> post pass. ``force`` reposts even
-        when nothing changed (used by /refresh_ranked5s)."""
+        when the rendered board is unchanged (used by /refresh_ranked5s)."""
         players = await self._fetch_tracked_players()
         ranked_dict = await self._fetch_5s_ranks(players)
 
-        # Record history + collect the flag list even if no channel is set.
-        updated_users: list[str] = []
-        for user, entry in ranked_dict.items():
-            previous = self.previous_ranks.get(user)
-            if previous is not None and entry["leaguePoints"] != previous["leaguePoints"]:
-                updated_users.append(user)
+        # Record history even if no channel is set.
+        for entry in ranked_dict.values():
             await self._record_history(entry)
-        if updated_users:
-            self.last_updated_by = updated_users
 
         if not ranked_dict:
             # League entries only exist for players who've completed
@@ -260,26 +268,17 @@ class Ranked5sBoard(commands.Cog):
             await self._post_fallback_board(force)
             return
 
-        changed = (ranked_dict != self.previous_ranks) or (not self.previous_ranks)
-        self.previous_ranks = ranked_dict
-
         # Hybrid: tracked players with 5s games but no entry yet (still in
         # placements) appear in a compact section under the ranked board —
         # otherwise they vanish the moment the first friend gets a rank.
         standings = await self._fetch_match_standings()
         ranked_puuids = {entry["puuid"] for entry in ranked_dict.values()}
         unplaced = [s for s in standings if s["puuid"] not in ranked_puuids]
-        unplaced_changed = unplaced != self.previous_fallback
-        self.previous_fallback = unplaced
 
-        if not (changed or unplaced_changed or force):
-            return
-
-        channel = await self._get_board_channel()
-        if channel is None:
-            return
-
-        self.bot.logging.info("Posting Ranked 5s board")
+        # Render every cycle, not just on rank changes: match_stats rows
+        # land via the separate ~5-min stream loop, so squares/flag/
+        # last-played can change with no LP movement. Post iff the
+        # rendered blocks differ from the last posted board.
         sorted_results = sorted(ranked_dict.values(), key=lambda d: d["sorted_rank"], reverse=True)
         blocks = await self._render_board(sorted_results)
         if unplaced:
@@ -289,6 +288,16 @@ class Ranked5sBoard(commands.Cog):
                     f"{entry['summonerName']} - <@{entry['user_id']}>: "
                     f"{entry['wins']}W / {entry['losses']}L"
                 )
+
+        if blocks == self.previous_output and not force:
+            return
+
+        channel = await self._get_board_channel()
+        if channel is None:
+            return
+
+        self.bot.logging.info("Posting Ranked 5s board")
+        self.previous_output = blocks
         # Ping-free board: silent sends, no mentions resolved.
         await leaderboard.wipe_and_post(channel, blocks, self.bot.logging)
 
@@ -331,13 +340,7 @@ class Ranked5sBoard(commands.Cog):
 
     async def _post_fallback_board(self, force: bool) -> None:
         standings = await self._fetch_match_standings()
-        changed = standings != self.previous_fallback
-        self.previous_fallback = standings
-        if not standings or not (changed or force):
-            return
-
-        channel = await self._get_board_channel()
-        if channel is None:
+        if not standings:
             return
 
         header = "**Ranked 5s** — weekend ladder"
@@ -352,23 +355,49 @@ class Ranked5sBoard(commands.Cog):
             "match results, sorted by wins."
         )
 
-        lines = [header, note]
-        for index, entry in enumerate(standings):
-            wins_flags = await db.fetchall(
-                "SELECT win FROM match_stats "
+        # Fetch every entry's recent games first: the 🚩 marks whoever
+        # played the board-wide most recent game, which isn't known until
+        # all of them are in hand. Fallback standings come FROM match_stats,
+        # so last_played always exists here.
+        recents: list[tuple[str, dt.datetime | None]] = []
+        for entry in standings:
+            rows = await db.fetchall(
+                "SELECT win, game_start FROM match_stats "
                 "WHERE puuid = %s AND queue_id = %s "
                 "ORDER BY game_start DESC LIMIT 5",
                 (entry["puuid"], RANKED_5S_QUEUE_ID),
             )
-            last_five = leaderboard.build_last_five_from_wins([w[0] for w in wins_flags])
+            last_five = leaderboard.build_last_five_from_wins([win for win, _ in rows])
+            recents.append((last_five, rows[0][1] if rows else None))
+        freshest = leaderboard.freshest_played(played for _, played in recents)
+
+        lines = [header, note]
+        for index, (entry, (last_five, last_played)) in enumerate(
+            zip(standings, recents, strict=True)
+        ):
+            flag = (
+                f" {leaderboard.FLAG}"
+                if last_played is not None and last_played == freshest
+                else ""
+            )
             lines.append(
-                f"{index + 1}. {entry['summonerName']} - <@{entry['user_id']}>\n"
+                f"{index + 1}. {entry['summonerName']} - <@{entry['user_id']}>{flag}\n"
                 f"Record: {entry['wins']}W / {entry['losses']}L "
                 f"({entry['WinRate']:.2f}% winrate)\n"
+                f"{leaderboard.last_played_line(last_played)}"
                 f"{last_five}\n"
             )
 
+        # Same rendered-output post gate as the ranked board.
+        if lines == self.previous_output and not force:
+            return
+
+        channel = await self._get_board_channel()
+        if channel is None:
+            return
+
         self.bot.logging.info("Posting Ranked 5s board (match-derived fallback)")
+        self.previous_output = lines
         await leaderboard.wipe_and_post(channel, lines, self.bot.logging)
 
     @tasks.loop(seconds=120)

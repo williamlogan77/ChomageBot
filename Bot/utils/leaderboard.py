@@ -207,14 +207,15 @@ def last_played_line(last_played: dt.datetime | None) -> str:
     """``Last played:`` line for one entry, '' when the player has no games.
 
     ``last_played`` is the newest match_stats.game_start (tz-aware
-    datetime, or None). Both <t:..> forms are rendered client-side by
-    Discord, so the message content stays byte-stable as time passes —
-    the line can't retrigger the rendered-output post gate on its own.
+    datetime, or None). Relative-only (<t:..:R>, "3 hours ago" — William's
+    call) and rendered client-side by Discord, so the message content
+    stays byte-stable as time passes — the line can't retrigger the
+    rendered-output post gate on its own.
     """
     epoch = epoch_seconds(last_played)
     if epoch is None:
         return ""
-    return f"Last played: <t:{epoch}:d> (<t:{epoch}:R>)\n"
+    return f"Last played: <t:{epoch}:R>\n"
 
 
 def freshest_played(played_values) -> dt.datetime | None:

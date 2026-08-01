@@ -56,6 +56,17 @@ def riot_api_key() -> str | None:
     return os.environ.get("riot_key")
 
 
+def awards_channel_id() -> int | None:
+    """Channel for the weekly-awards trophy cabinet board.
+
+    None (unset) disables cabinet posting — the Monday ceremony in
+    #general still runs; cogs/weekly_awards.py logs the skip once per
+    cog instance (same inert pattern as the Ranked 5s board channel).
+    """
+    value = os.environ.get("awards_channel_id")
+    return int(value) if value else None
+
+
 def ranked5s_queue_type() -> str | None:
     """league-v4 queueType for Ranked 5s entries.
 

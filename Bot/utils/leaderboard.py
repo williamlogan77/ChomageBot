@@ -14,6 +14,8 @@ puuid, so solo reads must union both keys (``legacy_dual_key=True``).
 Ranked 5s rows are always puuid-keyed.
 """
 
+import datetime as dt
+
 import discord
 from utils import db
 
@@ -23,6 +25,7 @@ WIN_SQUARE = "\U0001f7e9"  # green square
 LOSS_SQUARE = "\U0001f7e5"  # red square
 DUO_WIN_SQUARE = "❎"  # green box with an X — duo win
 DUO_LOSS_SQUARE = "❌"  # red X — duo loss
+FLAG = "\U0001f6a9"  # triangular flag — marks the board's freshest game
 
 
 # ------------------------------------------------------------------ history
@@ -195,16 +198,47 @@ def count_leading_losses(rows: list[tuple]) -> int:
 # ------------------------------------------------------------------- render
 
 
+def epoch_seconds(moment: dt.datetime | None) -> int | None:
+    """tz-aware datetime -> unix seconds (int) for Discord <t:...> markup."""
+    return None if moment is None else int(moment.timestamp())
+
+
+def last_played_line(last_played: dt.datetime | None) -> str:
+    """``Last played:`` line for one entry, '' when the player has no games.
+
+    ``last_played`` is the newest match_stats.game_start (tz-aware
+    datetime, or None). Relative-only (<t:..:R>, "3 hours ago" — William's
+    call) and rendered client-side by Discord, so the message content
+    stays byte-stable as time passes — the line can't retrigger the
+    rendered-output post gate on its own.
+    """
+    epoch = epoch_seconds(last_played)
+    if epoch is None:
+        return ""
+    return f"Last played: <t:{epoch}:R>\n"
+
+
+def freshest_played(played_values) -> dt.datetime | None:
+    """Board-wide most recent last_played; None when nobody has games.
+
+    Entries tying this value get the 🚩 — an exact game_start tie means
+    the same match, so duo/premade partners are flagged together.
+    """
+    return max((played for played in played_values if played is not None), default=None)
+
+
 def render_board_entry(
     posting: dict,
     position: int,
     previous_position: int | None,
     updated: bool,
     last_five: str,
+    last_played: dt.datetime | None = None,
     *,
     apex_omits_games_word: bool = False,
 ) -> str:
-    """One board entry: name/arrow/flag line, rank line, played line, last-5.
+    """One board entry: name/arrow/flag line, rank line, played line,
+    last-played line, last-5.
 
     ``apex_omits_games_word`` reproduces the solo board's long-standing
     quirk where apex entries read "Played: N with a ..." (no "games") while
@@ -217,7 +251,7 @@ def render_board_entry(
         position_arrow = "\U00002b06\U0000fe0f "
     else:
         position_arrow = "\U00002b07\U0000fe0f "
-    updated_flag = " \U0001f6a9" if updated else ""  # triangular flag
+    updated_flag = f" {FLAG}" if updated else ""
     # Bare squares, no "Last 5:" label — the boards carry a key up top and
     # the squares are self-explanatory (William's call).
     last_five_line = f"{last_five}\n" if last_five else ""
@@ -235,6 +269,7 @@ def render_board_entry(
         f"{updated_flag}\n"
         f"{rank_line}\n"
         f"Played: {posting['GamesPlayed']}{games_word} with a {posting['WinRate']:.2f}% winrate\n"
+        f"{last_played_line(last_played)}"
         f"{last_five_line}"
     )
 
@@ -242,35 +277,55 @@ def render_board_entry(
 async def render_board_entries(
     sorted_results: list[dict],
     previous_positions: dict[str, int],
-    last_updated_by: list[str],
+    last_positions: dict[str, int],
     fetch_last_five,
     *,
     apex_omits_games_word: bool = False,
-) -> tuple[list[str], dict[str, int]]:
+) -> tuple[list[str], dict[str, int], dict[str, int]]:
     """Render every entry of an already-sorted board.
 
-    Returns ``(entry_strings, current_positions)`` — the caller stores
-    ``current_positions`` for the next cycle's arrow comparisons.
-    ``fetch_last_five`` is an async ``puuid -> squares-string`` callable so
-    each cog keeps its own history scoping (queue tag / legacy dual key).
+    Returns ``(entry_strings, arrow_baseline, current_positions)`` — the
+    caller stores both dicts for the next cycle. The boards re-render every
+    cycle (the post gate compares rendered output, see the cogs), so arrows
+    can't diff against the previous render — they'd erase themselves, and
+    force a repost, one cycle after appearing. Instead the arrow baseline
+    only advances when the standings actually reshuffle, so arrows persist
+    until the next reshuffle.
+
+    ``fetch_last_five`` is an async ``puuid -> (squares, last_played)``
+    callable so each cog keeps its own scoping (queue tag / legacy dual
+    key); ``last_played`` is the newest game_start datetime, None when the
+    player has no recorded games.
+
+    The 🚩 is data-derived (survives hot reloads, catches 0-LP
+    demotion-shield games): it marks the entry/entries whose last_played
+    is the board-wide most recent — see :func:`freshest_played`.
     """
+    current_positions = {
+        posting["summonerName"]: index + 1 for index, posting in enumerate(sorted_results)
+    }
+    if current_positions != last_positions:
+        previous_positions = last_positions
+
+    fetched = [await fetch_last_five(posting["puuid"]) for posting in sorted_results]
+    freshest = freshest_played(played for _, played in fetched)
+
     output_list: list[str] = []
-    current_positions: dict[str, int] = {}
-    for index, posting in enumerate(sorted_results):
-        position = index + 1
-        name = posting["summonerName"]
-        current_positions[name] = position
+    for index, (posting, (last_five, last_played)) in enumerate(
+        zip(sorted_results, fetched, strict=True)
+    ):
         output_list.append(
             render_board_entry(
                 posting,
-                position,
-                previous_positions.get(name),
-                name in last_updated_by,
-                await fetch_last_five(posting["puuid"]),
+                index + 1,
+                previous_positions.get(posting["summonerName"]),
+                last_played is not None and last_played == freshest,
+                last_five,
+                last_played,
                 apex_omits_games_word=apex_omits_games_word,
             )
         )
-    return output_list, current_positions
+    return output_list, previous_positions, current_positions
 
 
 # ------------------------------------------------------------------ posting

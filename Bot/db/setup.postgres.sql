@@ -126,3 +126,20 @@ create table if not exists bot_config (
     value TEXT not null,
     updated_at TIMESTAMPTZ not null default now()
 );
+
+-- Weekly awards ceremony winners (cogs/weekly_awards.py): one row per
+-- (week, award, winner) — ties write several rows. week_start is the
+-- Monday (Europe/London) the awarded week began. detail carries the
+-- award-specific evidence (scoreline, duo record, per-account LP deltas)
+-- so the trophy cabinet re-renders without recomputing old weeks.
+create table if not exists weekly_awards (
+    id BIGINT generated always as identity primary key,
+    week_start DATE not null,
+    award TEXT not null,
+    discord_user_id BIGINT not null,
+    display_name TEXT,
+    value NUMERIC,
+    detail JSONB,
+    created_at TIMESTAMPTZ not null default now(),
+    unique (week_start, award, discord_user_id)
+);

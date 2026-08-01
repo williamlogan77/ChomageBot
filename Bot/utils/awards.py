@@ -15,6 +15,7 @@ week number so consecutive weeks differ without any randomness.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 from dataclasses import dataclass
 from fractions import Fraction
 from zoneinfo import ZoneInfo
@@ -55,6 +56,12 @@ AWARDS: dict[str, AwardMeta] = {
             "The ladder called — it wants a restraining order.",
             "Riot should be sending a welfare check.",
             "That's not a loss streak, that's a lifestyle.",
+            "LP is a renewable resource, apparently.",
+            "Somewhere a Challenger smurf says thank you for the donation.",
+            "The rank decay was faster with him playing.",
+            "His LP graph needs a content warning.",
+            "Queue up again, the floor has more floors.",
+            "Certified ELO philanthropist.",
         ),
         skip_line="Nobody lost net LP this week. Disgustingly competent.",
     ),
@@ -66,6 +73,12 @@ AWARDS: dict[str, AwardMeta] = {
             "The ladder's dad now.",
             "Built different, allegedly.",
             "Somebody run an anticheat on this man.",
+            "Peak performance. Suspiciously peak.",
+            "The boosted allegations start Monday.",
+            "Won the week, still can't win an argument in voice.",
+            "Drug test this man's peripherals.",
+            "Carried his winrate like it owed him money.",
+            "New duo applications open Friday, bring offerings.",
         ),
         skip_line="Nobody gained net LP this week. Group therapy is on Thursdays.",
     ),
@@ -77,6 +90,12 @@ AWARDS: dict[str, AwardMeta] = {
             "Ranked anxiety remains undefeated.",
             "Hiding in ARAM doesn't count.",
             "The grind waited. They never came.",
+            "Protecting that rank like it's a family heirloom.",
+            "Touch grass achieved. Wrong week for it.",
+            "The LP was too scared to be lost this week.",
+            "Scheduled maintenance on the mental.",
+            "Witness protection but for ranked.",
+            "His main is filing for abandonment.",
         ),
         skip_line="Everyone kept up their habit this week — no cowards detected. \U0001f44f",
     ),
@@ -88,6 +107,12 @@ AWARDS: dict[str, AwardMeta] = {
             "Can't queue alone, won't queue alone.",
             "The duo carries, the leech collects.",
             "Emotional support duo required at all times.",
+            "Separation anxiety, ranked edition.",
+            "Two names on the account application next season.",
+            "The rank is a joint bank account and he's not the earner.",
+            "Files taxes jointly with his duo.",
+            "One more duo game and Riot sends a wedding gift.",
+            "His solo queue placement is 'accompanied minor'.",
         ),
         skip_line="No duo leeches this week — everyone queued like adults.",
     ),
@@ -99,6 +124,12 @@ AWARDS: dict[str, AwardMeta] = {
             "Deaths bought in bulk this week.",
             "Gray screen simulator: 100% completion.",
             "Running it down with purpose and conviction.",
+            "The enemy team owes him a cut of the LP.",
+            "Respawn timer counted as screen time.",
+            "Minimap was a suggestion.",
+            "Speedran the fountain-to-fountain any% category.",
+            "His death recap needed a scroll bar.",
+            "KDA readable only in scientific notation.",
         ),
         skip_line="Nobody managed a proper int this week. Boring.",
     ),
@@ -281,13 +312,21 @@ def pick_volume_collapse(rows: list[tuple]) -> list[Winner]:
     ]
 
 
-def pick_duo_leech(rows: list[tuple]) -> list[Winner]:
+def pick_duo_leech(rows: list[tuple], partner_rows: list[tuple] = ()) -> list[Winner]:
     """Highest duo-game fraction this week; min 5 games, min 2 duo games.
 
     ``rows``: ``(discord_user_id, display_name, games, duo_games,
     duo_wins, solo_wins)`` per user, duo as defined by fetch_duo_rows.
+    ``partner_rows``: ``(discord_user_id, partner_user_id, partner_name,
+    games_together)`` from fetch_duo_partner_rows. When one partner
+    accounts for at least half of the winner's duo games (and >= 2 of
+    them), they're named in the detail — the enabler deserves credit.
     The detail keeps the duo-vs-solo records — the leech evidence.
     """
+    partners: dict[int, list[tuple[int, str]]] = {}
+    for user_id, _partner_id, partner_name, games_together in partner_rows:
+        partners.setdefault(user_id, []).append((games_together, partner_name))
+
     candidates = []
     for user_id, display_name, games, duo_games, duo_wins, solo_wins in sorted(rows):
         if games < 5 or duo_games < 2:
@@ -302,19 +341,24 @@ def pick_duo_leech(rows: list[tuple]) -> list[Winner]:
         if fraction != best:
             continue
         solo_games = games - duo_games
+        detail = {
+            "games": games,
+            "duo_games": duo_games,
+            "duo_wins": duo_wins,
+            "duo_losses": duo_games - duo_wins,
+            "solo_wins": solo_wins,
+            "solo_losses": solo_games - solo_wins,
+        }
+        top = max(partners.get(user_id, []), default=None)  # (games, name): ties by name
+        if top is not None and top[0] >= 2 and top[0] * 2 >= duo_games:
+            detail["partner"] = top[1]
+            detail["partner_games"] = top[0]
         winners.append(
             Winner(
                 user_id=user_id,
                 display_name=display_name,
                 value=float(fraction),
-                detail={
-                    "games": games,
-                    "duo_games": duo_games,
-                    "duo_wins": duo_wins,
-                    "duo_losses": duo_games - duo_wins,
-                    "solo_wins": solo_wins,
-                    "solo_losses": solo_games - solo_wins,
-                },
+                detail=detail,
             )
         )
     return winners
@@ -367,10 +411,41 @@ def pick_int(rows: list[tuple]) -> list[Winner]:
 # ----------------------------------------------------------- rendering
 
 
-def roast_line(award: str, week_start: dt.date) -> str:
-    """Deterministic roast rotation: indexed by ISO week number."""
+def _special_roast(award: str, detail: dict) -> str | None:
+    """Severity-triggered line that outranks the weekly rotation, or None.
+
+    Only fires on genuinely notable numbers so the regular pool stays the
+    common case. Thresholds are absolute, not relative, so the same feat
+    earns the same line in any week.
+    """
+    if award == LP_LOSS and detail.get("delta", 0) <= -200:
+        return "Two whole divisions, gone. That's a demotion speedrun."
+    if award == LP_CHAD and detail.get("delta", 0) >= 200:
+        return "Two divisions in a week. Check his basement for a Challenger."
+    if award == PUSSY and detail.get("this_week") == 0:
+        return "Zero games. The ranked button has filed a missing person report."
+    if award == DUO_LEECH and detail.get("games", 0) == detail.get("duo_games", -1):
+        return "Not one solo game. Not one."
+    if award == INT and detail.get("deaths", 0) >= 15:
+        return "Fifteen-plus deaths. The fountain knows him by name."
+    return None
+
+
+def roast_line(award: str, week_start: dt.date, detail: dict | None = None) -> str:
+    """Roast for the award: severity override first, else a seeded pick.
+
+    The pick is deterministic for (award, week) — hashlib rather than
+    hash() because PYTHONHASHSEED varies per process, and a ceremony
+    retried after a partial send failure must post identical text. The
+    hash (unlike the old ISO-week index) decorrelates the awards so they
+    don't all step through their pools in lockstep.
+    """
+    special = _special_roast(award, detail or {})
+    if special is not None:
+        return special
     meta = AWARDS[award]
-    return meta.roasts[week_start.isocalendar()[1] % len(meta.roasts)]
+    digest = hashlib.md5(f"{award}:{week_start.isoformat()}".encode()).digest()
+    return meta.roasts[int.from_bytes(digest[:4], "big") % len(meta.roasts)]
 
 
 def condemn_line(award: str, winner: Winner) -> str:
@@ -394,8 +469,11 @@ def condemn_line(award: str, winner: Winner) -> str:
             f"(**-{detail['drop_pct']}%**)."
         )
     if award == DUO_LEECH:
+        partner_bit = ""
+        if "partner" in detail:
+            partner_bit = f" ({detail['partner_games']} of them with {detail['partner']})"
         return (
-            f"**{detail['duo_games']} of {detail['games']}** games duo'd — "
+            f"**{detail['duo_games']} of {detail['games']}** games duo'd{partner_bit} — "
             f"duo {detail['duo_wins']}W-{detail['duo_losses']}L "
             f"vs solo {detail['solo_wins']}W-{detail['solo_losses']}L."
         )
@@ -436,8 +514,12 @@ def build_ceremony_blocks(
             body = "\n".join(
                 f"{winner.display_name}: {condemn_line(award, winner)}" for winner in winners
             )
+        # Severity overrides only make sense for a lone winner — joint
+        # winners' details differ, so they get the weekly pool line.
+        roast_detail = winners[0].detail if len(winners) == 1 else None
         blocks.append(
-            f"{meta.emoji} **{meta.title}** — {mentions}\n{body} {roast_line(award, week_start)}\n"
+            f"{meta.emoji} **{meta.title}** — {mentions}\n"
+            f"{body} {roast_line(award, week_start, roast_detail)}\n"
         )
     return blocks
 
@@ -653,6 +735,39 @@ async def fetch_duo_rows(week_start: dt.datetime, week_end: dt.datetime) -> list
     )
 
 
+async def fetch_duo_partner_rows(week_start: dt.datetime, week_end: dt.datetime) -> list[tuple]:
+    """(discord_user_id, partner_user_id, partner_name, games_together).
+
+    One row per (user, tracked partner) pair with how many of this week's
+    solo-queue games they shared a team in — feeds the "N of them with X"
+    naming in the Duo Leech line. Same-user pairs are excluded so a
+    player's alt can never be their own "partner" (impossible in one
+    match anyway, but cheap to make structural). Partner accounts
+    aggregate to the partner's Discord user like everything else.
+    """
+    return await db.fetchall(
+        "WITH "
+        + _TRACKED_CTE
+        + """
+        SELECT t.discord_user_id,
+               pt.discord_user_id AS partner_user_id,
+               MIN(pt.display_name) AS partner_name,
+               COUNT(*) AS games_together
+        FROM match_stats ms
+            JOIN match_stats o
+                ON o.match_id = ms.match_id
+               AND o.team_id = ms.team_id
+               AND o.puuid <> ms.puuid
+            JOIN tracked t ON t.puuid = ms.puuid
+            JOIN tracked pt ON pt.puuid = o.puuid
+        WHERE ms.queue_id = %(queue_id)s
+          AND ms.game_start >= %(start)s AND ms.game_start < %(end)s
+          AND t.discord_user_id <> pt.discord_user_id
+        GROUP BY t.discord_user_id, pt.discord_user_id""",
+        {"queue_id": RANKED_SOLO_QUEUE_ID, "start": week_start, "end": week_end},
+    )
+
+
 async def fetch_int_rows(week_start: dt.datetime, week_end: dt.datetime) -> list[tuple]:
     """(discord_user_id, display_name, kills, deaths, assists, champion,
     win, match_id) — one row per solo game this week with >= 1 death."""
@@ -682,6 +797,9 @@ async def compute_all_awards(
         LP_LOSS: pick_lp_extreme(deltas, gain=False),
         LP_CHAD: pick_lp_extreme(deltas, gain=True),
         PUSSY: pick_volume_collapse(await fetch_volume_rows(week_start, week_end)),
-        DUO_LEECH: pick_duo_leech(await fetch_duo_rows(week_start, week_end)),
+        DUO_LEECH: pick_duo_leech(
+            await fetch_duo_rows(week_start, week_end),
+            await fetch_duo_partner_rows(week_start, week_end),
+        ),
         INT: pick_int(await fetch_int_rows(week_start, week_end)),
     }

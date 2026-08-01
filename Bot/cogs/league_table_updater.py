@@ -36,9 +36,15 @@ class FetchFromRiot(commands.Cog):
         # self.fetch_ranks_from_riot.start()
         self.previous_ranks = {}
         self.min_games_played = 0
-        self.last_updated_by: list[str] = []
         self.streak_pinged: set[str] = set()
+        # Arrow state: previous_positions is the pre-reshuffle baseline the
+        # arrows diff against, last_positions is last cycle's standings —
+        # see leaderboard.render_board_entries.
         self.previous_positions: dict[str, int] = {}
+        self.last_positions: dict[str, int] = {}
+        # Blocks of the last posted board — the post gate. In-memory, so
+        # the first cycle after a hot reload reposts once redundantly.
+        self.previous_output: list[str] | None = None
         self.post_ranks_last_fired: dt.datetime | None = None
 
         self.ranked_dict: dict | None = None
@@ -101,7 +107,7 @@ class FetchFromRiot(commands.Cog):
         return
 
     async def get_last_five_games(self, puuid):
-        """Duo-aware Last 5 from actual match results (match_stats).
+        """Duo-aware Last 5 + last-played timestamp from match results.
 
         A game is a duo game when another tracked player has a row for the
         same match on the same team (match_stats holds only tracked
@@ -110,6 +116,10 @@ class FetchFromRiot(commands.Cog):
         ordering; a game finished within the last ~5 min (stream interval)
         can show one refresh late. NULL team_id (rows predating the
         column, not yet backfilled) never counts as duo.
+
+        Returns ``(squares, last_played)`` — last_played is the newest
+        game_start (same rows, no extra roundtrip), None when the player
+        has no recorded games.
         """
         rows = await db.fetchall(
             "SELECT ms.win, EXISTS ("
@@ -117,13 +127,14 @@ class FetchFromRiot(commands.Cog):
             "    WHERE o.match_id = ms.match_id"
             "      AND o.team_id = ms.team_id"
             "      AND o.puuid <> ms.puuid"
-            ") AS duo "
+            ") AS duo, ms.game_start "
             "FROM match_stats ms "
             "WHERE ms.puuid = %s AND ms.queue_id = %s "
             "ORDER BY ms.game_start DESC LIMIT 5",
             (puuid, RANKED_SOLO_QUEUE_ID),
         )
-        return leaderboard.build_last_five_with_duo(rows)
+        squares = leaderboard.build_last_five_with_duo([(win, duo) for win, duo, _ in rows])
+        return squares, rows[0][2] if rows else None
 
     async def get_recent_streak(self, puuid):
         """Return the count of consecutive losses ending at the most recent game.
@@ -190,10 +201,10 @@ class FetchFromRiot(commands.Cog):
     async def post_ranks(self):
         await self.bot.wait_until_ready()
         await self.fetch_ranks_from_riot()
-        # if len(self.previous_ranks) == 0:
-        #     self.previous_ranks = self.ranked_dict
-        #     return
 
+        # LP-diff bookkeeping stays gated on the fetched ranks moving:
+        # check_name is an account-v1 call per player, and the history
+        # snapshots / streak ping only have anything to do on a change.
         if (self.ranked_dict != self.previous_ranks) or (not self.previous_ranks):
             updated_users: list[str] = []
             for user in self.ranked_dict.keys():
@@ -207,9 +218,6 @@ class FetchFromRiot(commands.Cog):
                         print(f"{user} updated", flush=True)
                         await self.update_table(user, self.ranked_dict[user])
                         updated_users.append(user)
-
-            if updated_users:
-                self.last_updated_by = updated_users
 
             # Streak ping: only check players whose LP changed this cycle so
             # we don't spam Riot's DB on every refresh. Posts once when a
@@ -225,39 +233,48 @@ class FetchFromRiot(commands.Cog):
                 elif streak < STREAK_THRESHOLD and user in self.streak_pinged:
                     self.streak_pinged.discard(user)
 
-            self.bot.logging.info("Posting ranks")
             self.previous_ranks = self.ranked_dict
-            to_post = filter(
-                lambda x: isinstance(x, dict),
-                [data for data in self.ranked_dict.values()],
+
+        # Render every cycle, not just on rank changes: match_stats rows
+        # land via the separate ~5-min stream loop, so squares/flag/
+        # last-played can change with no LP movement. Post iff the
+        # rendered blocks differ from the last posted board.
+        to_post = filter(
+            lambda x: isinstance(x, dict),
+            [data for data in self.ranked_dict.values()],
+        )
+        # Sort by rank
+        sorted_results = sorted(to_post, key=lambda d: d["sorted_rank"], reverse=True)
+
+        # Sort by winrate
+        # sorted_results = sorted(to_post,
+        #                         key=lambda d: d["WinRate"],
+        #                         reverse=True)
+
+        # apex_omits_games_word: this board's apex entries have always
+        # read "Played: N with a ..." — see utils/leaderboard.py.
+        (
+            output_list,
+            self.previous_positions,
+            self.last_positions,
+        ) = await leaderboard.render_board_entries(
+            sorted_results,
+            self.previous_positions,
+            self.last_positions,
+            self.get_last_five_games,
+            apex_omits_games_word=True,
+        )
+        if output_list:
+            # Key at the top of the board (William's call) — explains
+            # the per-entry squares, which carry no label of their own.
+            output_list.insert(
+                0,
+                "-# Key: \U0001f7e9 solo win · ❎ duo win · \U0001f7e5 solo loss · ❌ duo loss",
             )
-            # Sort by rank
-            sorted_results = sorted(to_post, key=lambda d: d["sorted_rank"], reverse=True)
 
-            # Sort by winrate
-            # sorted_results = sorted(to_post,
-            #                         key=lambda d: d["WinRate"],
-            #                         reverse=True)
-
-            # apex_omits_games_word: this board's apex entries have always
-            # read "Played: N with a ..." — see utils/leaderboard.py.
-            # previous_positions feeds next cycle's arrow comparisons.
-            output_list, self.previous_positions = await leaderboard.render_board_entries(
-                sorted_results,
-                self.previous_positions,
-                self.last_updated_by,
-                self.get_last_five_games,
-                apex_omits_games_word=True,
-            )
-            if output_list:
-                # Key at the top of the board (William's call) — explains
-                # the per-entry squares, which carry no label of their own.
-                output_list.insert(
-                    0,
-                    "-# Key: \U0001f7e9 solo win · ❎ duo win · "
-                    "\U0001f7e5 solo loss · ❌ duo loss",
-                )
-
+        if output_list != self.previous_output:
+            self.previous_output = output_list
+            self.bot.logging.info("Posting ranks")
             paste = self.bot.get_channel(919981835428179988)
             # Blocks, not a joined string — the board can exceed Discord's
             # 2000-char message cap and gets split on entry boundaries.

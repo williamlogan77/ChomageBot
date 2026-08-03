@@ -5,7 +5,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 from main import MyDiscordBot
-from utils import db, leaderboard
+from utils import db, leaderboard, seasons
 from utils.loop_restart import restart_loop_later
 from utils.rank_sorting_class import Ranker
 from utils.riot_client import (
@@ -390,12 +390,23 @@ class FetchFromRiot(commands.Cog):
         except Exception as e:
             self.bot.logging.error(f"Failed to read history for {user}: {e!r}")
             return
+        shrink_detected = False
         try:
             if last_values[0] == (
                 user_stats_dict["wins"],
                 user_stats_dict["losses"],
             ):
                 return
+            prev = last_values[0]
+            new_games = user_stats_dict["wins"] + user_stats_dict["losses"]
+            if None not in prev and new_games < sum(prev):
+                # Games totals never shrink within a split — this account
+                # just crossed a ladder reset.
+                self.bot.logging.info(
+                    f"Games total shrank for {user} ({sum(prev)} -> {new_games}) — "
+                    "possible season reset, re-syncing seasons table"
+                )
+                shrink_detected = True
         except Exception:
             self.bot.logging.info(f"No prior history for {user} — first snapshot")
 
@@ -406,6 +417,10 @@ class FetchFromRiot(commands.Cog):
             f"{user_stats_dict['wins']}W/{user_stats_dict['losses']}L"
         )
         await leaderboard.insert_history_snapshot(user_stats_dict, SOLO_QUEUE)
+        if shrink_detected:
+            # After the insert so the shrunken snapshot itself is part of
+            # the derivation (utils/seasons.py needs it in league_history).
+            await seasons.sync_seasons()
         return
 
 

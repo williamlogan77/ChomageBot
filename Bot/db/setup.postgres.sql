@@ -143,3 +143,15 @@ create table if not exists weekly_awards (
     created_at TIMESTAMPTZ not null default now(),
     unique (week_start, award, discord_user_id)
 );
+
+-- Auto-detected season/split boundaries (utils/seasons.py): one row per
+-- ladder reset, derived from league_history games totals shrinking.
+-- started_at is the first post-reset snapshot observed — Riot's actual
+-- reset moment is a little earlier, bounded by how fast the first
+-- tracked player re-placed. Consumers (e.g. the ranked graphs) read
+-- MAX(started_at) as "the current ladder began here".
+create table if not exists seasons (
+    id BIGINT generated always as identity primary key,
+    started_at TIMESTAMPTZ not null unique,
+    detected_at TIMESTAMPTZ not null default now()
+);

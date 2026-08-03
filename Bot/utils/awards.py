@@ -38,6 +38,18 @@ INT = "int_of_the_week"
 
 AWARD_ORDER = (LP_LOSS, LP_CHAD, PUSSY, DUO_LEECH, INT)
 
+# Season-reset detection: within a split a player's wins+losses total only
+# ever grows, so an account whose games total SHRINKS across the week
+# straddled a split reset. One shrinking account could be a region
+# transfer or API quirk; this many agreeing means the ladder itself reset
+# (validated against 2024-2026 history: real resets cluster at 4-8
+# accounts, noise never exceeds 1).
+RESET_MIN_ACCOUNTS = 2
+
+# Replaces the LP awards' skip lines on a reset week — the normal lines
+# ("Disgustingly competent") would read as a stats claim that's wrong.
+RESET_LP_SKIP_LINE = "Season reset — the ladder ate everyone's LP. Fresh climb, fresh pain."
+
 
 @dataclass(frozen=True)
 class AwardMeta:
@@ -220,25 +232,60 @@ def net_lp_deltas(
     baseline_rows: list[tuple],
     first_in_week_rows: list[tuple],
     last_in_week_rows: list[tuple],
-) -> dict[int, dict]:
+) -> tuple[dict[int, dict], int]:
     """Net weekly LP delta per Discord user, summed across their accounts.
 
     All three row lists share the shape ``(puuid, discord_user_id,
-    display_name, league_username, tier, division, lp)`` with one row per
-    account (see fetch_lp_snapshot_rows). Per account: end = last snapshot
-    inside the week; start = latest snapshot at-or-before week start,
-    falling back to the earliest snapshot inside the week. Accounts with
-    no in-week snapshot contribute nothing — league_history only writes
-    on LP change, so no row means no movement. Accounts whose tier string
-    absolute_lp doesn't know are skipped rather than poisoning the sum.
+    display_name, league_username, tier, division, lp, wins, losses)``
+    with one row per account (see fetch_lp_snapshot_rows). Per account:
+    end = last snapshot inside the week; start = latest snapshot
+    at-or-before week start, falling back to the earliest snapshot inside
+    the week. Accounts with no in-week snapshot contribute nothing —
+    league_history only writes on LP change, so no row means no movement.
+    Accounts whose tier string absolute_lp doesn't know are skipped
+    rather than poisoning the sum.
+
+    Season-reset handling — a player's wins+losses total only ever grows
+    within a split, so a shrink marks a reset crossing:
+
+    - baseline -> first-in-week shrank: the account crossed a reset
+      BEFORE the week (late returner). Its baseline is old-ladder LP, so
+      the delta rebases to the first in-week snapshot — the week counts
+      new-ladder movement only. Doesn't count toward reset detection.
+      A baseline with UNKNOWN games (legacy row, NULL wins/losses) also
+      rebases: it can't be trusted across a possible reset, and one
+      slipping through once mis-measured a Silver placement climb as
+      +723 LP against a years-old snapshot.
+    - start -> last-in-week shrank: the reset happened INSIDE the week.
+      No comparable pair of snapshots exists (a placement demotion reads
+      as -700 LP), so the account is excluded and counted in the second
+      return value. The caller compares that count to RESET_MIN_ACCOUNTS
+      to decide the whole week was a reset week.
     """
     baselines = {row[0]: row for row in baseline_rows}
     firsts = {row[0]: row for row in first_in_week_rows}
     per_user: dict[int, dict] = {}
-    for puuid, user_id, display_name, league_username, tier, division, lp in last_in_week_rows:
+    reset_accounts = 0
+
+    def games(row: tuple) -> int | None:
+        if row[7] is None and row[8] is None:
+            return None  # legacy snapshot predating the wins/losses columns
+        return (row[7] or 0) + (row[8] or 0)
+
+    for row in last_in_week_rows:
+        puuid, user_id, display_name, league_username, tier, division, lp, wins, losses = row
         start = baselines.get(puuid) or firsts.get(puuid)
         if start is None:
             continue  # unreachable: a last-in-week row implies a first-in-week row
+        first = firsts.get(puuid)
+        if first is not None and start is not first:
+            start_games, first_games = games(start), games(first)
+            if start_games is None or (first_games is not None and first_games < start_games):
+                start = first  # crossed a reset (or untrustable baseline) — rebase
+        start_games, end_games = games(start), games(row)
+        if start_games is not None and end_games is not None and end_games < start_games:
+            reset_accounts += 1
+            continue
         try:
             delta = absolute_lp(tier, division, lp) - absolute_lp(start[4], start[5], start[6])
         except ValueError:
@@ -248,7 +295,7 @@ def net_lp_deltas(
         )
         entry["delta"] += delta
         entry["per_account"][league_username] = delta
-    return per_user
+    return per_user, reset_accounts
 
 
 def pick_lp_extreme(per_user: dict[int, dict], *, gain: bool) -> list[Winner]:
@@ -490,6 +537,8 @@ def build_ceremony_blocks(
     week_start: dt.date,
     results: dict[str, list[Winner]],
     header: str | None = None,
+    *,
+    season_reset: bool = False,
 ) -> list[str]:
     """Ceremony post as blocks for leaderboard.chunk_blocks.
 
@@ -497,6 +546,9 @@ def build_ceremony_blocks(
     number, one roast. Joint winners share a block, one detail line each.
     Every block ends with a newline so chunked messages get a blank line
     between awards.
+
+    ``season_reset``: swaps the LP awards' skip lines for the reset line
+    — their normal skip lines claim nobody moved, which would be false.
     """
     if header is None:
         header = f"\U0001f3c6 **Weekly Awards** — week of <t:{week_epoch(week_start)}:d>"
@@ -505,7 +557,12 @@ def build_ceremony_blocks(
         meta = AWARDS[award]
         winners = results.get(award) or []
         if not winners:
-            blocks.append(f"{meta.emoji} **{meta.title}** — no winner\n{meta.skip_line}\n")
+            skip = (
+                RESET_LP_SKIP_LINE
+                if season_reset and award in (LP_LOSS, LP_CHAD)
+                else meta.skip_line
+            )
+            blocks.append(f"{meta.emoji} **{meta.title}** — no winner\n{skip}\n")
             continue
         mentions = " & ".join(f"<@{winner.user_id}>" for winner in winners)
         if len(winners) == 1:
@@ -629,7 +686,7 @@ def _snapshot_query(where: str, order: str) -> str:
         + """
         SELECT DISTINCT ON (lh.puuid)
                lh.puuid, t.discord_user_id, t.display_name, t.league_username,
-               lh.tier, lh.division, lh.lp
+               lh.tier, lh.division, lh.lp, lh.wins, lh.losses
         FROM league_history lh
             JOIN tracked t ON t.puuid = lh.puuid
         WHERE lh.queue = %(queue)s
@@ -789,13 +846,23 @@ async def fetch_int_rows(week_start: dt.datetime, week_end: dt.datetime) -> list
 
 async def compute_all_awards(
     week_start: dt.datetime, week_end: dt.datetime
-) -> dict[str, list[Winner]]:
-    """All five awards for [week_start, week_end) — empty list = skipped."""
+) -> tuple[dict[str, list[Winner]], bool]:
+    """All five awards for [week_start, week_end) — empty list = skipped.
+
+    Second return: True when the reset happened inside the window
+    (RESET_MIN_ACCOUNTS+ accounts' games totals shrank in-week). On a
+    reset week the LP awards are skipped outright — some players' deltas
+    would be old-ladder tail movement and others' new-ladder placement
+    climbs, which isn't a comparable field — and the ceremony swaps in
+    the reset skip line. The match-derived awards (volume, duo, int) are
+    unaffected by a reset: games played are games played.
+    """
     baseline, first, last = await fetch_lp_snapshot_rows(week_start, week_end)
-    deltas = net_lp_deltas(baseline, first, last)
-    return {
-        LP_LOSS: pick_lp_extreme(deltas, gain=False),
-        LP_CHAD: pick_lp_extreme(deltas, gain=True),
+    deltas, reset_accounts = net_lp_deltas(baseline, first, last)
+    season_reset = reset_accounts >= RESET_MIN_ACCOUNTS
+    results = {
+        LP_LOSS: [] if season_reset else pick_lp_extreme(deltas, gain=False),
+        LP_CHAD: [] if season_reset else pick_lp_extreme(deltas, gain=True),
         PUSSY: pick_volume_collapse(await fetch_volume_rows(week_start, week_end)),
         DUO_LEECH: pick_duo_leech(
             await fetch_duo_rows(week_start, week_end),
@@ -803,3 +870,4 @@ async def compute_all_awards(
         ),
         INT: pick_int(await fetch_int_rows(week_start, week_end)),
     }
+    return results, season_reset

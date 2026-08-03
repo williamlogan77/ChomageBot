@@ -6,7 +6,7 @@ import sys
 
 import discord
 from discord.ext.commands import Bot
-from utils import config, db
+from utils import config, db, seasons
 
 # .env loading + every env read lives in utils/config.py.
 
@@ -101,6 +101,12 @@ async def main(my_token: str) -> None:
     # schema is already current.
     await db.apply_schema("./db/setup.postgres.sql")
     logging.getLogger().info("Database schema applied")
+
+    # Backfill/refresh auto-detected season boundaries. Idempotent; also
+    # re-triggered live when the rank loop sees a games-total shrink.
+    new_boundaries = await seasons.sync_seasons()
+    if new_boundaries:
+        logging.getLogger().info(f"Seasons table: recorded {new_boundaries} new boundary(ies)")
 
     server_id = config.guild_id()
 

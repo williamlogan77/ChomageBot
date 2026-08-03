@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chomage dashboard</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, sans-serif; max-width: 960px; margin: 2rem auto; padding: 0 1rem; }
+    table { border-collapse: collapse; width: 100%; margin: 0.5rem 0 1.5rem; }
+    th, td { text-align: left; padding: 0.35rem 0.6rem; border-bottom: 1px solid #8884; }
+    h2 { margin-top: 2rem; }
+    header { display: flex; justify-content: space-between; align-items: baseline; }
+    .error { color: #c0392b; }
+    input, button { padding: 0.3rem 0.5rem; }
+    form.inline { display: flex; gap: 0.5rem; }
+  </style>
+</head>
+<body>
+{% block content %}{% endblock %}
+</body>
+</html>

@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block content %}
+<header>
+  <h1>Chomage dashboard</h1>
+  <p>{{ user.name }}{% if user.is_admin %} (admin){% endif %} — <a href="/logout">log out</a></p>
+</header>
+{% if request.query_params.get("error") == "admin" %}<p class="error">Admins only.</p>{% endif %}
+
+<h2>Seasons (auto-detected ladder resets)</h2>
+<table>
+  <tr><th>Season started</th><th>Detected</th></tr>
+  {% for started_at, detected_at in seasons %}
+  <tr><td>{{ started_at.strftime("%Y-%m-%d %H:%M") }}</td><td>{{ detected_at.strftime("%Y-%m-%d %H:%M") }}</td></tr>
+  {% endfor %}
+</table>
+
+<h2>Latest weekly awards</h2>
+<table>
+  <tr><th>Week</th><th>Award</th><th>Winner</th><th>Value</th></tr>
+  {% for week_start, award, name, value in awards %}
+  <tr><td>{{ week_start }}</td><td>{{ award }}</td><td>{{ name }}</td><td>{{ value }}</td></tr>
+  {% endfor %}
+</table>
+
+<h2>Tracked players ({{ players | length }})</h2>
+<table>
+  <tr><th>League account</th><th>Discord user id</th></tr>
+  {% for name, user_id in players %}
+  <tr><td>{{ name }}</td><td>{{ user_id }}</td></tr>
+  {% endfor %}
+</table>
+
+<h2>Bot config</h2>
+<table>
+  <tr><th>Key</th><th>Value</th><th>Updated</th></tr>
+  {% for key, value, updated_at in bot_config %}
+  <tr><td>{{ key }}</td><td>{{ value }}</td><td>{{ updated_at.strftime("%Y-%m-%d %H:%M") }}</td></tr>
+  {% endfor %}
+</table>
+{% if user.is_admin %}
+<form class="inline" method="post" action="/config">
+  <input name="key" placeholder="key" required>
+  <input name="value" placeholder="value" required>
+  <button type="submit">Set</button>
+</form>
+{% endif %}
+{% endblock %}

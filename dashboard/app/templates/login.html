@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Chomage dashboard</h1>
+{% if error == "denied" %}<p class="error">Login rejected — you need to be a member of the server.</p>{% endif %}
+{% if error == "state" %}<p class="error">Login flow expired — try again.</p>{% endif %}
+<p><a href="/login">Log in with Discord</a></p>
+{% endblock %}

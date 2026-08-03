@@ -368,16 +368,35 @@ async def wipe_and_post(channel, content, log) -> None:
     a 400 after the wipe, leaving the channel empty. Boards are ping-free:
     silent sends, no mentions resolved. Empty content still wipes but
     posts nothing.
+
+    Every call logs the target channel (name + id) and the wipe/post
+    counts: boards land in env- or config-selected channels, and a stale
+    channel value is indistinguishable from success without the id in
+    the log.
     """
+    target = f"#{getattr(channel, 'name', '?')} ({getattr(channel, 'id', '?')})"
     blocks = [content] if isinstance(content, str) else [b for b in content if b]
+    deleted = 0
     try:
         async for message in channel.history():
             await message.delete()
+            deleted += 1
     except discord.errors.Forbidden:
-        log.warning("Missing permissions to delete messages, skipping cleanup")
-    for message_text in chunk_blocks(blocks):
-        await channel.send(
-            message_text,
-            silent=True,
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
+        log.warning(f"Missing permissions to delete messages in {target}, skipping cleanup")
+    sent = 0
+    messages = chunk_blocks(blocks)
+    for message_text in messages:
+        try:
+            await channel.send(
+                message_text,
+                silent=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except discord.HTTPException as exc:
+            log.error(
+                f"Board send to {target} failed on message {sent + 1} of "
+                f"{len(messages)} ({len(message_text)} chars): {exc!r}"
+            )
+            raise
+        sent += 1
+    log.info(f"Board refresh in {target}: wiped {deleted}, posted {sent} message(s)")

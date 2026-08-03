@@ -16,10 +16,14 @@ Postgres notes for query authors:
 
 from __future__ import annotations
 
+import logging
+import re
 from contextlib import asynccontextmanager
 
 from psycopg_pool import AsyncConnectionPool
 from utils import config
+
+log = logging.getLogger(__name__)
 
 # Survive auto_reload's importlib.reload of utils modules: re-executing this
 # module body must not orphan a live pool (leaked connections would pile up
@@ -37,6 +41,10 @@ async def get_pool() -> AsyncConnectionPool:
         pool = AsyncConnectionPool(dsn(), min_size=1, max_size=5, open=False)
         await pool.open(wait=True, timeout=30.0)
         _pool = pool
+        # Credentials stripped: "postgresql://user:pass@host/db" logs as
+        # "postgresql://host/db". One line per process answers "which
+        # database is this bot actually on".
+        log.info(f"Postgres pool opened: {re.sub(r'//[^@/]*@', '//', dsn())}")
     return _pool
 
 

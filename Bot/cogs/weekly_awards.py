@@ -47,6 +47,14 @@ class WeeklyAwards(commands.Cog):
     def __init__(self, bot: MyDiscordBot):
         self.bot = bot
         self.bot.logging.info(f"{__name__} loaded")
+        # Log the live env value on every (re)load: env vars are frozen at
+        # container creation, so a .env edit followed by a plain restart
+        # leaves the old value running — this line is how you catch it.
+        cabinet_id = config.awards_channel_id()
+        self.bot.logging.info(
+            "Trophy cabinet channel (awards_channel_id env): "
+            + (str(cabinet_id) if cabinet_id else "not set — cabinet posting disabled")
+        )
         self.awards_tick.start()
         # Watchdog input, same contract as FetchFromRiot.post_ranks_last_fired
         # (cogs/heartbeat.py reloads us if this goes stale).
@@ -54,6 +62,9 @@ class WeeklyAwards(commands.Cog):
         # Log the missing-cabinet-channel notice once per cog instance,
         # not once per ceremony (mirrors the Ranked 5s inert pattern).
         self._warned_no_cabinet = False
+        # Week whose already-posted skip has been logged — once per week,
+        # not every 15-minute tick all Monday.
+        self._skip_logged_week: dt.date | None = None
 
     def cog_unload(self) -> None:
         # discord.py does NOT cancel @tasks.loop tasks on cog unload —
@@ -111,6 +122,10 @@ class WeeklyAwards(commands.Cog):
             "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()",
             (MARKER_KEY, week_start.isoformat()),
         )
+        self.bot.logging.info(
+            f"Recorded {len(rows)} weekly award winner(s) for week of {week_start}; "
+            f"{MARKER_KEY} -> {week_start.isoformat()}"
+        )
 
     # ------------------------------------------------------------- ceremony
 
@@ -123,7 +138,10 @@ class WeeklyAwards(commands.Cog):
         results = await awards.compute_all_awards(week_start, week_end)
         blocks = awards.build_ceremony_blocks(week_start.date(), results)
 
-        self.bot.logging.info(f"Posting weekly awards for week of {week_start.date()}")
+        self.bot.logging.info(
+            f"Posting weekly awards for week of {week_start.date()} "
+            f"to #{getattr(channel, 'name', '?')} ({CEREMONY_CHANNEL})"
+        )
         for message_text in leaderboard.chunk_blocks(blocks):
             await channel.send(
                 message_text,
@@ -191,7 +209,11 @@ class WeeklyAwards(commands.Cog):
         )
 
         blocks = awards.build_cabinet_blocks(latest_week, latest_rows, count_rows)
-        self.bot.logging.info("Posting weekly awards trophy cabinet")
+        self.bot.logging.info(
+            f"Posting weekly awards trophy cabinet to #{getattr(channel, 'name', '?')} "
+            f"({channel_id}) — latest week {latest_week}: {len(latest_rows)} row(s), "
+            f"all-time: {len(count_rows)} row(s)"
+        )
         await leaderboard.wipe_and_post(channel, blocks, self.bot.logging)
         return True
 
@@ -210,6 +232,13 @@ class WeeklyAwards(commands.Cog):
             return
         week_start, week_end = awards.previous_week_bounds(now_london)
         if await self._already_posted(week_start.date()):
+            if self._skip_logged_week != week_start.date():
+                self._skip_logged_week = week_start.date()
+                self.bot.logging.info(
+                    f"Weekly awards for week of {week_start.date()} already posted — "
+                    "ceremony skipped (the cabinet reposts only after a ceremony or "
+                    "/refresh_awards_cabinet)"
+                )
             return
         await self._run_ceremony(week_start, week_end)
 

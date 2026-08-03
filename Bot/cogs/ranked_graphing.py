@@ -42,7 +42,6 @@ class LeagueGraphs(commands.Cog):
             "SELECT leagueId FROM league_players WHERE league_username = %s",
             (league_name,),
         )
-        print(summonerid)
         if not summonerid:
             await ctx.response.send_message(f"{league_name} does not exist in the database")
             return

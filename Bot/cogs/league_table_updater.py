@@ -58,15 +58,16 @@ class FetchFromRiot(commands.Cog):
     async def fetch_users_rank(self, users):
         users_ranks = {}
         seen: set[str] = set()
+        failed = 0
 
         # League-entries uses platform routing (euw1), not regional (europe).
         for puuid, name, user_id in users:
             if puuid in seen:
                 continue
             seen.add(puuid)
-            self.bot.logging.info(f"Fetching rank for: {name}")
             user_rank = await get_league_entries(puuid)
             if user_rank is None:
+                failed += 1
                 self.bot.logging.error(f"Failed to fetch rank for {name}")
                 continue
 
@@ -89,6 +90,13 @@ class FetchFromRiot(commands.Cog):
             else:
                 fivev5 = []
 
+        # One DEBUG summary per cycle replaces the old per-account INFO
+        # line (~14 lines every 2 minutes). Failures still log per account
+        # at ERROR above; loop liveness is the heartbeat cog's job.
+        self.bot.logging.debug(
+            f"Rank fetch cycle: {len(seen) - failed}/{len(seen)} accounts fetched, "
+            f"{len(users_ranks)} on board"
+        )
         return users_ranks
 
     # @tasks.loop(seconds=30)
@@ -164,6 +172,10 @@ class FetchFromRiot(commands.Cog):
         extra = ""
         if games > 0 and deaths > 0 and (kills / deaths) < 1.0:
             extra = f" {kills}/{deaths}"
+        self.bot.logging.info(
+            f"Streak ping: user {user_id} on a {streak}-loss streak -> "
+            f"#general ({STREAK_PING_CHANNEL})"
+        )
         # \U0001FAF5 = pointing at viewer, \U0001F602 = face with tears of joy
         await channel.send(f"\U0001faf5\U0001f602 <@{user_id}>{extra}")
 
@@ -215,7 +227,13 @@ class FetchFromRiot(commands.Cog):
                         self.ranked_dict[user]["leaguePoints"]
                         != self.previous_ranks[user]["leaguePoints"]
                     ):
-                        print(f"{user} updated", flush=True)
+                        old = self.previous_ranks[user]
+                        new = self.ranked_dict[user]
+                        self.bot.logging.info(
+                            f"LP change: {user} "
+                            f"{old['tier']} {old['rank']} {old['leaguePoints']}lp -> "
+                            f"{new['tier']} {new['rank']} {new['leaguePoints']}lp"
+                        )
                         await self.update_table(user, self.ranked_dict[user])
                         updated_users.append(user)
 
@@ -364,14 +382,13 @@ class FetchFromRiot(commands.Cog):
 
     # Needs updating to grab last match from the table
     async def update_table(self, user, user_stats_dict):
-        # Keeps this board's historical logging/except shape (including the
-        # harmless "Exception as list index out of range" info line on a
-        # player's first-ever insert) around the shared history helpers.
+        # Keeps this board's historical except shape (a player's first-ever
+        # insert has no prior row and IndexErrors the W/L compare) around
+        # the shared history helpers.
         try:
-            self.bot.logging.info(f"updating table, logging {user_stats_dict}")
             last_values = await leaderboard.latest_history_wl(user_stats_dict["puuid"], SOLO_QUEUE)
         except Exception as e:
-            self.bot.logging.error(f"Failed to update table with error: {e}")
+            self.bot.logging.error(f"Failed to read history for {user}: {e!r}")
             return
         try:
             if last_values[0] == (
@@ -379,9 +396,15 @@ class FetchFromRiot(commands.Cog):
                 user_stats_dict["losses"],
             ):
                 return
-        except Exception as e:
-            self.bot.logging.info(f"Exception as {e}")
+        except Exception:
+            self.bot.logging.info(f"No prior history for {user} — first snapshot")
 
+        self.bot.logging.info(
+            f"History snapshot: {user} "
+            f"{user_stats_dict['tier']} {user_stats_dict['rank']} "
+            f"{user_stats_dict['leaguePoints']}lp "
+            f"{user_stats_dict['wins']}W/{user_stats_dict['losses']}L"
+        )
         await leaderboard.insert_history_snapshot(user_stats_dict, SOLO_QUEUE)
         return
 

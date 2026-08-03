@@ -22,11 +22,11 @@ class MyDiscordBot(Bot):
         self.guildid = serverid
 
         riot_key = config.riot_api_key()
-        # Log API key info (first/last few chars only for security). All
-        # Riot calls go through utils/riot_client (shared rate budget).
+        # Presence only — no fragment of the key belongs in logs (CodeQL
+        # clear-text-logging). All Riot calls go through utils/riot_client
+        # (shared rate budget), which errors per-request on a bad key.
         if riot_key:
-            key_preview = f"{riot_key[:10]}...{riot_key[-4:]}" if len(riot_key) > 14 else "***"
-            logging.getLogger().info(f"Riot API key loaded: {key_preview}")
+            logging.getLogger().info("Riot API key loaded")
         else:
             logging.getLogger().warning(
                 "Riot API key not found in environment — Riot fetches will fail"

@@ -85,7 +85,13 @@ async def _wait_for_slot() -> None:
                 return
 
         # Release the lock while sleeping so other coroutines can re-check.
-        log.debug(f"Riot rate limit reached, waiting {wait:.2f}s")
+        # Long waits get INFO: sustained budget contention is what froze
+        # post_ranks during the position backfill, and DEBUG lines are
+        # invisible at the prod log level.
+        if wait > 5.0:
+            log.info(f"Riot budget contended: waiting {wait:.1f}s for a slot")
+        else:
+            log.debug(f"Riot rate limit reached, waiting {wait:.2f}s")
         await asyncio.sleep(wait)
 
 
@@ -130,6 +136,7 @@ async def _get_json(url: str, params: dict | None = None) -> tuple[int, list | d
                 continue
             return (0, None)
 
+    log.error(f"Riot 429 retries exhausted for {url}")
     return (429, None)
 
 

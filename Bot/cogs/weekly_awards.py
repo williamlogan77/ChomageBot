@@ -140,9 +140,7 @@ class WeeklyAwards(commands.Cog):
             self.bot.logging.info(
                 "Season reset detected in awarded week — cross-reset LP deltas excluded"
             )
-        blocks = awards.build_ceremony_blocks(
-            week_start.date(), results, season_reset=season_reset
-        )
+        blocks = awards.build_ceremony_blocks(week_start.date(), results, season_reset=season_reset)
 
         self.bot.logging.info(
             f"Posting weekly awards for week of {week_start.date()} "

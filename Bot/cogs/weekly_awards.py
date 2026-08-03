@@ -135,8 +135,14 @@ class WeeklyAwards(commands.Cog):
             # Nothing recorded — the next tick retries the whole ceremony.
             return
 
-        results = await awards.compute_all_awards(week_start, week_end)
-        blocks = awards.build_ceremony_blocks(week_start.date(), results)
+        results, season_reset = await awards.compute_all_awards(week_start, week_end)
+        if season_reset:
+            self.bot.logging.info(
+                "Season reset detected in awarded week — cross-reset LP deltas excluded"
+            )
+        blocks = awards.build_ceremony_blocks(
+            week_start.date(), results, season_reset=season_reset
+        )
 
         self.bot.logging.info(
             f"Posting weekly awards for week of {week_start.date()} "
@@ -269,12 +275,14 @@ class WeeklyAwards(commands.Cog):
         await ctx.response.defer(ephemeral=True)
         now_london = dt.datetime.now(awards.LONDON)
         week_start, _week_end = awards.week_bounds(now_london)
-        results = await awards.compute_all_awards(week_start, now_london)
+        results, season_reset = await awards.compute_all_awards(week_start, now_london)
         header = (
             f"\U0001f3c6 **Weekly Awards — preview** — week of "
             f"<t:{awards.week_epoch(week_start.date())}:d> so far (nothing recorded)"
         )
-        blocks = awards.build_ceremony_blocks(week_start.date(), results, header=header)
+        blocks = awards.build_ceremony_blocks(
+            week_start.date(), results, header=header, season_reset=season_reset
+        )
         for message_text in leaderboard.chunk_blocks(blocks):
             await ctx.followup.send(
                 message_text,

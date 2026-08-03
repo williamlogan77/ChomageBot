@@ -26,14 +26,15 @@ class MyDiscordBot(Bot):
         # Riot calls go through utils/riot_client (shared rate budget).
         if riot_key:
             key_preview = f"{riot_key[:10]}...{riot_key[-4:]}" if len(riot_key) > 14 else "***"
-            print(f"Riot API Key loaded: {key_preview}")
+            logging.getLogger().info(f"Riot API key loaded: {key_preview}")
         else:
-            print("WARNING: Riot API Key not found in environment variables!")
+            logging.getLogger().warning(
+                "Riot API key not found in environment — Riot fetches will fail"
+            )
 
         self.logging: logging.Logger = None
 
     async def setup_hook(self) -> None:
-        discord.utils.setup_logging()
         self.logging = logging.getLogger()
 
         for file in glob.glob("./cogs/*.py"):
@@ -42,7 +43,6 @@ class MyDiscordBot(Bot):
             await self.load_extension(f"cogs.{cog_name}")
 
     async def sync_discord(self) -> None:
-        print("Syncing users")
         guild = await self.fetch_guild(self.guildid)
         # Drain the Discord API iterators BEFORE touching the pool so no
         # pooled connection (max 5) sits pinned across paginated network
@@ -71,6 +71,7 @@ class MyDiscordBot(Bot):
                 if str(channel.type) != "category"
             ],
         )
+        self.logging.info(f"Synced {len(members)} members and {len(channels)} channels")
         return
 
     async def on_connect(self) -> None:
@@ -89,11 +90,17 @@ class MyDiscordBot(Bot):
 
 
 async def main(my_token: str) -> None:
+    # Root logging must exist before anything else runs — setup_hook is
+    # too late for boot-time lines (pool open, schema apply, key check).
+    # setup_hook must NOT call setup_logging again: it appends a second
+    # handler and every line doubles.
+    discord.utils.setup_logging()
+
     # Apply ./db/setup.postgres.sql on every boot. Safe — every statement
     # uses CREATE TABLE/INDEX IF NOT EXISTS, so this is a no-op when the
     # schema is already current.
     await db.apply_schema("./db/setup.postgres.sql")
-    print("Database schema applied")
+    logging.getLogger().info("Database schema applied")
 
     server_id = config.guild_id()
 

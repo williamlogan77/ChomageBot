@@ -4,7 +4,7 @@ Within a split a player's league-entries wins+losses total only ever
 grows, so a tracked account whose games total shrinks between two
 consecutive league_history snapshots crossed a ladder reset. A single
 account can shrink for other reasons (region transfer, API quirk);
-awards.RESET_MIN_ACCOUNTS distinct accounts shrinking within one
+RESET_MIN_ACCOUNTS distinct accounts shrinking within one
 CLUSTER_WINDOW marks a real reset. Validated against 2023-2026 history:
 real resets (Jan/May/Sept 2024, Jan 2026) cluster at 4-8 accounts over
 up to four weeks as players trickle back into placements, noise never
@@ -29,9 +29,16 @@ import datetime as dt
 import logging
 
 from utils import db
-from utils.awards import RESET_MIN_ACCOUNTS
 
 log = logging.getLogger(__name__)
+
+# Distinct shrinking accounts required before shrink events count as a
+# real ladder reset. One account can shrink for personal reasons (region
+# transfer, API quirk); two agreeing is a split reset. Validated against
+# 2024-2026 history: real resets cluster at 4-8 accounts, noise never
+# exceeds one. utils/awards.py shares this threshold for its own
+# in-window shrink count.
+RESET_MIN_ACCOUNTS = 2
 
 # Shrink events this close together belong to the same reset — players
 # trickle back into placements over weeks (Sept 2024 spanned four).
@@ -110,3 +117,20 @@ async def current_season_start() -> dt.datetime | None:
     """started_at of the latest detected season, or None before any."""
     row = await db.fetchone("SELECT MAX(started_at) FROM seasons")
     return row[0] if row is not None else None
+
+
+async def reset_within(start: dt.datetime, end: dt.datetime) -> bool:
+    """True when a recorded season boundary falls inside [start, end).
+
+    The weekly awards check this alongside their own in-window shrink
+    count. A reset early in the awarded week leaves most accounts' first
+    in-week snapshot already post-reset — the LP delta rebase absorbs
+    those shrinks, so the shrink count alone can miss the reset — but
+    the boundary row (written live by the rank loop the moment the first
+    player re-places) still lands inside the week.
+    """
+    row = await db.fetchone(
+        "SELECT 1 FROM seasons WHERE started_at >= %s AND started_at < %s LIMIT 1",
+        (start, end),
+    )
+    return row is not None

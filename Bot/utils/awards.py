@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from fractions import Fraction
 from zoneinfo import ZoneInfo
 
-from utils import db
+from utils import db, seasons
 from utils.riot_client import RANKED_SOLO_QUEUE_ID
 
 LONDON = ZoneInfo("Europe/London")
@@ -37,14 +37,6 @@ DUO_LEECH = "duo_leech"
 INT = "int_of_the_week"
 
 AWARD_ORDER = (LP_LOSS, LP_CHAD, PUSSY, DUO_LEECH, INT)
-
-# Season-reset detection: within a split a player's wins+losses total only
-# ever grows, so an account whose games total SHRINKS across the week
-# straddled a split reset. One shrinking account could be a region
-# transfer or API quirk; this many agreeing means the ladder itself reset
-# (validated against 2024-2026 history: real resets cluster at 4-8
-# accounts, noise never exceeds 1).
-RESET_MIN_ACCOUNTS = 2
 
 # Replaces the LP awards' skip lines on a reset week — the normal lines
 # ("Disgustingly competent") would read as a stats claim that's wrong.
@@ -259,8 +251,9 @@ def net_lp_deltas(
     - start -> last-in-week shrank: the reset happened INSIDE the week.
       No comparable pair of snapshots exists (a placement demotion reads
       as -700 LP), so the account is excluded and counted in the second
-      return value. The caller compares that count to RESET_MIN_ACCOUNTS
-      to decide the whole week was a reset week.
+      return value. The caller compares that count to
+      seasons.RESET_MIN_ACCOUNTS to decide the whole week was a reset
+      week.
     """
     baselines = {row[0]: row for row in baseline_rows}
     firsts = {row[0]: row for row in first_in_week_rows}
@@ -849,17 +842,25 @@ async def compute_all_awards(
 ) -> tuple[dict[str, list[Winner]], bool]:
     """All five awards for [week_start, week_end) — empty list = skipped.
 
-    Second return: True when the reset happened inside the window
-    (RESET_MIN_ACCOUNTS+ accounts' games totals shrank in-week). On a
-    reset week the LP awards are skipped outright — some players' deltas
-    would be old-ladder tail movement and others' new-ladder placement
-    climbs, which isn't a comparable field — and the ceremony swaps in
-    the reset skip line. The match-derived awards (volume, duo, int) are
-    unaffected by a reset: games played are games played.
+    Second return: True when the reset happened inside the window, from
+    either of two signals — the in-window shrink count reaching
+    seasons.RESET_MIN_ACCOUNTS, or a recorded seasons-table boundary
+    falling inside the window. Both are needed: a reset early in the
+    week leaves most accounts' first in-week snapshot already
+    post-reset, which the late-returner rebase absorbs (shrink count
+    stays low), but the boundary row written live by the rank loop still
+    lands inside the week. On a reset week the LP awards are skipped
+    outright — some players' deltas would be old-ladder tail movement
+    and others' new-ladder placement climbs, which isn't a comparable
+    field — and the ceremony swaps in the reset skip line. The
+    match-derived awards (volume, duo, int) are unaffected by a reset:
+    games played are games played.
     """
     baseline, first, last = await fetch_lp_snapshot_rows(week_start, week_end)
     deltas, reset_accounts = net_lp_deltas(baseline, first, last)
-    season_reset = reset_accounts >= RESET_MIN_ACCOUNTS
+    season_reset = reset_accounts >= seasons.RESET_MIN_ACCOUNTS or await seasons.reset_within(
+        week_start, week_end
+    )
     results = {
         LP_LOSS: [] if season_reset else pick_lp_extreme(deltas, gain=False),
         LP_CHAD: [] if season_reset else pick_lp_extreme(deltas, gain=True),

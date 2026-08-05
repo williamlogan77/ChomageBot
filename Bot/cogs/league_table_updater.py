@@ -74,8 +74,10 @@ class FetchFromRiot(commands.Cog):
         # the old instance's loop running next to the new one's.
         self.post_ranks.cancel()
 
-    async def _entries_skip_set(self) -> set[str]:
+    async def _entries_skip_set(self) -> tuple[set[str], set[str]]:
         """Players whose entries can't have changed since the last fetch.
+
+        Returns ``(skip, force_fresh)`` for fetch_users_rank.
 
         LP only moves when a ranked game ends, so a player is skippable
         (serve the stale entries cache) unless a game of theirs just
@@ -91,28 +93,23 @@ class FetchFromRiot(commands.Cog):
         LP penalties (no game is ever created for those) and anything
         the signals miss; every failure path fails open to fetching
         everyone.
+
+        ``force_fresh`` (the pair-diff/fast-path finishers) must BYPASS
+        the entries TTL cache, not merely skip the stale allowance: a
+        game ending seconds after a normal fetch leaves a sub-TTL cache
+        entry holding pre-game-end LP, and serving it would defeat the
+        very refresh the fast path triggered. The ingest-lagged
+        fresh_match signal doesn't need this — by the time it fires, any
+        sub-TTL cache entry postdates the game end.
         """
-        # Fast-path announcements are consumed on every branch — a sweep
-        # fetches everyone anyway, so they must not survive into later
-        # cycles and mask as still-pending.
+        # Finish signals are collected BEFORE any branch decision so no
+        # path — sweep included — can consume and then discard them: a
+        # finisher whose signal lands on a sweep cycle must still bypass
+        # the TTL cache, or the sweep's fetch-all serves their ≤130s-old
+        # pre-game-end entry.
         pending = self._pending_finished
         self._pending_finished = set()
-        if time.monotonic() - self._entries_sweep_at >= ENTRIES_FULL_SWEEP_SECONDS:
-            self._entries_sweep_at = time.monotonic()
-            # Keep the live-pair snapshot even on sweep cycles: wiping it
-            # made a game that ended before the next cycle invisible to
-            # the pair diff (stale ranks right after a sweep/reload).
-            try:
-                self._prev_live = {
-                    (row[0], row[1])
-                    for row in await db.fetchall(
-                        "SELECT DISTINCT puuid, game_id FROM live_games "
-                        "WHERE seen_at > now() - interval '6 minutes'"
-                    )
-                }
-            except Exception:
-                self._prev_live = set()
-            return set()
+        live_ok = True
         try:
             live = {
                 (row[0], row[1])
@@ -125,6 +122,24 @@ class FetchFromRiot(commands.Cog):
             # even when the player is already in their NEXT game.
             just_finished = {puuid for puuid, _ in self._prev_live - live}
             self._prev_live = live
+        except Exception:
+            # live_games unavailable — the pair diff contributes nothing
+            # this cycle, but fast-path announcements are authoritative
+            # and must still force a cache bypass.
+            just_finished = set()
+            live_ok = False
+        force_fresh = just_finished | pending
+
+        if time.monotonic() - self._entries_sweep_at >= ENTRIES_FULL_SWEEP_SECONDS:
+            self._entries_sweep_at = time.monotonic()
+            return set(), force_fresh
+        if not live_ok:
+            # Without live tracking the gate can't see games end, so
+            # skipping anyone would serve stale LP until the (slower)
+            # ingest signal. Fail open: fetch everyone, as before gating.
+            self.bot.logging.warning("live_games unavailable — entries gating fails open")
+            return set(), force_fresh
+        try:
             fresh_match = {
                 row[0]
                 for row in await db.fetchall(
@@ -141,8 +156,8 @@ class FetchFromRiot(commands.Cog):
             }
         except Exception as exc:
             self.bot.logging.warning(f"Entries gating unavailable, fetching all: {exc!r}")
-            return set()
-        return tracked - just_finished - fresh_match - pending
+            return set(), force_fresh
+        return tracked - fresh_match - force_fresh, force_fresh
 
     def note_finished(self, puuids) -> None:
         """Fast-path hook for the live-games cog: these players' games just
@@ -174,7 +189,12 @@ class FetchFromRiot(commands.Cog):
         marker = row[0] if row and row[0] else "\U0001f534"
         return live, f" {marker}"
 
-    async def fetch_users_rank(self, users, stale_ok: set[str] = frozenset()):
+    async def fetch_users_rank(
+        self,
+        users,
+        stale_ok: set[str] = frozenset(),
+        force_fresh: set[str] = frozenset(),
+    ):
         users_ranks = {}
         seen: set[str] = set()
         failed = 0
@@ -186,7 +206,9 @@ class FetchFromRiot(commands.Cog):
                 continue
             seen.add(puuid)
             allow_stale = puuid in stale_ok
-            user_rank = await get_league_entries(puuid, allow_stale=allow_stale)
+            user_rank = await get_league_entries(
+                puuid, fresh=puuid in force_fresh, allow_stale=allow_stale
+            )
             if allow_stale:
                 served_stale += 1
             if user_rank is None:
@@ -235,7 +257,8 @@ class FetchFromRiot(commands.Cog):
         # Per-player API failures are handled inside fetch_users_rank
         # (riot_client returns None rather than raising). Players whose
         # entries can't have moved are served from the stale cache.
-        self.ranked_dict = await self.fetch_users_rank(rows, await self._entries_skip_set())
+        skip, force_fresh = await self._entries_skip_set()
+        self.ranked_dict = await self.fetch_users_rank(rows, skip, force_fresh)
         return
 
     async def get_last_five_games(self, puuid):

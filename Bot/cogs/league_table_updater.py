@@ -109,6 +109,7 @@ class FetchFromRiot(commands.Cog):
         # pre-game-end entry.
         pending = self._pending_finished
         self._pending_finished = set()
+        live_ok = True
         try:
             live = {
                 (row[0], row[1])
@@ -126,10 +127,17 @@ class FetchFromRiot(commands.Cog):
             # this cycle, but fast-path announcements are authoritative
             # and must still force a cache bypass.
             just_finished = set()
+            live_ok = False
         force_fresh = just_finished | pending
 
         if time.monotonic() - self._entries_sweep_at >= ENTRIES_FULL_SWEEP_SECONDS:
             self._entries_sweep_at = time.monotonic()
+            return set(), force_fresh
+        if not live_ok:
+            # Without live tracking the gate can't see games end, so
+            # skipping anyone would serve stale LP until the (slower)
+            # ingest signal. Fail open: fetch everyone, as before gating.
+            self.bot.logging.warning("live_games unavailable — entries gating fails open")
             return set(), force_fresh
         try:
             fresh_match = {

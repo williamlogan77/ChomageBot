@@ -144,6 +144,21 @@ create table if not exists weekly_awards (
     unique (week_start, award, discord_user_id)
 );
 
+-- Live (spectator-v5) games for tracked players (cogs/live_games.py):
+-- one row per (game, tracked player), upserted each poll while the game
+-- runs and pruned by staleness once it ends. payload is the raw
+-- spectator response (participants, bans, clock) — the dashboard's
+-- /live page renders straight from it.
+create table if not exists live_games (
+    game_id BIGINT not null,
+    puuid TEXT not null,
+    queue_id INTEGER,
+    game_start TIMESTAMPTZ,
+    payload JSONB,
+    seen_at TIMESTAMPTZ not null default now(),
+    primary key (game_id, puuid)
+);
+
 -- Auto-detected season/split boundaries (utils/seasons.py): one row per
 -- ladder reset, derived from league_history games totals shrinking.
 -- started_at is the first post-reset snapshot observed — Riot's actual

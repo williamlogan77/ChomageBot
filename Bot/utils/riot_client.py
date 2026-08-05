@@ -95,13 +95,17 @@ async def _wait_for_slot() -> None:
         await asyncio.sleep(wait)
 
 
-async def _get_json(url: str, params: dict | None = None) -> tuple[int, list | dict | None]:
+async def _get_json(
+    url: str, params: dict | None = None, *, quiet_404: bool = False
+) -> tuple[int, list | dict | None]:
     """Rate-limited GET returning (status, parsed JSON or None).
 
     Internal — callers use the endpoint-specific wrappers below so they get
     typed return values instead of a bare ``list | dict``.
 
     On 429 honours ``Retry-After`` with small jitter and retries internally.
+    ``quiet_404``: for endpoints where 404 is an expected answer, not a
+    failure (spectator's "not in a game") — skips the error log.
     """
     riot_key = config.riot_api_key()
     if not riot_key:
@@ -116,6 +120,8 @@ async def _get_json(url: str, params: dict | None = None) -> tuple[int, list | d
                 async with session.get(url, params=params) as r:
                     if r.status == 200:
                         return (r.status, await r.json())
+                    if r.status == 404 and quiet_404:
+                        return (r.status, None)
                     if r.status == 429:
                         retry_after = int(r.headers.get("Retry-After", 10))
                         # Jitter so concurrent 429s don't retry in lockstep.
@@ -214,6 +220,20 @@ async def get_account_by_puuid(puuid: str) -> dict | None:
     """Account-v1 lookup by puuid (current gameName/tagLine). Regional host."""
     url = f"{REGION_HOST}/riot/account/v1/accounts/by-puuid/{puuid}"
     status, body = await _get_json(url)
+    if status != 200 or not isinstance(body, dict):
+        return None
+    return body
+
+
+async def get_active_game(puuid: str) -> dict | None:
+    """Spectator-v5 live game for a player, or None when not in one.
+
+    404 is the API's way of saying "not currently in a game" — the
+    overwhelmingly common answer — so it's handled quietly rather than
+    logged as an error. Platform host (euw1), like league entries.
+    """
+    url = f"{PLATFORM_HOST}/lol/spectator/v5/active-games/by-summoner/{puuid}"
+    status, body = await _get_json(url, quiet_404=True)
     if status != 200 or not isinstance(body, dict):
         return None
     return body

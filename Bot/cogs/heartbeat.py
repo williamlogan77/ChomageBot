@@ -46,6 +46,9 @@ STICKY_PANEL_STALE_AFTER = dt.timedelta(minutes=15)
 # rationale: one missed tick is Gateway flap, three is a frozen loop.
 WEEKLY_AWARDS_STALE_AFTER = dt.timedelta(minutes=45)
 
+# 3× POLL_MINUTES from cogs.live_games (4 min spectator poll).
+LIVE_GAMES_STALE_AFTER = dt.timedelta(minutes=12)
+
 
 class Heartbeat(commands.Cog):
     """Restart frozen @tasks.loop tasks by reloading their parent cog."""
@@ -97,6 +100,13 @@ class Heartbeat(commands.Cog):
             extension="cogs.weekly_awards",
             attr="awards_tick_last_fired",
             stale_after=WEEKLY_AWARDS_STALE_AFTER,
+            now=now,
+        )
+        await self._check_one(
+            cog_name="LiveGames",
+            extension="cogs.live_games",
+            attr="poll_live_last_fired",
+            stale_after=LIVE_GAMES_STALE_AFTER,
             now=now,
         )
 

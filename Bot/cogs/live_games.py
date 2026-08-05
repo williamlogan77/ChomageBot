@@ -143,22 +143,27 @@ class LiveGames(commands.Cog):
         known_games: dict[str, set[int]] = {}
         for puuid, game_id in rows:
             known_games.setdefault(puuid, set()).add(game_id)
-        ended = 0
+        ended: list[str] = []
         for puuid, game_ids in known_games.items():
             known, game = await get_active_game(puuid)
             if not known:
                 continue
             if game is None or not game.get("gameId"):
                 await db.execute("DELETE FROM live_games WHERE puuid = %s", (puuid,))
-                ended += 1
+                ended.append(puuid)
             elif game.get("gameId") not in game_ids:
                 # Already in the NEXT game — the previous one ended.
                 await self._record_live(puuid, game)
-                ended += 1
+                ended.append(puuid)
         if ended:
-            self.bot.logging.info(f"Live: {ended} game(s) just ended — refreshing the board now")
+            self.bot.logging.info(
+                f"Live: {len(ended)} game(s) just ended — refreshing the board now"
+            )
             board = self.bot.get_cog("FetchFromRiot")
             if board is not None:
+                # Announce the finishes directly — authoritative, and immune
+                # to the gate's diff state being reset by a sweep or reload.
+                board.note_finished(ended)
                 await board.post_ranks()
 
     @poll_live.error

@@ -62,6 +62,10 @@ class FetchFromRiot(commands.Cog):
         # who finished game A and is already loading game B never leaves
         # the live set, but pair (puuid, A) vanishing still marks a finish.
         self._prev_live: set[tuple[str, int]] = set()
+        # Finishes announced directly by the live-games cog's fast path —
+        # authoritative and state-independent, so a sweep or reload wiping
+        # _prev_live between transition and fetch can't lose the signal.
+        self._pending_finished: set[str] = set()
         self._post_lock = asyncio.Lock()
 
     def cog_unload(self) -> None:
@@ -88,9 +92,26 @@ class FetchFromRiot(commands.Cog):
         the signals miss; every failure path fails open to fetching
         everyone.
         """
+        # Fast-path announcements are consumed on every branch — a sweep
+        # fetches everyone anyway, so they must not survive into later
+        # cycles and mask as still-pending.
+        pending = self._pending_finished
+        self._pending_finished = set()
         if time.monotonic() - self._entries_sweep_at >= ENTRIES_FULL_SWEEP_SECONDS:
             self._entries_sweep_at = time.monotonic()
-            self._prev_live = set()
+            # Keep the live-pair snapshot even on sweep cycles: wiping it
+            # made a game that ended before the next cycle invisible to
+            # the pair diff (stale ranks right after a sweep/reload).
+            try:
+                self._prev_live = {
+                    (row[0], row[1])
+                    for row in await db.fetchall(
+                        "SELECT DISTINCT puuid, game_id FROM live_games "
+                        "WHERE seen_at > now() - interval '6 minutes'"
+                    )
+                }
+            except Exception:
+                self._prev_live = set()
             return set()
         try:
             live = {
@@ -121,7 +142,37 @@ class FetchFromRiot(commands.Cog):
         except Exception as exc:
             self.bot.logging.warning(f"Entries gating unavailable, fetching all: {exc!r}")
             return set()
-        return tracked - just_finished - fresh_match
+        return tracked - just_finished - fresh_match - pending
+
+    def note_finished(self, puuids) -> None:
+        """Fast-path hook for the live-games cog: these players' games just
+        ended, so the next cycle must fresh-fetch them regardless of what
+        the pair diff can see."""
+        self._pending_finished |= set(puuids)
+
+    async def _live_board_marker(self) -> tuple[set[str], str]:
+        """(in-game puuids, marker suffix) for the board render.
+
+        The marker emoji comes from the bot_config key ``live_emoji`` so a
+        custom Discord emoji (``<:live:123...>``) can be set from the
+        dashboard without a deploy; defaults to 🔴. Empty set/marker when
+        live tracking isn't running — the board just renders plain.
+        """
+        try:
+            live = {
+                row[0]
+                for row in await db.fetchall(
+                    "SELECT DISTINCT puuid FROM live_games "
+                    "WHERE seen_at > now() - interval '12 minutes'"
+                )
+            }
+        except Exception:
+            return set(), ""
+        if not live:
+            return set(), ""
+        row = await db.fetchone("SELECT value FROM bot_config WHERE key = 'live_emoji'")
+        marker = row[0] if row and row[0] else "\U0001f534"
+        return live, f" {marker}"
 
     async def fetch_users_rank(self, users, stale_ok: set[str] = frozenset()):
         users_ranks = {}
@@ -351,6 +402,7 @@ class FetchFromRiot(commands.Cog):
 
         # apex_omits_games_word: this board's apex entries have always
         # read "Played: N with a ..." — see utils/leaderboard.py.
+        live_puuids, live_marker = await self._live_board_marker()
         (
             output_list,
             self.previous_positions,
@@ -361,6 +413,8 @@ class FetchFromRiot(commands.Cog):
             self.last_positions,
             self.get_last_five_games,
             apex_omits_games_word=True,
+            live_puuids=live_puuids,
+            live_marker=live_marker,
         )
         if output_list:
             # Key at the top of the board (William's call) — explains

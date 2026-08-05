@@ -73,11 +73,16 @@ class FetchFromRiot(commands.Cog):
         (serve the stale entries cache) unless a game of theirs just
         finished. "Just finished" is detected two ways, belt and braces:
         they vanished from live_games since the previous cycle
-        (spectator saw the game end), or a fresh match_stats row landed
-        (the stream ingested the finished game). Players mid-game stay
-        skippable — their LP is frozen until the game ends. An hourly
-        full sweep catches apex decay and anything the signals miss, and
-        every failure path fails open to fetching everyone.
+        (spectator saw the game end), or a match_stats row whose game
+        ENDED recently exists (the stream ingested the finished game —
+        keyed on game_start + duration, NOT game_start: a 35-minute game
+        starts far outside any recency window by the time it's ingested,
+        so filtering on start time would miss almost every real game).
+        Players mid-game stay skippable — their LP is frozen until the
+        game ends. The hourly full sweep catches apex decay, queue-dodge
+        LP penalties (no game is ever created for those) and anything
+        the signals miss; every failure path fails open to fetching
+        everyone.
         """
         if time.monotonic() - self._entries_sweep_at >= ENTRIES_FULL_SWEEP_SECONDS:
             self._entries_sweep_at = time.monotonic()
@@ -97,7 +102,8 @@ class FetchFromRiot(commands.Cog):
                 row[0]
                 for row in await db.fetchall(
                     "SELECT DISTINCT puuid FROM match_stats "
-                    "WHERE game_start > now() - interval '20 minutes'"
+                    "WHERE game_start + make_interval(secs => COALESCE(duration_sec, 0)) "
+                    "      > now() - interval '30 minutes'"
                 )
             }
             tracked = {

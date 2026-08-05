@@ -58,7 +58,10 @@ class FetchFromRiot(commands.Cog):
         # Entries-fetch gating state: 0.0 forces a full sweep on the first
         # cycle after every (re)load, which also warms the stale cache.
         self._entries_sweep_at = 0.0
-        self._prev_live: set[str] = set()
+        # (puuid, game_id) pairs — game-level, not just presence: a player
+        # who finished game A and is already loading game B never leaves
+        # the live set, but pair (puuid, A) vanishing still marks a finish.
+        self._prev_live: set[tuple[str, int]] = set()
         self._post_lock = asyncio.Lock()
 
     def cog_unload(self) -> None:
@@ -91,13 +94,15 @@ class FetchFromRiot(commands.Cog):
             return set()
         try:
             live = {
-                row[0]
+                (row[0], row[1])
                 for row in await db.fetchall(
-                    "SELECT DISTINCT puuid FROM live_games "
+                    "SELECT DISTINCT puuid, game_id FROM live_games "
                     "WHERE seen_at > now() - interval '6 minutes'"
                 )
             }
-            just_finished = self._prev_live - live
+            # Pair-level diff: (puuid, game_id) disappearing marks a finish
+            # even when the player is already in their NEXT game.
+            just_finished = {puuid for puuid, _ in self._prev_live - live}
             self._prev_live = live
             fresh_match = {
                 row[0]

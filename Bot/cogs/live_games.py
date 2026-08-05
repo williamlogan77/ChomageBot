@@ -82,29 +82,7 @@ class LiveGames(commands.Cog):
                 await db.execute("DELETE FROM live_games WHERE puuid = %s", (puuid,))
                 continue
             in_game += 1
-            start_ms = game.get("gameStartTime") or 0
-            # 0 during the loading screen — better no timestamp than 1970.
-            started = dt.datetime.fromtimestamp(start_ms / 1000, dt.UTC) if start_ms > 0 else None
-            await db.execute(
-                "INSERT INTO live_games (game_id, puuid, queue_id, game_start, payload, seen_at) "
-                "VALUES (%s, %s, %s, %s, %s, now()) "
-                "ON CONFLICT (game_id, puuid) DO UPDATE SET "
-                "payload = EXCLUDED.payload, seen_at = now()",
-                (
-                    game.get("gameId"),
-                    puuid,
-                    game.get("gameQueueConfigId"),
-                    started,
-                    Jsonb(game),
-                ),
-            )
-            # A player can only be in one game — drop any row from a
-            # previous game they've since left (finish A -> queue into B
-            # would otherwise show them in both until the prune).
-            await db.execute(
-                "DELETE FROM live_games WHERE puuid = %s AND game_id <> %s",
-                (puuid, game.get("gameId")),
-            )
+            await self._record_live(puuid, game)
         # Backstop for rows nothing refreshed or deleted (account removed
         # from tracking, persistent API failure, loop gaps).
         await db.execute(
@@ -115,6 +93,31 @@ class LiveGames(commands.Cog):
             self.bot.logging.info(f"Live games: {in_game} tracked account(s) in game")
         self.poll_live_last_fired = dt.datetime.now()
 
+    async def _record_live(self, puuid: str, game: dict) -> None:
+        """Upsert the player's current game and drop rows for any previous
+        game — a player can only be in one game, and finish-A-queue-into-B
+        must not show them in both."""
+        start_ms = game.get("gameStartTime") or 0
+        # 0 during the loading screen — better no timestamp than 1970.
+        started = dt.datetime.fromtimestamp(start_ms / 1000, dt.UTC) if start_ms > 0 else None
+        await db.execute(
+            "INSERT INTO live_games (game_id, puuid, queue_id, game_start, payload, seen_at) "
+            "VALUES (%s, %s, %s, %s, %s, now()) "
+            "ON CONFLICT (game_id, puuid) DO UPDATE SET "
+            "payload = EXCLUDED.payload, seen_at = now()",
+            (
+                game.get("gameId"),
+                puuid,
+                game.get("gameQueueConfigId"),
+                started,
+                Jsonb(game),
+            ),
+        )
+        await db.execute(
+            "DELETE FROM live_games WHERE puuid = %s AND game_id <> %s",
+            (puuid, game.get("gameId")),
+        )
+
     @tasks.loop(minutes=1)
     async def watch_endings(self):
         """Fast end-of-game detector: fresh LP on the board within ~a minute.
@@ -123,22 +126,34 @@ class LiveGames(commands.Cog):
         movement, so waiting for the 4-minute discovery poll + the next
         2-minute board cycle reads as "the board is stale". This loop
         only polls accounts CURRENTLY in live_games (zero Riot calls
-        when nobody is playing) and, the moment a game ends, deletes the
-        rows and triggers the board loop right away — its entries gating
-        sees the players vanish from live_games and fresh-fetches them.
+        when nobody is playing) and, the moment a game ends, updates the
+        table and triggers the board loop right away — its entries gating
+        sees the game vanish from live_games and fresh-fetches the players.
+
+        A game "ends" in two shapes: the player is no longer in any game
+        (spectator 404), OR they're already in a DIFFERENT game — the
+        finish-then-requeue case, where mere presence polling would never
+        show a gap. A changed gameId IS the end of the previous game.
         """
         await self.bot.wait_until_ready()
         try:
-            rows = await db.fetchall("SELECT DISTINCT puuid FROM live_games")
+            rows = await db.fetchall("SELECT puuid, game_id FROM live_games")
         except Exception:
             return  # table missing pre-restart; the main poll logs enough
+        known_games: dict[str, set[int]] = {}
+        for puuid, game_id in rows:
+            known_games.setdefault(puuid, set()).add(game_id)
         ended = 0
-        for (puuid,) in rows:
+        for puuid, game_ids in known_games.items():
             known, game = await get_active_game(puuid)
             if not known:
                 continue
             if game is None or not game.get("gameId"):
                 await db.execute("DELETE FROM live_games WHERE puuid = %s", (puuid,))
+                ended += 1
+            elif game.get("gameId") not in game_ids:
+                # Already in the NEXT game — the previous one ended.
+                await self._record_live(puuid, game)
                 ended += 1
         if ended:
             self.bot.logging.info(f"Live: {ended} game(s) just ended — refreshing the board now")

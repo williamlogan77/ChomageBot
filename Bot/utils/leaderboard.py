@@ -236,6 +236,7 @@ def render_board_entry(
     last_played: dt.datetime | None = None,
     *,
     apex_omits_games_word: bool = False,
+    live_suffix: str = "",
 ) -> str:
     """One board entry: name/arrow/flag line, rank line, played line,
     last-played line, last-5.
@@ -265,8 +266,8 @@ def render_board_entry(
         rank_line = f"Rank: {tier} {posting['rank']} {posting['leaguePoints']}lp"
     games_word = "" if is_apex and apex_omits_games_word else " games"
     return (
-        f"{position_arrow}{position}. {posting['summonerName']} - <@{posting['user_id']}>"
-        f"{updated_flag}\n"
+        f"{position_arrow}{position}. {posting['summonerName']}{live_suffix}"
+        f" - <@{posting['user_id']}>{updated_flag}\n"
         f"{rank_line}\n"
         f"Played: {posting['GamesPlayed']}{games_word} with a {posting['WinRate']:.2f}% winrate\n"
         f"{last_played_line(last_played)}"
@@ -281,6 +282,8 @@ async def render_board_entries(
     fetch_last_five,
     *,
     apex_omits_games_word: bool = False,
+    live_puuids: frozenset | set = frozenset(),
+    live_marker: str = "",
 ) -> tuple[list[str], dict[str, int], dict[str, int]]:
     """Render every entry of an already-sorted board.
 
@@ -323,6 +326,9 @@ async def render_board_entries(
                 last_five,
                 last_played,
                 apex_omits_games_word=apex_omits_games_word,
+                # In-game marker (e.g. a LIVE emoji) after the name only —
+                # positions/arrows key on summonerName, never the suffix.
+                live_suffix=live_marker if posting.get("puuid") in live_puuids else "",
             )
         )
     return output_list, previous_positions, current_positions

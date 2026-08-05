@@ -1,5 +1,6 @@
 import asyncio
 import datetime as dt
+import time
 
 import discord
 from discord import app_commands
@@ -27,6 +28,12 @@ STREAK_THRESHOLD = 7
 # league_history.queue tag for this board's rows (also the column default).
 SOLO_QUEUE = "RANKED_SOLO_5x5"
 
+# Entries only change when a ranked game ENDS (plus rare apex decay), so
+# most cycles most players can be served from the stale entries cache.
+# A full fresh sweep this often catches decay and anything the change
+# signals miss.
+ENTRIES_FULL_SWEEP_SECONDS = 3600
+
 
 class FetchFromRiot(commands.Cog):
     def __init__(self, bot: MyDiscordBot):
@@ -48,6 +55,18 @@ class FetchFromRiot(commands.Cog):
         self.post_ranks_last_fired: dt.datetime | None = None
 
         self.ranked_dict: dict | None = None
+        # Entries-fetch gating state: 0.0 forces a full sweep on the first
+        # cycle after every (re)load, which also warms the stale cache.
+        self._entries_sweep_at = 0.0
+        # (puuid, game_id) pairs — game-level, not just presence: a player
+        # who finished game A and is already loading game B never leaves
+        # the live set, but pair (puuid, A) vanishing still marks a finish.
+        self._prev_live: set[tuple[str, int]] = set()
+        # Finishes announced directly by the live-games cog's fast path —
+        # authoritative and state-independent, so a sweep or reload wiping
+        # _prev_live between transition and fetch can't lose the signal.
+        self._pending_finished: set[str] = set()
+        self._post_lock = asyncio.Lock()
 
     def cog_unload(self) -> None:
         # discord.py does NOT cancel @tasks.loop tasks on cog unload —
@@ -55,17 +74,121 @@ class FetchFromRiot(commands.Cog):
         # the old instance's loop running next to the new one's.
         self.post_ranks.cancel()
 
-    async def fetch_users_rank(self, users):
+    async def _entries_skip_set(self) -> set[str]:
+        """Players whose entries can't have changed since the last fetch.
+
+        LP only moves when a ranked game ends, so a player is skippable
+        (serve the stale entries cache) unless a game of theirs just
+        finished. "Just finished" is detected two ways, belt and braces:
+        they vanished from live_games since the previous cycle
+        (spectator saw the game end), or a match_stats row whose game
+        ENDED recently exists (the stream ingested the finished game —
+        keyed on game_start + duration, NOT game_start: a 35-minute game
+        starts far outside any recency window by the time it's ingested,
+        so filtering on start time would miss almost every real game).
+        Players mid-game stay skippable — their LP is frozen until the
+        game ends. The hourly full sweep catches apex decay, queue-dodge
+        LP penalties (no game is ever created for those) and anything
+        the signals miss; every failure path fails open to fetching
+        everyone.
+        """
+        # Fast-path announcements are consumed on every branch — a sweep
+        # fetches everyone anyway, so they must not survive into later
+        # cycles and mask as still-pending.
+        pending = self._pending_finished
+        self._pending_finished = set()
+        if time.monotonic() - self._entries_sweep_at >= ENTRIES_FULL_SWEEP_SECONDS:
+            self._entries_sweep_at = time.monotonic()
+            # Keep the live-pair snapshot even on sweep cycles: wiping it
+            # made a game that ended before the next cycle invisible to
+            # the pair diff (stale ranks right after a sweep/reload).
+            try:
+                self._prev_live = {
+                    (row[0], row[1])
+                    for row in await db.fetchall(
+                        "SELECT DISTINCT puuid, game_id FROM live_games "
+                        "WHERE seen_at > now() - interval '6 minutes'"
+                    )
+                }
+            except Exception:
+                self._prev_live = set()
+            return set()
+        try:
+            live = {
+                (row[0], row[1])
+                for row in await db.fetchall(
+                    "SELECT DISTINCT puuid, game_id FROM live_games "
+                    "WHERE seen_at > now() - interval '6 minutes'"
+                )
+            }
+            # Pair-level diff: (puuid, game_id) disappearing marks a finish
+            # even when the player is already in their NEXT game.
+            just_finished = {puuid for puuid, _ in self._prev_live - live}
+            self._prev_live = live
+            fresh_match = {
+                row[0]
+                for row in await db.fetchall(
+                    "SELECT DISTINCT puuid FROM match_stats "
+                    "WHERE game_start + make_interval(secs => COALESCE(duration_sec, 0)) "
+                    "      > now() - interval '30 minutes'"
+                )
+            }
+            tracked = {
+                row[0]
+                for row in await db.fetchall(
+                    "SELECT DISTINCT puuid FROM league_players WHERE puuid IS NOT NULL"
+                )
+            }
+        except Exception as exc:
+            self.bot.logging.warning(f"Entries gating unavailable, fetching all: {exc!r}")
+            return set()
+        return tracked - just_finished - fresh_match - pending
+
+    def note_finished(self, puuids) -> None:
+        """Fast-path hook for the live-games cog: these players' games just
+        ended, so the next cycle must fresh-fetch them regardless of what
+        the pair diff can see."""
+        self._pending_finished |= set(puuids)
+
+    async def _live_board_marker(self) -> tuple[set[str], str]:
+        """(in-game puuids, marker suffix) for the board render.
+
+        The marker emoji comes from the bot_config key ``live_emoji`` so a
+        custom Discord emoji (``<:live:123...>``) can be set from the
+        dashboard without a deploy; defaults to 🔴. Empty set/marker when
+        live tracking isn't running — the board just renders plain.
+        """
+        try:
+            live = {
+                row[0]
+                for row in await db.fetchall(
+                    "SELECT DISTINCT puuid FROM live_games "
+                    "WHERE seen_at > now() - interval '12 minutes'"
+                )
+            }
+        except Exception:
+            return set(), ""
+        if not live:
+            return set(), ""
+        row = await db.fetchone("SELECT value FROM bot_config WHERE key = 'live_emoji'")
+        marker = row[0] if row and row[0] else "\U0001f534"
+        return live, f" {marker}"
+
+    async def fetch_users_rank(self, users, stale_ok: set[str] = frozenset()):
         users_ranks = {}
         seen: set[str] = set()
         failed = 0
+        served_stale = 0
 
         # League-entries uses platform routing (euw1), not regional (europe).
         for puuid, name, user_id in users:
             if puuid in seen:
                 continue
             seen.add(puuid)
-            user_rank = await get_league_entries(puuid)
+            allow_stale = puuid in stale_ok
+            user_rank = await get_league_entries(puuid, allow_stale=allow_stale)
+            if allow_stale:
+                served_stale += 1
             if user_rank is None:
                 failed += 1
                 self.bot.logging.error(f"Failed to fetch rank for {name}")
@@ -94,8 +217,8 @@ class FetchFromRiot(commands.Cog):
         # line (~14 lines every 2 minutes). Failures still log per account
         # at ERROR above; loop liveness is the heartbeat cog's job.
         self.bot.logging.debug(
-            f"Rank fetch cycle: {len(seen) - failed}/{len(seen)} accounts fetched, "
-            f"{len(users_ranks)} on board"
+            f"Rank fetch cycle: {len(seen) - failed}/{len(seen)} accounts, "
+            f"{served_stale} served from stale cache, {len(users_ranks)} on board"
         )
         return users_ranks
 
@@ -110,8 +233,9 @@ class FetchFromRiot(commands.Cog):
         )
         # Fetch current ranks and store them in a dict with updated values.
         # Per-player API failures are handled inside fetch_users_rank
-        # (riot_client returns None rather than raising).
-        self.ranked_dict = await self.fetch_users_rank(rows)
+        # (riot_client returns None rather than raising). Players whose
+        # entries can't have moved are served from the stale cache.
+        self.ranked_dict = await self.fetch_users_rank(rows, await self._entries_skip_set())
         return
 
     async def get_last_five_games(self, puuid):
@@ -212,6 +336,13 @@ class FetchFromRiot(commands.Cog):
     @tasks.loop(seconds=120)
     async def post_ranks(self):
         await self.bot.wait_until_ready()
+        # Serialise the scheduled loop, /refresh_ranks and the live-games
+        # cog's end-of-game fast path — two concurrent runs would race
+        # wipe_and_post and double-wipe the board channel.
+        async with self._post_lock:
+            await self._post_ranks_once()
+
+    async def _post_ranks_once(self):
         await self.fetch_ranks_from_riot()
 
         # LP-diff bookkeeping stays gated on the fetched ranks moving:
@@ -271,6 +402,7 @@ class FetchFromRiot(commands.Cog):
 
         # apex_omits_games_word: this board's apex entries have always
         # read "Played: N with a ..." — see utils/leaderboard.py.
+        live_puuids, live_marker = await self._live_board_marker()
         (
             output_list,
             self.previous_positions,
@@ -281,6 +413,8 @@ class FetchFromRiot(commands.Cog):
             self.last_positions,
             self.get_last_five_games,
             apex_omits_games_word=True,
+            live_puuids=live_puuids,
+            live_marker=live_marker,
         )
         if output_list:
             # Key at the top of the board (William's call) — explains

@@ -15,17 +15,25 @@ Riot splits its API across two kinds of hosts, and picking the wrong one 404s:
 All Riot HTTP goes through `Bot/utils/riot_client.py` — do **not** add HTTP
 calls elsewhere. Reasons:
 
-- **Rate limits are per API key, shared across everything**: developer tier is
-  **20 requests / 1 s** and **100 requests / 120 s**. `riot_client` enforces
+- **Rate limits are per API key, shared across everything**: this key's
+  actual limits are **20 requests / 1 s** and **100 requests / 120 s** —
+  confirmed 2026-08-05 from Riot's own `X-App-Rate-Limit: 100:120,20:1`
+  response header (the authoritative source; re-check the same way after
+  any key change). The key is a registered/personal key (no 24 h expiry)
+  whose numbers happen to match the dev tier. `riot_client` enforces
   both windows with a single process-wide limiter (`_wait_for_slot`); a second
   limiter elsewhere would silently blow the budget. (This has bitten before —
-  a standalone backfill process starved the live loops.)
+  a standalone backfill process starved the live loops.) The limiter logs
+  a line as window usage crosses 70/85/95 of 100.
 - 429s are retried internally (honours `Retry-After` + jitter, up to
   `MAX_RETRIES = 2`).
-- **Entries TTL cache**: `get_league_entries` caches responses for **100 s**
-  per puuid. One league-v4 response lists *all* of a player's ranked queues,
-  so the solo board and the Ranked 5s board (both on 120 s loops) share one
-  fetch per player per cycle. Pass `fresh=True` to bypass.
+- **Entries TTL cache**: `get_league_entries` caches responses for **130 s**
+  per puuid — just above the boards' 120 s loop period, so whichever board
+  fetches first serves the other from cache. One league-v4 response lists
+  *all* of a player's ranked queues. Pass `fresh=True` to bypass, or
+  `allow_stale=True` to accept up to 2 h old data when the caller knows the
+  entries can't have changed (player mid-game or idle — LP only moves when
+  a game ends; the solo board uses this with an hourly full sweep).
 
 The API key comes from the `riot_key` env var.
 

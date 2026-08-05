@@ -6,7 +6,8 @@ would silently exceed the limit when, say, the rank refresh loop and a
 /kda invocation collide. All Riot API requests in the codebase should go
 through the public functions in this module so the budget is shared.
 
-Limits (developer tier):
+Limits (confirmed 2026-08-05 from the X-App-Rate-Limit response header,
+owner-confirmed; registered key, no dev-key expiry):
   - 20 requests per 1 second
   - 100 requests per 2 minutes
 
@@ -59,6 +60,13 @@ RANKED_5S_QUEUE_ID = 710  # match-v5 queue for the weekend Ranked 5s queue
 # ~20 tracked players → no eviction needed.
 _ENTRIES_TTL_SECONDS = 130.0
 _entries_cache: dict[str, tuple[float, list[dict]]] = {}
+
+# How stale a cached entry may be served when the caller KNOWS it can't
+# have changed (allow_stale=True: player mid-game or idle — LP only
+# moves when a game ends). Capped so a bug in the caller's change
+# detection can never freeze the board for more than a couple of hours;
+# the solo board's hourly full sweep refreshes well before this.
+_ENTRIES_STALE_MAX_SECONDS = 2 * 3600.0
 
 log = logging.getLogger(__name__)
 
@@ -155,17 +163,25 @@ async def _get_json(
     return (429, None)
 
 
-async def get_league_entries(puuid: str, *, fresh: bool = False) -> list[dict] | None:
+async def get_league_entries(
+    puuid: str, *, fresh: bool = False, allow_stale: bool = False
+) -> list[dict] | None:
     """Ranked league entries for a player.
 
     Returns the list of league entries (one per ranked queue type the player
     has participated in), or ``None`` if the request failed. Responses are
     cached for ``_ENTRIES_TTL_SECONDS``; pass ``fresh=True`` to bypass.
+
+    ``allow_stale=True``: serve the cache up to ``_ENTRIES_STALE_MAX_SECONDS``
+    old — for callers that know the player's entries can't have changed
+    (mid-game or idle since the last fetch). Falls through to a real
+    fetch when nothing is cached.
     """
     cached = _entries_cache.get(puuid)
     if not fresh and cached is not None:
         age = time.monotonic() - cached[0]
-        if age < _ENTRIES_TTL_SECONDS:
+        max_age = _ENTRIES_STALE_MAX_SECONDS if allow_stale else _ENTRIES_TTL_SECONDS
+        if age < max_age:
             # Copy per hit: callers mutate the entry dicts in place
             # (board cogs inject Ranker/user_id keys), and a polluted
             # cache would alias one board's state into the other's.

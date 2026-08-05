@@ -1,5 +1,6 @@
 import asyncio
 import datetime as dt
+import time
 
 import discord
 from discord import app_commands
@@ -27,6 +28,12 @@ STREAK_THRESHOLD = 7
 # league_history.queue tag for this board's rows (also the column default).
 SOLO_QUEUE = "RANKED_SOLO_5x5"
 
+# Entries only change when a ranked game ENDS (plus rare apex decay), so
+# most cycles most players can be served from the stale entries cache.
+# A full fresh sweep this often catches decay and anything the change
+# signals miss.
+ENTRIES_FULL_SWEEP_SECONDS = 3600
+
 
 class FetchFromRiot(commands.Cog):
     def __init__(self, bot: MyDiscordBot):
@@ -48,6 +55,10 @@ class FetchFromRiot(commands.Cog):
         self.post_ranks_last_fired: dt.datetime | None = None
 
         self.ranked_dict: dict | None = None
+        # Entries-fetch gating state: 0.0 forces a full sweep on the first
+        # cycle after every (re)load, which also warms the stale cache.
+        self._entries_sweep_at = 0.0
+        self._prev_live: set[str] = set()
 
     def cog_unload(self) -> None:
         # discord.py does NOT cancel @tasks.loop tasks on cog unload —
@@ -55,17 +66,66 @@ class FetchFromRiot(commands.Cog):
         # the old instance's loop running next to the new one's.
         self.post_ranks.cancel()
 
-    async def fetch_users_rank(self, users):
+    async def _entries_skip_set(self) -> set[str]:
+        """Players whose entries can't have changed since the last fetch.
+
+        LP only moves when a ranked game ends, so a player is skippable
+        (serve the stale entries cache) unless a game of theirs just
+        finished. "Just finished" is detected two ways, belt and braces:
+        they vanished from live_games since the previous cycle
+        (spectator saw the game end), or a fresh match_stats row landed
+        (the stream ingested the finished game). Players mid-game stay
+        skippable — their LP is frozen until the game ends. An hourly
+        full sweep catches apex decay and anything the signals miss, and
+        every failure path fails open to fetching everyone.
+        """
+        if time.monotonic() - self._entries_sweep_at >= ENTRIES_FULL_SWEEP_SECONDS:
+            self._entries_sweep_at = time.monotonic()
+            self._prev_live = set()
+            return set()
+        try:
+            live = {
+                row[0]
+                for row in await db.fetchall(
+                    "SELECT DISTINCT puuid FROM live_games "
+                    "WHERE seen_at > now() - interval '6 minutes'"
+                )
+            }
+            just_finished = self._prev_live - live
+            self._prev_live = live
+            fresh_match = {
+                row[0]
+                for row in await db.fetchall(
+                    "SELECT DISTINCT puuid FROM match_stats "
+                    "WHERE game_start > now() - interval '20 minutes'"
+                )
+            }
+            tracked = {
+                row[0]
+                for row in await db.fetchall(
+                    "SELECT DISTINCT puuid FROM league_players WHERE puuid IS NOT NULL"
+                )
+            }
+        except Exception as exc:
+            self.bot.logging.warning(f"Entries gating unavailable, fetching all: {exc!r}")
+            return set()
+        return tracked - just_finished - fresh_match
+
+    async def fetch_users_rank(self, users, stale_ok: set[str] = frozenset()):
         users_ranks = {}
         seen: set[str] = set()
         failed = 0
+        served_stale = 0
 
         # League-entries uses platform routing (euw1), not regional (europe).
         for puuid, name, user_id in users:
             if puuid in seen:
                 continue
             seen.add(puuid)
-            user_rank = await get_league_entries(puuid)
+            allow_stale = puuid in stale_ok
+            user_rank = await get_league_entries(puuid, allow_stale=allow_stale)
+            if allow_stale:
+                served_stale += 1
             if user_rank is None:
                 failed += 1
                 self.bot.logging.error(f"Failed to fetch rank for {name}")
@@ -94,8 +154,8 @@ class FetchFromRiot(commands.Cog):
         # line (~14 lines every 2 minutes). Failures still log per account
         # at ERROR above; loop liveness is the heartbeat cog's job.
         self.bot.logging.debug(
-            f"Rank fetch cycle: {len(seen) - failed}/{len(seen)} accounts fetched, "
-            f"{len(users_ranks)} on board"
+            f"Rank fetch cycle: {len(seen) - failed}/{len(seen)} accounts, "
+            f"{served_stale} served from stale cache, {len(users_ranks)} on board"
         )
         return users_ranks
 
@@ -110,8 +170,9 @@ class FetchFromRiot(commands.Cog):
         )
         # Fetch current ranks and store them in a dict with updated values.
         # Per-player API failures are handled inside fetch_users_rank
-        # (riot_client returns None rather than raising).
-        self.ranked_dict = await self.fetch_users_rank(rows)
+        # (riot_client returns None rather than raising). Players whose
+        # entries can't have moved are served from the stale cache.
+        self.ranked_dict = await self.fetch_users_rank(rows, await self._entries_skip_set())
         return
 
     async def get_last_five_games(self, puuid):

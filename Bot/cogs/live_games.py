@@ -46,8 +46,15 @@ class LiveGames(commands.Cog):
         )
         in_game = 0
         for (puuid,) in rows:
-            game = await get_active_game(puuid)
-            if game is None:
+            known, game = await get_active_game(puuid)
+            if not known:
+                # Transient API failure — leave existing rows alone; the
+                # staleness backstop below covers a persistent outage.
+                continue
+            if game is None or not game.get("gameId"):
+                # Authoritative "not in a game": remove immediately rather
+                # than letting a finished game linger until stale-pruned.
+                await db.execute("DELETE FROM live_games WHERE puuid = %s", (puuid,))
                 continue
             in_game += 1
             start_ms = game.get("gameStartTime") or 0
@@ -66,6 +73,15 @@ class LiveGames(commands.Cog):
                     Jsonb(game),
                 ),
             )
+            # A player can only be in one game — drop any row from a
+            # previous game they've since left (finish A -> queue into B
+            # would otherwise show them in both until the prune).
+            await db.execute(
+                "DELETE FROM live_games WHERE puuid = %s AND game_id <> %s",
+                (puuid, game.get("gameId")),
+            )
+        # Backstop for rows nothing refreshed or deleted (account removed
+        # from tracking, persistent API failure, loop gaps).
         await db.execute(
             "DELETE FROM live_games WHERE seen_at < now() - make_interval(mins => %s)",
             (STALE_MINUTES,),

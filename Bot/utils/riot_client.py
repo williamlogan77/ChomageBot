@@ -225,15 +225,21 @@ async def get_account_by_puuid(puuid: str) -> dict | None:
     return body
 
 
-async def get_active_game(puuid: str) -> dict | None:
-    """Spectator-v5 live game for a player, or None when not in one.
+async def get_active_game(puuid: str) -> tuple[bool, dict | None]:
+    """Spectator-v5 live game for a player: ``(known, game)``.
 
-    404 is the API's way of saying "not currently in a game" — the
-    overwhelmingly common answer — so it's handled quietly rather than
-    logged as an error. Platform host (euw1), like league entries.
+    ``(True, game)``  — in a game right now.
+    ``(True, None)``  — definitively NOT in a game (spectator 404, the
+                        overwhelmingly common answer, handled quietly).
+    ``(False, None)`` — transient failure; the caller must NOT treat it
+                        as "game over" or live rows flicker on API blips.
+
+    Platform host (euw1), like league entries.
     """
     url = f"{PLATFORM_HOST}/lol/spectator/v5/active-games/by-summoner/{puuid}"
     status, body = await _get_json(url, quiet_404=True)
-    if status != 200 or not isinstance(body, dict):
-        return None
-    return body
+    if status == 404:
+        return (True, None)
+    if status == 200 and isinstance(body, dict):
+        return (True, body)
+    return (False, None)

@@ -51,10 +51,13 @@ RANKED_5S_QUEUE_ID = 710  # match-v5 queue for the weekend Ranked 5s queue
 # League entries are consumed by two board cogs (solo + ranked 5s) on
 # independent 120s loops. A response lists ALL of a player's ranked queues,
 # so a short TTL cache lets the second consumer reuse the first's response
-# instead of doubling API spend. TTL sits just below the loops' 120s period
-# so each cycle still gets fresh data while tolerating the loops drifting
-# out of phase. ~20 tracked players → no eviction needed.
-_ENTRIES_TTL_SECONDS = 115.0
+# instead of doubling API spend. TTL sits just ABOVE the loops' 120s
+# period so whichever board fetches first always serves the other from
+# cache — at 115s the loops drifting out of phase made both fetch, up to
+# doubling entries spend (~21 extra requests/2min). The second consumer
+# reads data at most one cycle old, which a board redraw can tolerate.
+# ~20 tracked players → no eviction needed.
+_ENTRIES_TTL_SECONDS = 130.0
 _entries_cache: dict[str, tuple[float, list[dict]]] = {}
 
 log = logging.getLogger(__name__)
@@ -82,6 +85,12 @@ async def _wait_for_slot() -> None:
 
             if wait <= 0:
                 _timestamps.append(now)
+                # Budget telemetry: one line as usage crosses each mark,
+                # so "are we pushing the rate limit?" is answerable from
+                # the logs instead of guessed at.
+                used = sum(1 for t in _timestamps if now - t <= 120)
+                if used in (70, 85, 95):
+                    log.info(f"Riot budget: {used}/100 requests in the current 2min window")
                 return
 
         # Release the lock while sleeping so other coroutines can re-check.

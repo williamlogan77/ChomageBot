@@ -38,6 +38,7 @@ from discord.ext import commands, tasks
 from psycopg.types.json import Jsonb
 from utils import db
 from utils.loop_restart import restart_loop_later
+from utils.queue_windows import is_ranked5s_tracking
 from utils.riot_client import (
     RANKED_5S_QUEUE_ID,
     RANKED_SOLO_QUEUE_ID,
@@ -232,10 +233,15 @@ class Backfill(commands.Cog):
             "SELECT puuid, league_username FROM league_players "
             "WHERE puuid IS NOT NULL AND puuid != ''"
         )
+        # The 5s queue only exists on weekend evenings — polling its match
+        # ids all week was ~8 wasted requests/2min of the shared budget.
+        # is_ranked5s_tracking covers the window plus a 2h tail, so games
+        # in flight at close still get picked up.
+        queues = (RANKED_SOLO_QUEUE_ID,) + ((RANKED_5S_QUEUE_ID,) if is_ranked5s_tracking() else ())
         for puuid, name in rows:
             try:
                 inserted = await self._backfill_player(
-                    puuid, count=STREAM_RECENT_COUNT, all_history=False, name=name
+                    puuid, count=STREAM_RECENT_COUNT, all_history=False, name=name, queues=queues
                 )
                 if inserted > 0:
                     self._stream_total_inserts += inserted
@@ -289,7 +295,12 @@ class Backfill(commands.Cog):
         self.bot.logging.info("Backfill: all players complete")
 
     async def _backfill_player(
-        self, puuid: str, count: int, all_history: bool = False, name: str | None = None
+        self,
+        puuid: str,
+        count: int,
+        all_history: bool = False,
+        name: str | None = None,
+        queues: tuple[int, ...] = (RANKED_SOLO_QUEUE_ID, RANKED_5S_QUEUE_ID),
     ) -> int:
         """Pull match IDs for the player and insert any not already stored.
 
@@ -300,16 +311,17 @@ class Backfill(commands.Cog):
 
         ``name`` is purely for log readability; falls back to a truncated
         puuid when not given (the stream loop always passes it).
+
+        ``queues`` defaults to both tracked queues — /backfill_all always
+        pulls full history for both; the stream passes solo-only outside
+        the weekend Ranked 5s window to spare the shared budget. Riot's
+        league API doesn't expose the 5s ladder, so queue-710 match rows
+        are also what the 5s board's fallback standings are built from.
         """
         inserted_total = 0
         label = name or f"{puuid[:8]}..."
 
-        # Track BOTH queues: ranked solo/duo and the weekend Ranked 5s
-        # (710). Riot's league API doesn't expose the 5s ladder yet, so
-        # these match rows are also what the 5s board's fallback standings
-        # are built from. 5s history is tiny (limited-test queue): steady
-        # state costs one extra id-page request per player per pass.
-        for queue in (RANKED_SOLO_QUEUE_ID, RANKED_5S_QUEUE_ID):
+        for queue in queues:
             start = 0
             page_num = 0
             while True:

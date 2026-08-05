@@ -23,6 +23,16 @@ POLL_MINUTES = 4
 # Rows older than two polls (plus slack) belong to finished games.
 STALE_MINUTES = POLL_MINUTES * 2 + 1
 
+# Accounts with no recorded game in this many days only get polled every
+# DORMANT_EVERY_CYCLES cycles (~16 min): roughly half the roster is
+# dormant at any time, and spectator polls come out of the shared Riot
+# budget. Trade-off: a dormant player's FIRST live game can be seen up
+# to ~16 minutes late — after it finishes they're active again and back
+# on the fast cadence. Accounts currently in live_games always stay on
+# the fast cadence so an in-progress game keeps refreshing.
+DORMANT_AFTER_DAYS = 14
+DORMANT_EVERY_CYCLES = 4
+
 
 class LiveGames(commands.Cog):
     def __init__(self, bot: MyDiscordBot):
@@ -31,6 +41,7 @@ class LiveGames(commands.Cog):
         # Watchdog input, same contract as the other loops
         # (cogs/heartbeat.py reloads us if this goes stale).
         self.poll_live_last_fired: dt.datetime | None = None
+        self._cycle = 0
         self.poll_live.start()
 
     def cog_unload(self) -> None:
@@ -44,8 +55,20 @@ class LiveGames(commands.Cog):
         rows = await db.fetchall(
             "SELECT DISTINCT puuid FROM league_players WHERE puuid IS NOT NULL AND puuid != ''"
         )
+        self._cycle += 1
+        fast_cadence = {
+            r[0]
+            for r in await db.fetchall(
+                "SELECT DISTINCT puuid FROM match_stats "
+                "WHERE game_start > now() - make_interval(days => %s) "
+                "UNION SELECT puuid FROM live_games",
+                (DORMANT_AFTER_DAYS,),
+            )
+        }
         in_game = 0
         for (puuid,) in rows:
+            if puuid not in fast_cadence and self._cycle % DORMANT_EVERY_CYCLES:
+                continue
             known, game = await get_active_game(puuid)
             if not known:
                 # Transient API failure — leave existing rows alone; the

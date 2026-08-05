@@ -43,11 +43,13 @@ class LiveGames(commands.Cog):
         self.poll_live_last_fired: dt.datetime | None = None
         self._cycle = 0
         self.poll_live.start()
+        self.watch_endings.start()
 
     def cog_unload(self) -> None:
         # discord.py does NOT cancel @tasks.loop tasks on cog unload —
         # without this, every hot reload leaves the old loop running.
         self.poll_live.cancel()
+        self.watch_endings.cancel()
 
     @tasks.loop(minutes=POLL_MINUTES)
     async def poll_live(self):
@@ -113,6 +115,37 @@ class LiveGames(commands.Cog):
             self.bot.logging.info(f"Live games: {in_game} tracked account(s) in game")
         self.poll_live_last_fired = dt.datetime.now()
 
+    @tasks.loop(minutes=1)
+    async def watch_endings(self):
+        """Fast end-of-game detector: fresh LP on the board within ~a minute.
+
+        People finish a game and immediately check the board for the
+        movement, so waiting for the 4-minute discovery poll + the next
+        2-minute board cycle reads as "the board is stale". This loop
+        only polls accounts CURRENTLY in live_games (zero Riot calls
+        when nobody is playing) and, the moment a game ends, deletes the
+        rows and triggers the board loop right away — its entries gating
+        sees the players vanish from live_games and fresh-fetches them.
+        """
+        await self.bot.wait_until_ready()
+        try:
+            rows = await db.fetchall("SELECT DISTINCT puuid FROM live_games")
+        except Exception:
+            return  # table missing pre-restart; the main poll logs enough
+        ended = 0
+        for (puuid,) in rows:
+            known, game = await get_active_game(puuid)
+            if not known:
+                continue
+            if game is None or not game.get("gameId"):
+                await db.execute("DELETE FROM live_games WHERE puuid = %s", (puuid,))
+                ended += 1
+        if ended:
+            self.bot.logging.info(f"Live: {ended} game(s) just ended — refreshing the board now")
+            board = self.bot.get_cog("FetchFromRiot")
+            if board is not None:
+                await board.post_ranks()
+
     @poll_live.error
     async def poll_live_error(self, exc: BaseException) -> None:
         """Auto-restart on unhandled error — default @tasks.loop behaviour
@@ -121,6 +154,16 @@ class LiveGames(commands.Cog):
         restart_loop_later(
             self.poll_live,
             name="poll_live",
+            log=self.bot.logging,
+            still_active=lambda: self.bot.get_cog("LiveGames") is self,
+        )
+
+    @watch_endings.error
+    async def watch_endings_error(self, exc: BaseException) -> None:
+        self.bot.logging.error(f"watch_endings errored: {exc!r}, restarting in 60s")
+        restart_loop_later(
+            self.watch_endings,
+            name="watch_endings",
             log=self.bot.logging,
             still_active=lambda: self.bot.get_cog("LiveGames") is self,
         )

@@ -59,6 +59,7 @@ class FetchFromRiot(commands.Cog):
         # cycle after every (re)load, which also warms the stale cache.
         self._entries_sweep_at = 0.0
         self._prev_live: set[str] = set()
+        self._post_lock = asyncio.Lock()
 
     def cog_unload(self) -> None:
         # discord.py does NOT cancel @tasks.loop tasks on cog unload —
@@ -279,6 +280,13 @@ class FetchFromRiot(commands.Cog):
     @tasks.loop(seconds=120)
     async def post_ranks(self):
         await self.bot.wait_until_ready()
+        # Serialise the scheduled loop, /refresh_ranks and the live-games
+        # cog's end-of-game fast path — two concurrent runs would race
+        # wipe_and_post and double-wipe the board channel.
+        async with self._post_lock:
+            await self._post_ranks_once()
+
+    async def _post_ranks_once(self):
         await self.fetch_ranks_from_riot()
 
         # LP-diff bookkeeping stays gated on the fetched ranks moving:

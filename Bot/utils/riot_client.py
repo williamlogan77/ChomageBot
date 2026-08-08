@@ -27,6 +27,14 @@ Public API:
   - :func:`get_player_challenges` — challenges-v1 player data for a puuid.
   - :func:`get_summoner_by_puuid` — summoner-v4 basics (level, icon).
   - :func:`get_apex_league` — league-v4 Challenger/GM/Master ladder list.
+  - :func:`get_clash_tournaments` / :func:`get_clash_players` /
+    :func:`get_clash_team` — clash-v1 schedule + registrations + rosters.
+  - :func:`get_challenges_config` / :func:`get_challenges_percentiles` —
+    challenges-v1 static catalogue (names, thresholds, tier percentiles).
+  - :func:`get_champion_rotation` — champion-v3 free-to-play rotation.
+  - :func:`get_platform_status` — lol-status-v4 EUW incidents/maintenances.
+  - :func:`set_rate_limits` — replace the process-wide budget (standalone
+    runners on their own key; the bot itself never calls this).
 """
 
 from __future__ import annotations
@@ -48,6 +56,22 @@ LIMITS: list[tuple[int, float]] = [
 ]
 _LONGEST_WINDOW = max(window for _, window in LIMITS)
 MAX_RETRIES = 2
+
+
+def set_rate_limits(limits: list[tuple[int, float]]) -> None:
+    """Replace the process-wide request budget.
+
+    For standalone processes running on their OWN key (e.g.
+    scripts/backfill_deep_standalone.py on a spare dev key) whose limits
+    differ from the bot's. Mutates LIMITS in place so _wait_for_slot —
+    which reads the module global on every call — picks it up immediately.
+    The bot process itself must never call this: its budget is the prod
+    key's, hardcoded above.
+    """
+    global _LONGEST_WINDOW
+    LIMITS[:] = limits
+    _LONGEST_WINDOW = max(window for _, window in LIMITS)
+
 
 PLATFORM_HOST = "https://euw1.api.riotgames.com"  # league entries
 REGION_HOST = "https://europe.api.riotgames.com"  # match-v5
@@ -367,6 +391,132 @@ async def get_apex_league(tier: str, queue: str = "RANKED_SOLO_5x5") -> dict | N
     Platform host (euw1).
     """
     url = f"{PLATFORM_HOST}/lol/league/v4/{_APEX_LEAGUE_PATHS[tier]}/by-queue/{queue}"
+    status, body = await _get_json(url)
+    if status != 200 or not isinstance(body, dict):
+        return None
+    return body
+
+
+async def get_clash_tournaments() -> list[dict] | None:
+    """Clash-v1 tournament schedule: all upcoming + active tournaments.
+
+    One TournamentDto per tournament ({"id", "themeId", "nameKey",
+    "nameKeySecondary", "schedule": [{registrationTime, startTime,
+    cancelled}]}) — live-validated 2026-08-08. Past tournaments drop off
+    the response; the clash_tournaments table keeps them.
+
+    Platform host (euw1).
+    """
+    url = f"{PLATFORM_HOST}/lol/clash/v1/tournaments"
+    status, body = await _get_json(url)
+    if status != 200 or not isinstance(body, list):
+        return None
+    return body
+
+
+async def get_clash_players(puuid: str) -> list[dict] | None:
+    """Clash-v1 active registrations for a player.
+
+    Returns the list of PlayerDto rows — one per active Clash team the
+    player is registered on ({"teamId", "position", "role"} per the
+    schema), usually ``[]`` (live-validated 2026-08-08: every tracked
+    account returned 200 + empty outside a Clash window). ``None`` means
+    the request failed, NOT "not registered".
+
+    Platform host (euw1).
+    """
+    url = f"{PLATFORM_HOST}/lol/clash/v1/players/by-puuid/{puuid}"
+    status, body = await _get_json(url)
+    if status != 200 or not isinstance(body, list):
+        return None
+    return body
+
+
+async def get_clash_team(team_id: str) -> dict | None:
+    """Clash-v1 team by id: roster, name, tier, captain.
+
+    TeamDto per the schema ({"id", "tournamentId", "name", "iconId",
+    "tier", "captain", "abbreviation", "players": [...]}) — could not be
+    live-validated (no tracked player was registered during the 2026-08-08
+    pass), so the caller archives it verbatim and extracts defensively.
+    404 is a real answer (team disbanded between the player fetch and this
+    one) — handled quietly.
+
+    Platform host (euw1).
+    """
+    url = f"{PLATFORM_HOST}/lol/clash/v1/teams/{team_id}"
+    status, body = await _get_json(url, quiet_404=True)
+    if status != 200 or not isinstance(body, dict):
+        return None
+    return body
+
+
+async def get_challenges_config() -> list[dict] | None:
+    """Challenges-v1 static catalogue: every challenge's definition.
+
+    One ChallengeConfigInfoDto per challenge ({"id", "localizedNames",
+    "state", "thresholds", "leaderboard"} — live 2026-08-08: 405 entries;
+    the documented ``tracking``/``startTimestamp`` fields were absent and
+    ``endTimestamp`` present on one entry, so all are treated optional).
+    This is what makes player_challenges' bare ids interpretable.
+
+    Platform host (euw1). ~1 MB response, so callers fetch it rarely.
+    """
+    url = f"{PLATFORM_HOST}/lol/challenges/v1/challenges/config"
+    status, body = await _get_json(url)
+    if status != 200 or not isinstance(body, list):
+        return None
+    return body
+
+
+async def get_challenges_percentiles() -> dict | None:
+    """Challenges-v1 percentile map: challengeId -> {tier: percentile}.
+
+    Keys are challenge ids AS STRINGS (JSON object keys), values map tier
+    names (IRON..CHALLENGER) to the population fraction at that tier —
+    live-validated 2026-08-08, 405 entries matching the config catalogue.
+
+    Platform host (euw1).
+    """
+    url = f"{PLATFORM_HOST}/lol/challenges/v1/challenges/percentiles"
+    status, body = await _get_json(url)
+    if status != 200 or not isinstance(body, dict):
+        return None
+    return body
+
+
+async def get_champion_rotation() -> dict | None:
+    """Champion-v3 free-to-play rotation.
+
+    Riot's documented shape is {"freeChampionIds",
+    "freeChampionIdsForNewPlayers", "maxNewPlayerLevel"} but the LIVE
+    response (2026-08-08, EUW) is {"sr": [ids], "newplayer": [ids]} —
+    consumers must handle both (cogs/game_data_updater.py does, and
+    archives the payload verbatim either way).
+
+    Platform host (euw1).
+    """
+    url = f"{PLATFORM_HOST}/lol/platform/v3/champion-rotations"
+    status, body = await _get_json(url)
+    if status != 200 or not isinstance(body, dict):
+        return None
+    return body
+
+
+async def get_platform_status() -> dict | None:
+    """Lol-status-v4 platform data for EUW: incidents + maintenances.
+
+    PlatformDataDto ({"id", "name", "locales", "maintenances": [...],
+    "incidents": [...]}) — live-validated 2026-08-08 (both lists empty,
+    the steady state). Entry fields are snake_case (status-v4 quirk):
+    ``maintenance_status``, ``incident_severity``, ``created_at`` etc.
+    Riot documents this endpoint as not counting against the app rate
+    limit, but it goes through the shared budget anyway — 24 requests a
+    day is noise and one code path is one code path.
+
+    Platform host (euw1).
+    """
+    url = f"{PLATFORM_HOST}/lol/status/v4/platform-data"
     status, body = await _get_json(url)
     if status != 200 or not isinstance(body, dict):
         return None

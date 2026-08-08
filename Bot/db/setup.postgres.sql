@@ -290,6 +290,121 @@ create table if not exists champion_mastery (
 );
 create index if not exists idx_champion_mastery_points on champion_mastery (points desc);
 
+-- Clash tournament schedule (clash-v1, capture-remainder pass 2026-08):
+-- one row per tournament, upserted daily by cogs/clash_updater.py.
+-- Tournaments drop off Riot's response once finished — rows here persist,
+-- so the table accumulates the full schedule history. schedule is the
+-- phase list ([{registrationTime, startTime, cancelled}]); raw the whole
+-- TournamentDto verbatim.
+create table if not exists clash_tournaments (
+    tournament_id BIGINT not null primary key,
+    theme_id INTEGER,
+    name_key TEXT,
+    name_key_secondary TEXT,
+    schedule JSONB,
+    raw JSONB,
+    first_seen_at TIMESTAMPTZ not null default now(),
+    updated_at TIMESTAMPTZ not null default now()
+);
+
+-- A tracked player's Clash team registration as seen by the daily sweep
+-- (clash-v1 /players/by-puuid). Rows are never deleted: team ids are
+-- per-tournament, so accumulated rows ARE the history of Clash teams
+-- played on. Outside a registration window the endpoint returns [] and
+-- nothing is written.
+create table if not exists clash_registrations (
+    puuid TEXT not null,
+    team_id TEXT not null,
+    position TEXT,
+    role TEXT,
+    raw JSONB,
+    first_seen_at TIMESTAMPTZ not null default now(),
+    last_seen_at TIMESTAMPTZ not null default now(),
+    primary key (puuid, team_id)
+);
+
+-- Clash team rosters (clash-v1 /teams/{id}), fetched once per distinct
+-- team id discovered in clash_registrations each sweep. captain is
+-- whatever identifier Riot returns (documented as an encrypted summoner
+-- id); players is the roster array verbatim; raw the whole TeamDto —
+-- the endpoint couldn't be live-validated (nobody registered during the
+-- 2026-08-08 pass) so extraction is defensive and raw is the authority.
+create table if not exists clash_teams (
+    team_id TEXT not null primary key,
+    tournament_id BIGINT,
+    name TEXT,
+    abbreviation TEXT,
+    icon_id INTEGER,
+    tier INTEGER,
+    captain TEXT,
+    players JSONB,
+    raw JSONB,
+    first_seen_at TIMESTAMPTZ not null default now(),
+    updated_at TIMESTAMPTZ not null default now()
+);
+
+-- Challenges-v1 static catalogue (config + percentiles merged), keyed by
+-- challengeId — the decoder ring for player_challenges' bare ids.
+-- Upserted daily by cogs/game_data_updater.py. name/descriptions are the
+-- en_GB localisation (en_US fallback); thresholds maps level name ->
+-- required value; percentiles maps tier -> population fraction (from the
+-- separate /percentiles endpoint); raw is the ChallengeConfigInfoDto
+-- verbatim (all 28 locales included).
+create table if not exists challenge_config (
+    challenge_id BIGINT not null primary key,
+    name TEXT,
+    short_description TEXT,
+    description TEXT,
+    state TEXT,
+    tracking TEXT,
+    start_timestamp TIMESTAMPTZ,
+    end_timestamp TIMESTAMPTZ,
+    leaderboard BOOLEAN,
+    thresholds JSONB,
+    percentiles JSONB,
+    raw JSONB,
+    updated_at TIMESTAMPTZ not null default now()
+);
+
+-- Free champion rotation (champion-v3): one row per OBSERVED rotation,
+-- inserted by cogs/game_data_updater.py when the fetched rotation
+-- differs from the latest stored row (same rotation just bumps
+-- last_seen_at) — so history accumulates at ~1 row/week without a
+-- unique-key gymnastic. Live shape 2026-08-08 is {"sr": [...],
+-- "newplayer": [...]}; the documented freeChampionIds shape is also
+-- handled. Champion ids resolve to names via champion_mastery or ddragon.
+create table if not exists champion_rotations (
+    id BIGINT generated always as identity primary key,
+    free_champion_ids JSONB,
+    new_player_ids JSONB,
+    max_new_player_level INTEGER,
+    raw JSONB,
+    first_seen_at TIMESTAMPTZ not null default now(),
+    last_seen_at TIMESTAMPTZ not null default now()
+);
+
+-- lol-status-v4 events affecting EUW: one row per incident/maintenance
+-- Riot publishes, upserted hourly by cogs/status_updater.py WHILE the
+-- entry is live. Steady-state "all fine" polls write nothing — this
+-- table only ever holds the interesting moments ("EUW died mid-Clash").
+-- status-v4 field names are snake_case (Riot quirk); timestamps arrive
+-- as strings and parse best-effort (NULL + raw when unparseable).
+create table if not exists lol_status_events (
+    status_id BIGINT not null,
+    kind TEXT not null,             -- 'incident' | 'maintenance'
+    status TEXT,                    -- maintenance_status: scheduled/in_progress/complete
+    severity TEXT,                  -- incident_severity: info/warning/critical
+    title TEXT,                     -- en_GB/en_US title extract
+    platforms JSONB,
+    created_at TIMESTAMPTZ,
+    updated_at_riot TIMESTAMPTZ,
+    archive_at TIMESTAMPTZ,
+    raw JSONB,
+    first_seen_at TIMESTAMPTZ not null default now(),
+    last_seen_at TIMESTAMPTZ not null default now(),
+    primary key (status_id, kind)
+);
+
 -- Auto-detected season/split boundaries (utils/seasons.py): one row per
 -- ladder reset, derived from league_history games totals shrinking.
 -- started_at is the first post-reset snapshot observed — Riot's actual

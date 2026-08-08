@@ -37,10 +37,64 @@ ladder — fixtures recorded during the run). Notes from the live pass:
 | summoner-v4 | level, profile icon, revisionDate (`summoner_profile`) | **implemented** (same sweep) |
 | spectator-v5 | live games incl. raw payload (`live_games`) | **captured** |
 | account-v1 | riot id ↔ puuid, rename sync | **captured** |
-| challenges-v1 config (challenge id → names/thresholds) | — | **not stored** — static metadata, fetchable anytime (or CommunityDragon); revisit if a display needs names offline |
-| tft-* APIs | TFT matches/league | **not captured** — no signal anyone plays TFT; one client function away if that changes |
-| clash-v1, lol-status, featured-games | — | **not worth it** (unchanged) |
+| challenges-v1 config + percentiles (challenge id → names/descriptions/thresholds/tier percentiles) | `challenge_config`, one row per challenge, en_GB extract + full DTO in `raw` | **implemented** (pass 3 — daily sweep, `cogs/game_data_updater.py`, 2 requests/day) |
+| clash-v1 tournaments / registrations / teams | `clash_tournaments` (schedule history), `clash_registrations` (per tracked player), `clash_teams` (rosters) | **implemented** (pass 3 — daily sweep, `cogs/clash_updater.py`, ~22 requests/day) |
+| champion-v3 free rotation | `champion_rotations`, one row per observed rotation with first/last-seen window | **implemented** (pass 3 — daily fetch + dedupe in `cogs/game_data_updater.py`, 1 request/day) |
+| lol-status-v4 | `lol_status_events` — EUW incidents/maintenances ONLY (steady-state "all fine" polls write nothing) | **implemented** (pass 3 — hourly poll, `cogs/status_updater.py`, 24 requests/day) |
+| spectator-v5 featured-games | — | **skipped, documented**: a rotating sample of random high-visibility games platform-wide, zero relation to tracked players (whose live games `live_games` already captures). Storing strangers' games that churn every few minutes has no banter or dashboard value — this is sampling noise, not friend-group data |
+| tft-* APIs | TFT matches/league | **excluded per user decision** (2026-08-08): scope is League of Legends (all its queues — ranked/flex/Arena/ARAM/etc., which the all-queue match ingest covers); TFT is a separate title and not wanted |
 | VAL-\* (Valorant) | — | **out of scope per user**; needs a production key with Valorant approval anyway. The `feat/valorant-board` branch's op.gg workaround stands |
+
+## Remainder pass (pass 3, 2026-08-08): the endpoints previously skipped
+
+The user overruled the "low value" skips — everything League is captured
+now. Three new sweep cogs, same shape as `mastery_updater`, all through
+the shared limiter with per-item error isolation and `raw` archives:
+
+| Cog | Cadence | Requests/day | Tables |
+|---|---|---|---|
+| `cogs/clash_updater.py` | daily | 1 + 1/player + 1/team seen ≈ **22** | `clash_tournaments`, `clash_registrations`, `clash_teams` |
+| `cogs/game_data_updater.py` | daily | **3** (config + percentiles + rotation) | `challenge_config`, `champion_rotations` |
+| `cogs/status_updater.py` | hourly | **24** (Riot says lol-status doesn't even count against the app limit) | `lol_status_events` |
+
+Total added steady-state spend: **~49 requests/day** (on top of the
+existing ~85/day of sweeps — still noise against the 100/120s budget,
+whose theoretical ceiling is 72k/day).
+
+Live-validation notes (2026-08-08, real EUW calls):
+
+- **clash-v1 tournaments**: 200, two upcoming Bilgewater cups; DTO shape
+  exactly as documented (`schedule` = [{registrationTime, startTime,
+  cancelled}]).
+- **clash-v1 players by-puuid**: 200 + `[]` for every tracked account
+  (nobody registered outside a Clash window — expected). Because nobody
+  was registered, **/teams/{id} could not be live-validated**; the cog
+  extracts it defensively and `raw` is the authority. First real Clash
+  weekend will confirm.
+- **challenges config**: 405 entries. The documented `tracking` and
+  `startTimestamp` fields were absent from every live entry and
+  `endTimestamp` present on exactly one — all treated optional
+  (columns exist, NULL when absent). All 28 locales archived in `raw`;
+  en_GB extracted into columns.
+- **champion rotation**: the LIVE response shape is
+  `{"sr": [...], "newplayer": [...]}` — NOT the documented
+  `freeChampionIds`/`freeChampionIdsForNewPlayers`/`maxNewPlayerLevel`.
+  The cog handles both shapes and archives whichever arrives; this is
+  exactly why every sweep keeps `raw`.
+- **lol-status**: 200 with zero incidents/maintenances (the steady
+  state), so event-entry parsing is coded from the schema (snake_case
+  fields, string timestamps) and defensive; steady-state polls write
+  nothing by design — the table only holds real events.
+- Old puuids from the legacy sqlite 400 with "Exception decrypting"
+  against the current key (puuids are key-scoped); validation resolved
+  fresh puuids via account-v1. The bot always uses puuids minted by its
+  own key, so this only affects ad-hoc scripts.
+
+This pass also extracted the match/timeline ingestion primitives out of
+`cogs/backfill.py` into `Bot/utils/match_ingest.py` (verbatim — the cog
+now delegates) so the new **standalone deep-backfill runner**
+(`scripts/backfill_deep_standalone.py`, see "Running the full-depth
+capture" below) shares the exact insert paths instead of copying them.
 
 ## How deep "as far back as possible" actually goes
 
@@ -79,17 +133,41 @@ wasn't running and snapshotting:
 - **Past live games** (spectator is now-only) and **hotStreak/miniSeries
   flags** for past snapshots (only archived from now on).
 
-## Running the full-depth capture (all via Discord, by design)
+## Running the full-depth capture (two sanctioned paths)
 
-Every API-hitting backfill runs **inside the bot** as a slash command, so
-it shares the process-wide rate limiter with the live boards — a separate
-process would compete for the same key blindly (that's how post_ranks got
-starved once). All are background tasks: the bot keeps serving, progress
-posts to the invoking channel periodically, `/backfill_status` answers on
+The rule was always: never a separate process **on the same key** — it
+competes with the live boards blindly (that's how post_ranks got starved
+once). Two paths respect that rule:
+
+**A. In-bot (prod key).** Every API-hitting backfill runs inside the bot
+as a slash command, sharing the process-wide rate limiter with the live
+boards. All are background tasks: the bot keeps serving, progress posts
+to the invoking channel periodically, `/backfill_status` answers on
 demand, `/backfill_cancel` stops cleanly, and a `bot_config` resume
 marker + per-row commits mean a bot restart **auto-resumes** the run.
 
-Order of operations after deploying this branch:
+**B. Standalone on a SPARE key (preferred for the deep walk).**
+`scripts/backfill_deep_standalone.py` runs the identical walk + timeline
+heal (it imports the same `utils/match_ingest.py` primitives the cog
+uses, so inserts are byte-identical and idempotent) in its own process on
+its own key — the bot's prod budget is completely untouched. It paces to
+~90% of a dev key (18/1s, 90/120s), checkpoints into `bot_config` under
+`deep_backfill_standalone_state` (distinct from the in-bot marker, so
+both can exist at once), prints progress per player / per 100 timelines
+for `docker logs`, and is safe to run while the bot is live (same
+per-row commits; concurrent walkers just hit each other's pre-filter).
+
+    docker exec -e riot_key=<SPARE_DEV_KEY> <container> \
+        python scripts/backfill_deep_standalone.py --dry-run   # plan + cost estimate
+    docker exec -e riot_key=<SPARE_DEV_KEY> <container> \
+        python scripts/backfill_deep_standalone.py             # matches, then timelines
+
+`-e` beats the container's `.env` (python-dotenv never overrides existing
+env vars). Ctrl-C / restart any time — rerunning resumes. Dev keys expire
+daily: on a 403 just mint a new key and rerun with the fresh `-e` value.
+
+Order of operations after deploying this branch (path A shown; for path B
+replace steps 2–3 with one standalone run):
 
 1. `/backfill_detail_from_raw` — zero-API SQL fill of the 20 detail
    columns from already-archived payloads (seconds).
@@ -103,8 +181,9 @@ Order of operations after deploying this branch:
 4. `/backfill_detail_from_raw` again — mops up detail for any rows healed
    in step 2.
 
-Sweeps (mastery/profile/challenges/cutoffs) need nothing: their loops run
-on cog load and every 12h.
+Sweeps need nothing: their loops run on cog load and then on their own
+cadence — mastery/profile/challenges/cutoffs every 12h; clash and the
+challenges-catalogue/rotation daily; the EUW status poll hourly.
 
 ### Cost estimates (key budget: 20/1s, 100/120s)
 
@@ -113,7 +192,11 @@ on cog load and every 12h.
 | Deep walk, ids pages | ~1 per 100 matches per player | folded into below |
 | Deep walk, new matches | 2 per new match (details + timeline) | at ~40 req/min residual: ~10k new matches ≈ **8–9 h** |
 | Timeline heal for the ~9k already-stored matches | 1 per match | paced 30/min ≈ **5 h** |
-| Steady state after | stream +1 timeline per new game; sweeps ~85 req/day total | noise |
+| Steady state after | stream +1 timeline per new game; sweeps ~134 req/day total (~85 from pass 1–2 + ~49 from the remainder pass) | noise |
+
+On the standalone runner's own dev key (90/120s ≈ 45/min sustained) the
+same walk finishes ~1.5× faster than the in-bot residual rate — and the
+bot's live polling never queues behind it at all.
 
 The deep walk's new-match count is unknown until it runs (all-queues will
 surface every ARAM/normal/flex back ~2 years — plausibly 2–4× the ~9k

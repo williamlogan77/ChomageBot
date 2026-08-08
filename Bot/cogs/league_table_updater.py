@@ -140,12 +140,17 @@ class FetchFromRiot(commands.Cog):
             self.bot.logging.warning("live_games unavailable — entries gating fails open")
             return set(), force_fresh
         try:
+            # queue_id filter: since the capture-everything pass the
+            # stream ingests EVERY queue, but only ranked games (solo 420,
+            # flex 440, 5s 710) can move league entries — a fresh ARAM
+            # must not burn a fresh entries fetch.
             fresh_match = {
                 row[0]
                 for row in await db.fetchall(
                     "SELECT DISTINCT puuid FROM match_stats "
                     "WHERE game_start + make_interval(secs => COALESCE(duration_sec, 0)) "
-                    "      > now() - interval '30 minutes'"
+                    "      > now() - interval '30 minutes' "
+                    "AND queue_id IN (420, 440, 710)"
                 )
             }
             tracked = {
@@ -216,6 +221,32 @@ class FetchFromRiot(commands.Cog):
                 self.bot.logging.error(f"Failed to fetch rank for {name}")
                 continue
 
+            # Capture-everything: snapshot every OTHER ranked queue in this
+            # response (flex today, whatever Riot adds tomorrow) into
+            # league_history while we're already holding it — zero extra
+            # API spend, the entries call always returns all queues. Solo
+            # keeps its richer change-gate below; RANKED_PREMADE_5x5
+            # belongs to the 5s board cog (written under its internal
+            # RANKED_5S tag). record_history_snapshot inserts only when
+            # W/L moved, so the steady-state cost is one SELECT per entry
+            # per cycle. Tagged with Riot's own queueType string
+            # (RANKED_FLEX_SR etc.) — consumers filter on their own tags,
+            # so nothing leaks into the solo board/awards/graphs.
+            for entry in user_rank:
+                queue_type = entry.get("queueType")
+                if not queue_type or queue_type in (SOLO_QUEUE, "RANKED_PREMADE_5x5"):
+                    continue
+                try:
+                    if await leaderboard.record_history_snapshot(entry, queue_type):
+                        self.bot.logging.info(
+                            f"{queue_type} history insert for {name}: "
+                            f"{entry.get('tier')} {entry.get('rank')} "
+                            f"{entry.get('leaguePoints')}lp "
+                            f"{entry.get('wins')}W/{entry.get('losses')}L"
+                        )
+                except Exception as exc:
+                    self.bot.logging.error(f"{queue_type} snapshot failed for {name}: {exc!r}")
+
             fivev5 = list(filter(lambda x: x["queueType"] == "RANKED_SOLO_5x5", user_rank))
             if len(fivev5) > 0:
                 fivev5 = fivev5[0]
@@ -272,9 +303,12 @@ class FetchFromRiot(commands.Cog):
         can show one refresh late. NULL team_id (rows predating the
         column, not yet backfilled) never counts as duo.
 
-        Returns ``(squares, last_played)`` — last_played is the newest
-        game_start (same rows, no extra roundtrip), None when the player
-        has no recorded games.
+        Returns ``(squares, last_played)`` — last_played is when the newest
+        game ENDED (game_start + duration_sec, same rows, no extra
+        roundtrip), None when the player has no recorded games. End, not
+        start: "Last played" answers "when did they stop playing", and
+        rendering game_start made a just-finished 30-minute game read
+        "Last played: 30 minutes ago" the moment it ingested.
         """
         rows = await db.fetchall(
             "SELECT ms.win, EXISTS ("
@@ -282,7 +316,8 @@ class FetchFromRiot(commands.Cog):
             "    WHERE o.match_id = ms.match_id"
             "      AND o.team_id = ms.team_id"
             "      AND o.puuid <> ms.puuid"
-            ") AS duo, ms.game_start "
+            ") AS duo, "
+            "ms.game_start + make_interval(secs => COALESCE(ms.duration_sec, 0)) "
             "FROM match_stats ms "
             "WHERE ms.puuid = %s AND ms.queue_id = %s "
             "ORDER BY ms.game_start DESC LIMIT 5",

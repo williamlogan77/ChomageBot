@@ -190,10 +190,13 @@ class Ranked5sBoard(commands.Cog):
         Squares still come from league_history diffs; the last-played
         timestamp needs a real clock, which only match_stats has (queue-710
         rows from the ingestion stream), so it's a separate lookup.
+        Last-played is when the game ENDED (game_start + duration_sec) —
+        same semantics as the solo board.
         """
         rows = await leaderboard.fetch_history_wl(puuid, QUEUE_KEY, 6)
         latest = await db.fetchone(
-            "SELECT MAX(game_start) FROM match_stats WHERE puuid = %s AND queue_id = %s",
+            "SELECT MAX(game_start + make_interval(secs => COALESCE(duration_sec, 0))) "
+            "FROM match_stats WHERE puuid = %s AND queue_id = %s",
             (puuid, RANKED_5S_QUEUE_ID),
         )
         return leaderboard.build_last_five(rows), latest[0] if latest else None
@@ -358,11 +361,13 @@ class Ranked5sBoard(commands.Cog):
         # Fetch every entry's recent games first: the 🚩 marks whoever
         # played the board-wide most recent game, which isn't known until
         # all of them are in hand. Fallback standings come FROM match_stats,
-        # so last_played always exists here.
+        # so last_played always exists here (game END time, like the boards).
         recents: list[tuple[str, dt.datetime | None]] = []
         for entry in standings:
             rows = await db.fetchall(
-                "SELECT win, game_start FROM match_stats "
+                "SELECT win, "
+                "game_start + make_interval(secs => COALESCE(duration_sec, 0)) "
+                "FROM match_stats "
                 "WHERE puuid = %s AND queue_id = %s "
                 "ORDER BY game_start DESC LIMIT 5",
                 (entry["puuid"], RANKED_5S_QUEUE_ID),

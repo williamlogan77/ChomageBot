@@ -159,6 +159,18 @@ class LiveGames(commands.Cog):
             self.bot.logging.info(
                 f"Live: {len(ended)} game(s) just ended — refreshing the board now"
             )
+            # Pull the finishers' new match rows BEFORE the board posts so
+            # last-played/squares/🚩 land in the same refresh as the fresh
+            # LP — without this the fast-path post pairs new LP with a
+            # one-game-stale last-played until the next stream tick (~5
+            # min). Best-effort: match-v5 can lag a game end by a minute+,
+            # and a miss here just means the stream catches it as before.
+            backfill = self.bot.get_cog("Backfill")
+            if backfill is not None:
+                try:
+                    await backfill.ingest_recent(ended)
+                except Exception as exc:
+                    self.bot.logging.warning(f"Fast-path match ingest failed: {exc!r}")
             board = self.bot.get_cog("FetchFromRiot")
             if board is not None:
                 # Announce the finishes directly — authoritative, and immune

@@ -43,6 +43,9 @@ create table if not exists league_players (
 -- queue: league-v4 queueType this snapshot belongs to. Pre-existing rows
 -- migrate as RANKED_SOLO_5x5; the Ranked 5s board writes RANKED_5S
 -- (canonical internal constant — see cogs/ranked5s_table_updater.py).
+-- Since 2026-08 every other ranked queue in the entries response (flex
+-- as RANKED_FLEX_SR, anything Riot adds later) is snapshotted too,
+-- tagged with Riot's own queueType string (cogs/league_table_updater.py).
 -- raw: the complete league-v4 entry this snapshot was extracted from,
 -- archived verbatim (same rationale as match_raw below: hotStreak,
 -- miniSeries, the real queueType string etc. stay queryable without a
@@ -94,6 +97,34 @@ create index if not exists idx_match_stats_puuid_time on match_stats (puuid, gam
 -- Existing installs predate the column; CREATE IF NOT EXISTS won't add it.
 alter table match_stats add column if not exists team_id SMALLINT;
 
+-- Rich per-participant Match-V5 detail (2026-08). All nullable; ingested
+-- going forward by cogs/backfill.py and backfillable for historical rows
+-- from the archived match_raw payloads with
+-- scripts/backfill_match_detail_from_raw.py (pure SQL, zero API spend).
+-- NULL means "not yet backfilled", except the challenges-derived trio
+-- (solo_kills, kill_participation, team_damage_pct) and the ping columns,
+-- which are also NULL on payloads too old to carry those fields.
+alter table match_stats add column if not exists damage_to_champs INTEGER;   -- totalDamageDealtToChampions
+alter table match_stats add column if not exists damage_taken INTEGER;       -- totalDamageTaken
+alter table match_stats add column if not exists gold_earned INTEGER;
+alter table match_stats add column if not exists cs INTEGER;                 -- totalMinionsKilled + neutralMinionsKilled
+alter table match_stats add column if not exists vision_score INTEGER;
+alter table match_stats add column if not exists wards_placed INTEGER;
+alter table match_stats add column if not exists wards_killed INTEGER;
+alter table match_stats add column if not exists control_wards INTEGER;      -- detectorWardsPlaced
+alter table match_stats add column if not exists pings_total INTEGER;        -- sum of all *Pings counters
+alter table match_stats add column if not exists pings_missing INTEGER;      -- enemyMissingPings (the "?" ping)
+alter table match_stats add column if not exists largest_multi_kill SMALLINT;
+alter table match_stats add column if not exists penta_kills SMALLINT;
+alter table match_stats add column if not exists time_dead_sec INTEGER;      -- totalTimeSpentDead
+alter table match_stats add column if not exists turret_takedowns SMALLINT;
+alter table match_stats add column if not exists objectives_stolen SMALLINT;
+alter table match_stats add column if not exists first_blood SMALLINT;       -- firstBloodKill, 0/1
+alter table match_stats add column if not exists early_surrender SMALLINT;   -- gameEndedInEarlySurrender (remake), 0/1
+alter table match_stats add column if not exists solo_kills SMALLINT;        -- challenges.soloKills
+alter table match_stats add column if not exists kill_participation REAL;    -- challenges.killParticipation, 0..1
+alter table match_stats add column if not exists team_damage_pct REAL;       -- challenges.teamDamagePercentage, 0..1
+
 -- Complete Match-V5 JSON payload, archived verbatim at ingest. One row per
 -- MATCH (not per participant — tracked players often share a game; the
 -- per-player extract lives in match_stats). Exists so adding a new stat
@@ -106,6 +137,80 @@ create table if not exists match_raw (
     match_id TEXT not null primary key,
     fetched_at TIMESTAMPTZ not null default now(),
     payload JSONB not null
+);
+
+-- Complete Match-V5 TIMELINE payload, archived verbatim (2026-08,
+-- capture-everything pass). One row per MATCH, same rationale and
+-- lifecycle as match_raw above; fetched best-effort right after the
+-- match payload at ingest, and healed for historical matches by the
+-- /backfill_timelines command (timelines are NOT recoverable from
+-- match_raw — they're a separate endpoint — so the heal is API-based).
+-- A match with no row either predates capture or 404'd (timelines age
+-- out of Riot's window before match details do).
+-- Storage note: timelines are the biggest payloads the bot stores
+-- (~100-250 KB JSONB per match after compression, vs ~25-45 KB for
+-- match_raw) — see docs/riot-data-gaps.md before running a full heal.
+create table if not exists match_timeline_raw (
+    match_id TEXT not null primary key,
+    fetched_at TIMESTAMPTZ not null default now(),
+    payload JSONB not null
+);
+
+-- Challenges-v1 snapshots (capture-everything pass): per-challenge
+-- progress, one row per (account, challenge), upserted by
+-- cogs/profile_updater.py twice a day. Current-state like
+-- champion_mastery — percentile/level/value move both ways but the
+-- history isn't interesting enough to keep.
+create table if not exists player_challenges (
+    puuid TEXT not null,
+    challenge_id BIGINT not null,
+    level TEXT,
+    value DOUBLE PRECISION,
+    percentile REAL,
+    position INTEGER,
+    players_in_level INTEGER,
+    achieved_time TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ not null default now(),
+    primary key (puuid, challenge_id)
+);
+
+-- One row per account: challenges-v1 totals + everything else in the
+-- PlayerInfoDto kept verbatim (category_points, preferences incl. the
+-- equipped title/banner; raw is the complete response) so nothing from
+-- the endpoint is dropped.
+create table if not exists player_challenge_summary (
+    puuid TEXT not null primary key,
+    total_level TEXT,
+    total_current INTEGER,
+    total_max INTEGER,
+    total_percentile REAL,
+    category_points JSONB,
+    preferences JSONB,
+    raw JSONB,
+    updated_at TIMESTAMPTZ not null default now()
+);
+
+-- Solo-queue apex promotion cutoffs (league-v4 challenger/grandmaster
+-- ladders): min LP currently seated + ladder size, upserted by
+-- cogs/profile_updater.py. Feeds "distance to Challenger" gag stats.
+create table if not exists ladder_cutoffs (
+    queue TEXT not null,
+    tier TEXT not null,
+    cutoff_lp INTEGER,
+    players INTEGER,
+    updated_at TIMESTAMPTZ not null default now(),
+    primary key (queue, tier)
+);
+
+-- Summoner-v4 basics (capture-everything pass), upserted by
+-- cogs/profile_updater.py alongside the challenge sweep. revision_date
+-- is Riot's "profile last modified" timestamp.
+create table if not exists summoner_profile (
+    puuid TEXT not null primary key,
+    summoner_level INTEGER,
+    profile_icon_id INTEGER,
+    revision_date TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ not null default now()
 );
 
 -- Audit log of slash commands + button clicks + select-menu picks.
@@ -158,6 +263,32 @@ create table if not exists live_games (
     seen_at TIMESTAMPTZ not null default now(),
     primary key (game_id, puuid)
 );
+
+-- Champion mastery snapshots (champion-mastery-v4), one row per
+-- (account, champion), upserted by cogs/mastery_updater.py twice a day.
+-- Current-state table, not a history: points only ever grow, so the
+-- upsert keeps the latest values and updated_at says how fresh they are.
+-- champion_name comes from Data Dragon at snapshot time (championId is
+-- what Riot returns); NULL when the ddragon lookup failed — the upsert
+-- never overwrites a known name with NULL. raw is the complete mastery
+-- entry verbatim (milestone grades, nextSeasonMilestone requirements —
+-- everything the extract skips).
+create table if not exists champion_mastery (
+    puuid TEXT not null,
+    champion_id INTEGER not null,
+    champion_name TEXT,
+    level INTEGER not null,
+    points INTEGER not null,
+    points_since_last_level INTEGER,
+    points_until_next_level INTEGER,
+    tokens_earned INTEGER,
+    milestone INTEGER,
+    last_play_time TIMESTAMPTZ,
+    raw JSONB,
+    updated_at TIMESTAMPTZ not null default now(),
+    primary key (puuid, champion_id)
+);
+create index if not exists idx_champion_mastery_points on champion_mastery (points desc);
 
 -- Auto-detected season/split boundaries (utils/seasons.py): one row per
 -- ladder reset, derived from league_history games totals shrinking.

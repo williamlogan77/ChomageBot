@@ -272,9 +272,12 @@ class FetchFromRiot(commands.Cog):
         can show one refresh late. NULL team_id (rows predating the
         column, not yet backfilled) never counts as duo.
 
-        Returns ``(squares, last_played)`` — last_played is the newest
-        game_start (same rows, no extra roundtrip), None when the player
-        has no recorded games.
+        Returns ``(squares, last_played)`` — last_played is when the newest
+        game ENDED (game_start + duration_sec, same rows, no extra
+        roundtrip), None when the player has no recorded games. End, not
+        start: "Last played" answers "when did they stop playing", and
+        rendering game_start made a just-finished 30-minute game read
+        "Last played: 30 minutes ago" the moment it ingested.
         """
         rows = await db.fetchall(
             "SELECT ms.win, EXISTS ("
@@ -282,7 +285,8 @@ class FetchFromRiot(commands.Cog):
             "    WHERE o.match_id = ms.match_id"
             "      AND o.team_id = ms.team_id"
             "      AND o.puuid <> ms.puuid"
-            ") AS duo, ms.game_start "
+            ") AS duo, "
+            "ms.game_start + make_interval(secs => COALESCE(ms.duration_sec, 0)) "
             "FROM match_stats ms "
             "WHERE ms.puuid = %s AND ms.queue_id = %s "
             "ORDER BY ms.game_start DESC LIMIT 5",

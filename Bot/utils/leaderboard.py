@@ -206,8 +206,10 @@ def epoch_seconds(moment: dt.datetime | None) -> int | None:
 def last_played_line(last_played: dt.datetime | None) -> str:
     """``Last played:`` line for one entry, '' when the player has no games.
 
-    ``last_played`` is the newest match_stats.game_start (tz-aware
-    datetime, or None). Relative-only (<t:..:R>, "3 hours ago" — William's
+    ``last_played`` is when the player's newest match ENDED
+    (match_stats.game_start + duration_sec; tz-aware datetime, or None) —
+    start time made a just-finished 30-minute game read "Last played:
+    30 minutes ago". Relative-only (<t:..:R>, "3 hours ago" — William's
     call) and rendered client-side by Discord, so the message content
     stays byte-stable as time passes — the line can't retrigger the
     rendered-output post gate on its own.
@@ -221,8 +223,9 @@ def last_played_line(last_played: dt.datetime | None) -> str:
 def freshest_played(played_values) -> dt.datetime | None:
     """Board-wide most recent last_played; None when nobody has games.
 
-    Entries tying this value get the 🚩 — an exact game_start tie means
-    the same match, so duo/premade partners are flagged together.
+    Entries tying this value get the 🚩 — an exact tie means the same
+    match (same game_start AND same duration_sec ⇒ same end time), so
+    duo/premade partners are flagged together.
     """
     return max((played for played in played_values if played is not None), default=None)
 
@@ -297,8 +300,8 @@ async def render_board_entries(
 
     ``fetch_last_five`` is an async ``puuid -> (squares, last_played)``
     callable so each cog keeps its own scoping (queue tag / legacy dual
-    key); ``last_played`` is the newest game_start datetime, None when the
-    player has no recorded games.
+    key); ``last_played`` is when the newest game ended (game_start +
+    duration_sec), None when the player has no recorded games.
 
     The 🚩 is data-derived (survives hot reloads, catches 0-LP
     demotion-shield games): it marks the entry/entries whose last_played

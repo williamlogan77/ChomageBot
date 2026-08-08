@@ -250,6 +250,43 @@ class Backfill(commands.Cog):
                 self.bot.logging.error(f"Stream failed for {name}: {exc!r}")
         self._stream_last_ran = dt.datetime.now()
 
+    async def ingest_recent(self, puuids) -> int:
+        """Targeted on-demand pull for players whose game just ended.
+
+        Called by the live-games cog's end-of-game fast path so the board
+        refresh it triggers can render the finished game (last-played,
+        squares, 🚩) in the same post as the fresh LP — otherwise the
+        board shows new LP next to a last-played that's one game stale
+        until the next stream_matches tick, up to ~5 minutes later.
+        Best-effort: if match-v5 hasn't indexed the game yet this inserts
+        nothing and the stream picks it up as before. Same queue gating
+        and per-player error isolation as the stream loop.
+        """
+        puuids = set(puuids)
+        if not puuids:
+            return 0
+        placeholders = ",".join(["%s"] * len(puuids))
+        rows = await db.fetchall(
+            f"SELECT puuid, league_username FROM league_players "
+            f"WHERE puuid IN ({placeholders})",
+            tuple(puuids),
+        )
+        queues = (RANKED_SOLO_QUEUE_ID,) + ((RANKED_5S_QUEUE_ID,) if is_ranked5s_tracking() else ())
+        inserted_total = 0
+        for puuid, name in rows:
+            try:
+                inserted = await self._backfill_player(
+                    puuid, count=STREAM_RECENT_COUNT, all_history=False, name=name, queues=queues
+                )
+            except Exception as exc:
+                self.bot.logging.error(f"Fast-path ingest failed for {name}: {exc!r}")
+                continue
+            if inserted > 0:
+                self._stream_total_inserts += inserted
+                inserted_total += inserted
+                self.bot.logging.info(f"Fast-path ingest: {name} +{inserted} matches")
+        return inserted_total
+
     @stream_matches.before_loop
     async def before_stream(self) -> None:
         await self.bot.wait_until_ready()
@@ -401,6 +438,14 @@ class Backfill(commands.Cog):
                 "ON CONFLICT (match_id) DO NOTHING",
                 (mid, Jsonb(match)),
             )
+            # Riot caveat: gameDuration is SECONDS on matches that carry
+            # gameEndTimestamp (everything since ~patch 11.20) but
+            # MILLIseconds on older ones, which lack the field. Normalise
+            # so duration_sec is always seconds — the boards and the
+            # entries gate compute game END as game_start + duration_sec.
+            duration_sec = match["info"]["gameDuration"]
+            if "gameEndTimestamp" not in match["info"]:
+                duration_sec //= 1000
             for participant in match["info"]["participants"]:
                 if participant["puuid"] != puuid:
                     continue
@@ -427,7 +472,7 @@ class Backfill(commands.Cog):
                         participant["kills"],
                         participant["deaths"],
                         participant["assists"],
-                        match["info"]["gameDuration"],
+                        duration_sec,
                         match["info"].get("gameVersion"),
                         _participant_position(participant),
                         participant.get("teamId"),

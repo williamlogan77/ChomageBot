@@ -9,8 +9,8 @@ Riot splits its API across two kinds of hosts, and picking the wrong one 404s:
 
 | Host | Routing | APIs used here | Wrapper (Bot/utils/riot_client.py) |
 |---|---|---|---|
-| `https://euw1.api.riotgames.com` | platform (EUW) | league-v4 | `get_league_entries(puuid)` |
-| `https://europe.api.riotgames.com` | regional | match-v5 | `get_match_ids(puuid, count, queue, start)`, `get_match(match_id)` |
+| `https://euw1.api.riotgames.com` | platform (EUW) | league-v4, spectator-v5, champion-mastery-v4, challenges-v1, summoner-v4 | `get_league_entries(puuid)`, `get_active_game(puuid)`, `get_champion_mastery(puuid)`, `get_player_challenges(puuid)`, `get_summoner_by_puuid(puuid)`, `get_apex_league(tier, queue)` |
+| `https://europe.api.riotgames.com` | regional | match-v5, account-v1 | `get_match_ids(puuid, count, queue, start)` (`queue=None` = ALL queues), `get_match(match_id)`, `get_match_timeline(match_id)`, `get_account_by_riot_id` / `get_account_by_puuid` |
 
 All Riot HTTP goes through `Bot/utils/riot_client.py` — do **not** add HTTP
 calls elsewhere. Reasons:
@@ -134,11 +134,14 @@ Every Match-V5 payload the bot fetches is archived **verbatim** into the
 | `fetched_at` | TIMESTAMPTZ | when the bot pulled it |
 | `payload` | JSONB | the complete `GET /lol/match/v5/matches/{id}` response |
 
-**Why**: `match_stats` extracts only a dozen columns. When a new stat is
-wanted (the `position` column required a full, rate-limited re-fetch of ~8k
-matches), it should be a SQL query or one-off `UPDATE` against `payload`,
-never another Riot backfill. Both ingest paths in `cogs/backfill.py` (5-min
-stream and `/backfill_all`) write it with `ON CONFLICT (match_id) DO NOTHING`.
+**Why**: `match_stats` extracts a bounded set of columns (core stats plus
+the 2026-08 detail columns — see `_DETAIL_COLUMNS` in `cogs/backfill.py` and
+`docs/riot-data-gaps.md`). When a new stat is wanted (the `position` column
+required a full, rate-limited re-fetch of ~8k matches), it should be a SQL
+query or one-off `UPDATE` against `payload`, never another Riot backfill —
+`scripts/backfill_match_detail_from_raw.py` is the worked example. Both
+ingest paths in `cogs/backfill.py` (5-min stream and `/backfill_all`) write
+it with `ON CONFLICT (match_id) DO NOTHING`.
 
 ### Extracting a new field with JSONB
 
@@ -188,6 +191,20 @@ on the order of tens of MB per month at current tracked-player volume —
 comfortable on the DB container's 8 GB rootfs, but worth a
 `pg_total_relation_size('match_raw')` glance if the tracked-player list
 grows a lot.
+
+## Timelines + capture-everything (2026-08)
+
+`GET /lol/match/v5/matches/{id}/timeline` payloads are archived verbatim
+into `match_timeline_raw`, mirroring `match_raw`. Measured on a real
+27-minute ranked game: **779 KB as JSON text, 142 KB as JSONB on disk** —
+roughly 3× a match payload, the biggest data the bot stores. Both ingest
+paths fetch the timeline inline for every NEW match (one extra request);
+`/backfill_timelines` heals older matches, paced to ≤ ~60% of the key
+budget. Ingest also covers **every queue** now (`get_match_ids` with
+`queue=None`), and league entries for flex (or any future ranked queue)
+are snapshotted into `league_history` under Riot's own queueType tag.
+Full endpoint-by-endpoint status, backfill runbook, depth limits and
+storage math: `docs/riot-data-gaps.md`.
 
 ## Sources
 

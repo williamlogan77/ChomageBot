@@ -17,6 +17,7 @@ Ranked 5s rows are always puuid-keyed.
 import datetime as dt
 
 import discord
+from psycopg.types.json import Jsonb
 from utils import db
 
 APEX_TIERS = ("Master", "Grandmaster", "Challenger")
@@ -81,15 +82,44 @@ async def latest_history_wl(puuid: str, queue: str) -> list[tuple]:
     )
 
 
+# Keys the board cogs inject into an entry dict before it reaches the
+# snapshot writer — bot-side state, not Riot data, so they stay out of the
+# raw archive (sorted_rank is a Ranker instance and wouldn't serialise
+# anyway).
+_INJECTED_ENTRY_KEYS = frozenset(
+    {"user_id", "discord_name", "sorted_rank", "GamesPlayed", "WinRate", "summonerName"}
+)
+
+
+def _entry_raw(entry: dict) -> dict:
+    """The Riot-origin, JSON-safe subset of a (mutated) league entry.
+
+    Blacklist rather than whitelist so a field Riot adds tomorrow is
+    archived automatically; the isinstance filter is belt-and-braces
+    against a future injected key holding a non-serialisable object,
+    which would otherwise fail the INSERT and take the snapshot with it.
+    """
+    return {
+        key: value
+        for key, value in entry.items()
+        if key not in _INJECTED_ENTRY_KEYS
+        and isinstance(value, str | int | float | bool | dict | list | None)
+    }
+
+
 async def insert_history_snapshot(entry: dict, queue: str) -> None:
     """INSERT one league_history snapshot row tagged with ``queue``.
 
     leaguePoints arrives as int from Riot; keep it int (psycopg will not
-    cast str -> INTEGER the way sqlite silently did).
+    cast str -> INTEGER the way sqlite silently did). The complete Riot
+    entry is archived into ``raw`` alongside the extracted columns —
+    hotStreak, veteran, miniSeries (promos) and whatever Riot adds next
+    stay queryable without a re-fetch (league-v4 has no history endpoint,
+    so a snapshot not archived now is gone for good).
     """
     await db.execute(
-        "INSERT INTO league_history (puuid, lp, division, tier, wins, losses, queue) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+        "INSERT INTO league_history (puuid, lp, division, tier, wins, losses, queue, raw) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
         (
             entry["puuid"],
             int(entry["leaguePoints"]),
@@ -98,6 +128,7 @@ async def insert_history_snapshot(entry: dict, queue: str) -> None:
             int(entry["wins"]),
             int(entry["losses"]),
             queue,
+            Jsonb(_entry_raw(entry)),
         ),
     )
 

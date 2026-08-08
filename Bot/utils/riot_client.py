@@ -21,6 +21,12 @@ Public API:
   - :func:`get_match` — full match details by match ID (Match-V5).
   - :func:`get_account_by_riot_id` / :func:`get_account_by_puuid` —
     account-v1 lookups (formerly via pantheon, which bypassed this budget).
+  - :func:`get_active_game` — spectator-v5 live game for a puuid.
+  - :func:`get_champion_mastery` — champion-mastery-v4 list for a puuid.
+  - :func:`get_match_timeline` — per-minute Match-V5 timeline by match ID.
+  - :func:`get_player_challenges` — challenges-v1 player data for a puuid.
+  - :func:`get_summoner_by_puuid` — summoner-v4 basics (level, icon).
+  - :func:`get_apex_league` — league-v4 Challenger/GM/Master ladder list.
 """
 
 from __future__ import annotations
@@ -197,20 +203,26 @@ async def get_league_entries(
 async def get_match_ids(
     puuid: str,
     count: int = 20,
-    queue: int = RANKED_SOLO_QUEUE_ID,
+    queue: int | None = RANKED_SOLO_QUEUE_ID,
     start: int = 0,
 ) -> list[str] | None:
     """Recent match IDs for a player, newest first.
 
-    ``queue`` defaults to ranked solo/duo (420). ``start`` is the offset into
-    the player's match history (0 = newest). Match-V5 returns up to 100 per
-    page; paginate by incrementing ``start``. A short response (< requested
-    count) signals end of history.
+    ``queue`` defaults to ranked solo/duo (420); pass ``None`` to drop the
+    filter and get EVERY queue (ARAM, flex, normals, customs — all of LoL
+    match-v5; TFT lives on a different API) in one request — same spend as
+    a filtered call, which is why the capture-everything ingest uses it.
+    ``start`` is the offset into the player's match history (0 = newest).
+    Match-V5 returns up to 100 per page; paginate by incrementing
+    ``start``. A short response (< requested count) signals end of history.
 
     Match-V5 uses the regional host (europe), not the platform host (euw1).
     """
     url = f"{REGION_HOST}/lol/match/v5/matches/by-puuid/{puuid}/ids"
-    status, body = await _get_json(url, params={"queue": queue, "count": count, "start": start})
+    params: dict = {"count": count, "start": start}
+    if queue is not None:
+        params["queue"] = queue
+    status, body = await _get_json(url, params=params)
     if status != 200 or not isinstance(body, list):
         return None
     return body
@@ -220,6 +232,25 @@ async def get_match(match_id: str) -> dict | None:
     """Full match details by match ID. Match-V5."""
     url = f"{REGION_HOST}/lol/match/v5/matches/{match_id}"
     status, body = await _get_json(url)
+    if status != 200 or not isinstance(body, dict):
+        return None
+    return body
+
+
+async def get_match_timeline(match_id: str) -> dict | None:
+    """Per-minute Match-V5 timeline by match ID, or None.
+
+    Frames (participant gold/XP/CS snapshots each minute) + the full event
+    stream (kills with positions, objectives, item buys, wards). 404 is a
+    real answer — timelines age out of Riot's window before match details
+    do, and some old matches never had one — so it's handled quietly and
+    reads as None just like a transient failure: callers treat None as
+    "skip, maybe retry later", which is right for both.
+
+    Regional host (europe), like match details.
+    """
+    url = f"{REGION_HOST}/lol/match/v5/matches/{match_id}/timeline"
+    status, body = await _get_json(url, quiet_404=True)
     if status != 200 or not isinstance(body, dict):
         return None
     return body
@@ -268,3 +299,75 @@ async def get_active_game(puuid: str) -> tuple[bool, dict | None]:
     if status == 200 and isinstance(body, dict):
         return (True, body)
     return (False, None)
+
+
+async def get_champion_mastery(puuid: str) -> list[dict] | None:
+    """Champion-mastery-v4: every champion the player has mastery on.
+
+    Returns the full list (one dict per champion: championId,
+    championLevel, championPoints, lastPlayTime epoch-millis, token /
+    milestone fields), sorted by Riot highest-points-first, or ``None``
+    on failure. One request per player — cheap enough that the mastery
+    snapshot loop (cogs/mastery_updater.py) just takes the whole list.
+
+    Platform host (euw1), like league entries.
+    """
+    url = f"{PLATFORM_HOST}/lol/champion-mastery/v4/champion-masteries/by-puuid/{puuid}"
+    status, body = await _get_json(url)
+    if status != 200 or not isinstance(body, list):
+        return None
+    return body
+
+
+async def get_player_challenges(puuid: str) -> dict | None:
+    """Challenges-v1 player data: per-challenge progress + totals.
+
+    Returns the PlayerInfoDto ({"challenges": [...], "preferences": {...},
+    "totalPoints": {...}, "categoryPoints": {...}}) or ``None`` on
+    failure. One request covers every challenge the player has touched.
+
+    Platform host (euw1).
+    """
+    url = f"{PLATFORM_HOST}/lol/challenges/v1/player-data/{puuid}"
+    status, body = await _get_json(url)
+    if status != 200 or not isinstance(body, dict):
+        return None
+    return body
+
+
+async def get_summoner_by_puuid(puuid: str) -> dict | None:
+    """Summoner-v4 basics: summonerLevel, profileIconId, revisionDate.
+
+    Platform host (euw1).
+    """
+    url = f"{PLATFORM_HOST}/lol/summoner/v4/summoners/by-puuid/{puuid}"
+    status, body = await _get_json(url)
+    if status != 200 or not isinstance(body, dict):
+        return None
+    return body
+
+
+_APEX_LEAGUE_PATHS = {
+    "challenger": "challengerleagues",
+    "grandmaster": "grandmasterleagues",
+    "master": "masterleagues",
+}
+
+
+async def get_apex_league(tier: str, queue: str = "RANKED_SOLO_5x5") -> dict | None:
+    """League-v4 apex league list for a queue: the whole Challenger /
+    Grandmaster / Master ladder in one response.
+
+    ``tier`` is one of "challenger" / "grandmaster" / "master" (KeyError
+    on anything else — caller bug, not an API condition). Returns the
+    LeagueListDTO ({"entries": [...], "tier", "name", ...}) or ``None``.
+    The min leaguePoints across entries is the observable promotion
+    cutoff — see cogs/profile_updater.py.
+
+    Platform host (euw1).
+    """
+    url = f"{PLATFORM_HOST}/lol/league/v4/{_APEX_LEAGUE_PATHS[tier]}/by-queue/{queue}"
+    status, body = await _get_json(url)
+    if status != 200 or not isinstance(body, dict):
+        return None
+    return body

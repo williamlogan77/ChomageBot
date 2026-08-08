@@ -140,12 +140,17 @@ class FetchFromRiot(commands.Cog):
             self.bot.logging.warning("live_games unavailable — entries gating fails open")
             return set(), force_fresh
         try:
+            # queue_id filter: since the capture-everything pass the
+            # stream ingests EVERY queue, but only ranked games (solo 420,
+            # flex 440, 5s 710) can move league entries — a fresh ARAM
+            # must not burn a fresh entries fetch.
             fresh_match = {
                 row[0]
                 for row in await db.fetchall(
                     "SELECT DISTINCT puuid FROM match_stats "
                     "WHERE game_start + make_interval(secs => COALESCE(duration_sec, 0)) "
-                    "      > now() - interval '30 minutes'"
+                    "      > now() - interval '30 minutes' "
+                    "AND queue_id IN (420, 440, 710)"
                 )
             }
             tracked = {
@@ -215,6 +220,32 @@ class FetchFromRiot(commands.Cog):
                 failed += 1
                 self.bot.logging.error(f"Failed to fetch rank for {name}")
                 continue
+
+            # Capture-everything: snapshot every OTHER ranked queue in this
+            # response (flex today, whatever Riot adds tomorrow) into
+            # league_history while we're already holding it — zero extra
+            # API spend, the entries call always returns all queues. Solo
+            # keeps its richer change-gate below; RANKED_PREMADE_5x5
+            # belongs to the 5s board cog (written under its internal
+            # RANKED_5S tag). record_history_snapshot inserts only when
+            # W/L moved, so the steady-state cost is one SELECT per entry
+            # per cycle. Tagged with Riot's own queueType string
+            # (RANKED_FLEX_SR etc.) — consumers filter on their own tags,
+            # so nothing leaks into the solo board/awards/graphs.
+            for entry in user_rank:
+                queue_type = entry.get("queueType")
+                if not queue_type or queue_type in (SOLO_QUEUE, "RANKED_PREMADE_5x5"):
+                    continue
+                try:
+                    if await leaderboard.record_history_snapshot(entry, queue_type):
+                        self.bot.logging.info(
+                            f"{queue_type} history insert for {name}: "
+                            f"{entry.get('tier')} {entry.get('rank')} "
+                            f"{entry.get('leaguePoints')}lp "
+                            f"{entry.get('wins')}W/{entry.get('losses')}L"
+                        )
+                except Exception as exc:
+                    self.bot.logging.error(f"{queue_type} snapshot failed for {name}: {exc!r}")
 
             fivev5 = list(filter(lambda x: x["queueType"] == "RANKED_SOLO_5x5", user_rank))
             if len(fivev5) > 0:

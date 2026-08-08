@@ -103,10 +103,28 @@ class WeeklyAwards(commands.Cog):
         # ISO dates compare correctly as strings.
         return row is not None and row[0] >= week_start.isoformat()
 
-    async def _record_winners(self, week_start: dt.date, results: dict) -> None:
+    async def _record_winners(
+        self,
+        week_start: dt.date,
+        results: dict,
+        *,
+        disabled: frozenset[str] = frozenset(),
+        forced: frozenset[str] = frozenset(),
+    ) -> None:
+        """Persist winners. Disabled awards record nothing (they weren't
+        posted); forced winners' detail carries a ``forced`` marker so
+        the history says how the trophy happened."""
         rows = [
-            (week_start, award, w.user_id, w.display_name, w.value, Jsonb(w.detail))
+            (
+                week_start,
+                award,
+                w.user_id,
+                w.display_name,
+                w.value,
+                Jsonb({**w.detail, "forced": True} if award in forced else w.detail),
+            )
             for award, winners in results.items()
+            if award not in disabled
             for w in winners
         ]
         if rows:
@@ -135,12 +153,40 @@ class WeeklyAwards(commands.Cog):
             # Nothing recorded — the next tick retries the whole ceremony.
             return
 
-        results, season_reset = await awards.compute_all_awards(week_start, week_end)
+        # Dashboard controls: enable/disable + taglines (bot_config),
+        # forced winners + exclusions (award_overrides) — see
+        # utils/awards.AwardAdjustments.
+        adjustments = await awards.fetch_adjustments(week_start.date())
+        inputs = await awards.fetch_inputs(week_start, week_end)
+        results, season_reset, forced_applied = awards.compute_results(inputs, adjustments)
         if season_reset:
             self.bot.logging.info(
                 "Season reset detected in awarded week — cross-reset LP deltas excluded"
             )
-        blocks = awards.build_ceremony_blocks(week_start.date(), results, season_reset=season_reset)
+        if adjustments.disabled:
+            self.bot.logging.info(
+                f"Awards disabled via bot_config, skipped: {sorted(adjustments.disabled)}"
+            )
+        if adjustments.forced and not forced_applied == frozenset(adjustments.forced):
+            dropped = sorted(set(adjustments.forced) - forced_applied)
+            self.bot.logging.warning(
+                f"Forced winner(s) no longer qualify, computed winners kept: {dropped}"
+            )
+        if adjustments.excluded:
+            self.bot.logging.info(
+                "Exclusions applied: "
+                + ", ".join(
+                    f"{award}: {sorted(ids)}" for award, ids in sorted(adjustments.excluded.items())
+                )
+            )
+        blocks = awards.build_ceremony_blocks(
+            week_start.date(),
+            results,
+            season_reset=season_reset,
+            disabled=adjustments.disabled,
+            taglines=adjustments.taglines,
+            forced=forced_applied,
+        )
 
         self.bot.logging.info(
             f"Posting weekly awards for week of {week_start.date()} "
@@ -153,7 +199,12 @@ class WeeklyAwards(commands.Cog):
                 allowed_mentions=discord.AllowedMentions.none(),
             )
 
-        await self._record_winners(week_start.date(), results)
+        await self._record_winners(
+            week_start.date(),
+            results,
+            disabled=adjustments.disabled,
+            forced=forced_applied,
+        )
         await self.refresh_cabinet()
 
     # -------------------------------------------------------------- cabinet
@@ -177,11 +228,14 @@ class WeeklyAwards(commands.Cog):
         latest_week = row[0] if row else None
         latest_rows: list[tuple] = []
         if latest_week is not None:
-            # Fresh display names via users; the recorded display_name is
-            # the fallback for members who've since left.
+            # Fresh display names: dashboard alias first (user_aliases),
+            # then the users row; the recorded display_name is the
+            # fallback for members who've since left.
             latest_rows = await db.fetchall(
                 """SELECT wa.award, wa.discord_user_id,
                         COALESCE(
+                            (SELECT NULLIF(a.alias, '') FROM user_aliases a
+                             WHERE a.user_id = wa.discord_user_id),
                             NULLIF(
                                 CASE
                                     WHEN COALESCE(u.nickname, '') = '' THEN u.discord_tag
@@ -199,6 +253,8 @@ class WeeklyAwards(commands.Cog):
         count_rows = await db.fetchall(
             """SELECT wa.award,
                     COALESCE(
+                        (SELECT NULLIF(a.alias, '') FROM user_aliases a
+                         WHERE a.user_id = wa.discord_user_id),
                         NULLIF(
                             CASE
                                 WHEN COALESCE(u.nickname, '') = '' THEN u.discord_tag
@@ -273,14 +329,33 @@ class WeeklyAwards(commands.Cog):
         await ctx.response.defer(ephemeral=True)
         now_london = dt.datetime.now(awards.LONDON)
         week_start, _week_end = awards.week_bounds(now_london)
-        results, season_reset = await awards.compute_all_awards(week_start, now_london)
+        # Same adjustments path as the real ceremony, so the preview
+        # shows exactly what Monday will post (dashboard overrides,
+        # exclusions and disabled awards included).
+        adjustments = await awards.fetch_adjustments(week_start.date())
+        inputs = await awards.fetch_inputs(week_start, now_london)
+        results, season_reset, forced_applied = awards.compute_results(inputs, adjustments)
         header = (
             f"\U0001f3c6 **Weekly Awards — preview** — week of "
             f"<t:{awards.week_epoch(week_start.date())}:d> so far (nothing recorded)"
         )
         blocks = awards.build_ceremony_blocks(
-            week_start.date(), results, header=header, season_reset=season_reset
+            week_start.date(),
+            results,
+            header=header,
+            season_reset=season_reset,
+            disabled=adjustments.disabled,
+            taglines=adjustments.taglines,
+            forced=forced_applied,
         )
+        if adjustments.disabled:
+            blocks.append(
+                "*Disabled for this week's ceremony (bot_config): "
+                + ", ".join(
+                    awards.AWARDS[a].title for a in awards.AWARD_ORDER if a in adjustments.disabled
+                )
+                + "*\n"
+            )
         for message_text in leaderboard.chunk_blocks(blocks):
             await ctx.followup.send(
                 message_text,

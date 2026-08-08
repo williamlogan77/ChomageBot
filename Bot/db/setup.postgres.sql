@@ -249,6 +249,39 @@ create table if not exists weekly_awards (
     unique (week_start, award, discord_user_id)
 );
 
+-- Per-week award controls, written by the DASHBOARD (grants for the
+-- chomage_dash role are documented in the dashboard README) and read by
+-- the Monday ceremony (cogs/weekly_awards.py + utils/awards.py):
+--   forced_winner     overrides the computed winner for that week's
+--                     award — honored only while they still qualify as
+--                     a candidate, posted with a "chosen by management"
+--                     note;
+--   excluded_user_ids recomputes the award as if those users didn't
+--                     play that week ("on holiday").
+-- One row per (week, award); week_start is the Monday (Europe/London)
+-- the awarded week began, same convention as weekly_awards. Per-award
+-- enable/disable and taglines live in bot_config
+-- (award_<key>_enabled / award_<key>_tagline), not here.
+create table if not exists award_overrides (
+    week_start DATE not null,
+    award_key TEXT not null,
+    forced_winner BIGINT,
+    excluded_user_ids BIGINT[],
+    primary key (week_start, award_key)
+);
+
+-- Dashboard-managed display aliases. users.nickname is re-upserted from
+-- the guild on every boot (main.py member sync), so a user-chosen name
+-- needs a store that sync never touches. Written by the dashboard
+-- (grants in the dashboard README); the bot reads it when rendering
+-- award display names so both surfaces call people the same thing.
+create table if not exists user_aliases (
+    user_id BIGINT not null primary key,
+    alias TEXT not null,
+    set_by BIGINT,
+    updated_at TIMESTAMPTZ not null default now()
+);
+
 -- Live (spectator-v5) games for tracked players (cogs/live_games.py):
 -- one row per (game, tracked player), upserted each poll while the game
 -- runs and pruned by staleness once it ends. payload is the raw

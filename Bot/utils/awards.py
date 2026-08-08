@@ -10,6 +10,14 @@ Layering: pure, deterministic functions do the math and the rendering;
 thin async wrappers own the SQL; cogs/weekly_awards.py owns scheduling,
 posting and persistence. Roast lines rotate deterministically on the ISO
 week number so consecutive weeks differ without any randomness.
+
+Dashboard controls (2026-08): the ceremony consults AwardAdjustments —
+per-award enable/disable + tagline from bot_config
+(award_<key>_enabled / award_<key>_tagline) and per-week forced winners
+/ exclusions from the award_overrides table, both written by the
+dashboard. The dashboard's live standings (proxmox/dashboard
+app/queries/awards.py) port this module's math and MUST stay in
+lockstep when rules change here.
 """
 
 from __future__ import annotations
@@ -140,6 +148,22 @@ AWARDS: dict[str, AwardMeta] = {
 }
 
 
+# Default cabinet taglines per award — the dashboard shows these on its
+# trophy cabinet and registers award_<key>_tagline bot_config keys whose
+# default is exactly this text. A stored tagline EQUAL to the default is
+# treated as "not customized" (the ceremony post stays unchanged).
+DEFAULT_TAGLINES: dict[str, str] = {
+    LP_LOSS: "Donated the most LP back to the ladder in a single week.",
+    LP_CHAD: "Climbed hardest. Touched the least grass.",
+    PUSSY: "Sharpest drop in games played. Ranked anxiety is real.",
+    DUO_LEECH: "Physically incapable of pressing the queue button alone.",
+    INT: "The single most disgusting scoreline recorded that week.",
+}
+
+# Rendered next to a forced winner — banter, but also an audit trail.
+MANAGEMENT_NOTE = "⚖️ *winner chosen by management*"
+
+
 @dataclass(frozen=True)
 class Winner:
     """One winner of one award — ties produce several per award."""
@@ -148,6 +172,55 @@ class Winner:
     display_name: str
     value: float  # the number that condemns them (weekly_awards.value)
     detail: dict  # award-specific evidence (weekly_awards.detail)
+
+
+@dataclass(frozen=True)
+class AwardAdjustments:
+    """Dashboard-driven controls the ceremony applies before posting.
+
+    ``disabled``: awards skipped outright (no block, no recorded rows).
+    ``taglines``: award -> CUSTOM tagline (only entries differing from
+    DEFAULT_TAGLINES), rendered as an italic line under the title.
+    ``forced``: award -> user id whose win is forced — honored only
+    while they still qualify as a candidate (the dashboard offers
+    computed candidates, but data can move between click and Monday);
+    a no-longer-qualifying forced pick falls back to the computed
+    winner(s).
+    ``excluded``: award -> user ids recomputed away ("on holiday").
+    Exclusion beats forcing: a user both excluded and forced stays out.
+    """
+
+    disabled: frozenset[str] = frozenset()
+    taglines: dict[str, str] | None = None
+    forced: dict[str, int] | None = None
+    excluded: dict[str, frozenset[int]] | None = None
+
+    def tagline_for(self, award: str) -> str | None:
+        return (self.taglines or {}).get(award)
+
+    def forced_for(self, award: str) -> int | None:
+        return (self.forced or {}).get(award)
+
+    def excluded_for(self, award: str) -> frozenset[int]:
+        return (self.excluded or {}).get(award, frozenset())
+
+
+@dataclass(frozen=True)
+class AwardInputs:
+    """Everything the pure award math needs, fetched in one pass.
+
+    ``boundary_reset`` carries the seasons-table signal so
+    compute_results stays synchronous and fixture-testable.
+    """
+
+    baseline: list[tuple]
+    first_in_week: list[tuple]
+    last_in_week: list[tuple]
+    volume_rows: list[tuple]
+    duo_rows: list[tuple]
+    duo_partner_rows: list[tuple]
+    int_rows: list[tuple]
+    boundary_reset: bool = False
 
 
 # ----------------------------------------------------------------- weeks
@@ -532,6 +605,9 @@ def build_ceremony_blocks(
     header: str | None = None,
     *,
     season_reset: bool = False,
+    disabled: frozenset[str] | set[str] = frozenset(),
+    taglines: dict[str, str] | None = None,
+    forced: frozenset[str] | set[str] = frozenset(),
 ) -> list[str]:
     """Ceremony post as blocks for leaderboard.chunk_blocks.
 
@@ -542,12 +618,22 @@ def build_ceremony_blocks(
 
     ``season_reset``: swaps the LP awards' skip lines for the reset line
     — their normal skip lines claim nobody moved, which would be false.
+
+    Dashboard controls: ``disabled`` awards are omitted entirely,
+    ``taglines`` (custom only — see AwardAdjustments) render as an
+    italic line under the title, awards in ``forced`` carry the
+    "chosen by management" note. Defaults keep the output byte-identical
+    to the pre-controls format.
     """
     if header is None:
         header = f"\U0001f3c6 **Weekly Awards** — week of <t:{week_epoch(week_start)}:d>"
     blocks = [f"{header}\n"]
+    taglines = taglines or {}
     for award in AWARD_ORDER:
+        if award in disabled:
+            continue
         meta = AWARDS[award]
+        tagline_line = f"*{taglines[award]}*\n" if taglines.get(award) else ""
         winners = results.get(award) or []
         if not winners:
             skip = (
@@ -555,9 +641,10 @@ def build_ceremony_blocks(
                 if season_reset and award in (LP_LOSS, LP_CHAD)
                 else meta.skip_line
             )
-            blocks.append(f"{meta.emoji} **{meta.title}** — no winner\n{skip}\n")
+            blocks.append(f"{meta.emoji} **{meta.title}** — no winner\n{tagline_line}{skip}\n")
             continue
         mentions = " & ".join(f"<@{winner.user_id}>" for winner in winners)
+        note = f" {MANAGEMENT_NOTE}" if award in forced else ""
         if len(winners) == 1:
             body = condemn_line(award, winners[0])
         else:
@@ -568,8 +655,8 @@ def build_ceremony_blocks(
         # winners' details differ, so they get the weekly pool line.
         roast_detail = winners[0].detail if len(winners) == 1 else None
         blocks.append(
-            f"{meta.emoji} **{meta.title}** — {mentions}\n"
-            f"{body} {roast_line(award, week_start, roast_detail)}\n"
+            f"{meta.emoji} **{meta.title}** — {mentions}{note}\n"
+            f"{tagline_line}{body} {roast_line(award, week_start, roast_detail)}\n"
         )
     return blocks
 
@@ -648,8 +735,9 @@ def build_cabinet_blocks(
 # One row per tracked account, mapped to its Discord user + display name.
 # DISTINCT ON (puuid): league_players is keyed by the legacy leagueid, so a
 # renamed account could leave two rows with the same puuid — joining both
-# would double-count games. Display name falls back to league_username when
-# the users row is missing/blank.
+# would double-count games. Display name prefers the dashboard-managed
+# alias (user_aliases — guaranteed by the bot's own schema), then the
+# guild nickname/tag, then league_username, matching the dashboard chain.
 _TRACKED_CTE = """
     tracked AS (
         SELECT DISTINCT ON (lp.puuid)
@@ -657,6 +745,8 @@ _TRACKED_CTE = """
                lp.discord_user_id,
                lp.league_username,
                COALESCE(
+                   (SELECT NULLIF(a.alias, '') FROM user_aliases a
+                    WHERE a.user_id = lp.discord_user_id),
                    NULLIF(
                        CASE
                            WHEN COALESCE(u.nickname, '') = '' THEN u.discord_tag
@@ -837,38 +927,140 @@ async def fetch_int_rows(week_start: dt.datetime, week_end: dt.datetime) -> list
     )
 
 
+async def fetch_inputs(week_start: dt.datetime, week_end: dt.datetime) -> AwardInputs:
+    """Every row set the award math needs for [week_start, week_end)."""
+    baseline, first, last = await fetch_lp_snapshot_rows(week_start, week_end)
+    return AwardInputs(
+        baseline=baseline,
+        first_in_week=first,
+        last_in_week=last,
+        volume_rows=await fetch_volume_rows(week_start, week_end),
+        duo_rows=await fetch_duo_rows(week_start, week_end),
+        duo_partner_rows=await fetch_duo_partner_rows(week_start, week_end),
+        int_rows=await fetch_int_rows(week_start, week_end),
+        boundary_reset=await seasons.reset_within(week_start, week_end),
+    )
+
+
+async def fetch_adjustments(week_start: dt.date) -> AwardAdjustments:
+    """Dashboard controls for the week: bot_config toggles/taglines plus
+    the award_overrides row set. Tolerates award_overrides not existing
+    yet (first boot after this deploy creates it via the schema)."""
+    disabled: set[str] = set()
+    taglines: dict[str, str] = {}
+    config_rows = await db.fetchall("SELECT key, value FROM bot_config WHERE key LIKE 'award\\_%'")
+    by_key = {key: value for key, value in config_rows}
+    for award in AWARD_ORDER:
+        enabled_value = by_key.get(f"award_{award}_enabled")
+        if enabled_value is not None and enabled_value.strip().lower() in (
+            "0",
+            "false",
+            "no",
+            "off",
+        ):
+            disabled.add(award)
+        tagline = (by_key.get(f"award_{award}_tagline") or "").strip()
+        if tagline and tagline != DEFAULT_TAGLINES[award]:
+            taglines[award] = tagline
+    forced: dict[str, int] = {}
+    excluded: dict[str, frozenset[int]] = {}
+    try:
+        override_rows = await db.fetchall(
+            "SELECT award_key, forced_winner, excluded_user_ids "
+            "FROM award_overrides WHERE week_start = %s",
+            (week_start,),
+        )
+    except Exception:  # table not created yet — no overrides to honor
+        override_rows = []
+    for award_key, forced_winner, excluded_ids in override_rows:
+        if award_key not in AWARDS:
+            continue
+        if forced_winner is not None:
+            forced[award_key] = forced_winner
+        if excluded_ids:
+            excluded[award_key] = frozenset(excluded_ids)
+    return AwardAdjustments(
+        disabled=frozenset(disabled),
+        taglines=taglines,
+        forced=forced,
+        excluded=excluded,
+    )
+
+
+def compute_results(
+    inputs: AwardInputs, adjustments: AwardAdjustments | None = None
+) -> tuple[dict[str, list[Winner]], bool, frozenset[str]]:
+    """All five awards from ``inputs``, honoring dashboard adjustments.
+
+    Pure — the fixture tests drive this directly. Returns (results,
+    season_reset, forced_applied):
+
+    - season_reset is True when the reset happened inside the window,
+      from either of two signals — the in-window shrink count reaching
+      seasons.RESET_MIN_ACCOUNTS, or a recorded seasons-table boundary
+      (inputs.boundary_reset). On a reset week the LP awards are skipped
+      outright — cross-reset deltas aren't a comparable field — and the
+      ceremony swaps in the reset skip line. Match-derived awards are
+      unaffected: games played are games played.
+    - Exclusions recompute an award over the remaining players only.
+    - A forced winner is re-picked over their own rows alone, so their
+      value/detail are exactly what they earned — and if they no longer
+      qualify (dashboard offered candidates, data moved by Monday) the
+      computed winner(s) stand and the award is absent from
+      forced_applied.
+    - ``disabled`` is deliberately NOT applied here: results stay
+      complete so previews can show what a disabled award would have
+      said; posting and persistence do the skipping.
+    """
+    adj = adjustments or AwardAdjustments()
+    per_user, reset_accounts = net_lp_deltas(
+        inputs.baseline, inputs.first_in_week, inputs.last_in_week
+    )
+    season_reset = reset_accounts >= seasons.RESET_MIN_ACCOUNTS or inputs.boundary_reset
+
+    def compute(award: str, only: int | None = None) -> list[Winner]:
+        excluded = adj.excluded_for(award)
+
+        def keep(user_id: int) -> bool:
+            return user_id not in excluded and (only is None or user_id == only)
+
+        if award in (LP_LOSS, LP_CHAD):
+            if season_reset:
+                return []
+            pool = {uid: entry for uid, entry in per_user.items() if keep(uid)}
+            return pick_lp_extreme(pool, gain=award == LP_CHAD)
+        if award == PUSSY:
+            return pick_volume_collapse([row for row in inputs.volume_rows if keep(row[0])])
+        if award == DUO_LEECH:
+            return pick_duo_leech(
+                [row for row in inputs.duo_rows if keep(row[0])],
+                inputs.duo_partner_rows,
+            )
+        return pick_int([row for row in inputs.int_rows if keep(row[0])])
+
+    results: dict[str, list[Winner]] = {}
+    forced_applied: set[str] = set()
+    for award in AWARD_ORDER:
+        winners: list[Winner] | None = None
+        forced = adj.forced_for(award)
+        if forced is not None and forced not in adj.excluded_for(award):
+            forced_winners = compute(award, only=forced)
+            if forced_winners:
+                winners = forced_winners
+                forced_applied.add(award)
+        if winners is None:
+            winners = compute(award)
+        results[award] = winners
+    return results, season_reset, frozenset(forced_applied)
+
+
 async def compute_all_awards(
     week_start: dt.datetime, week_end: dt.datetime
 ) -> tuple[dict[str, list[Winner]], bool]:
-    """All five awards for [week_start, week_end) — empty list = skipped.
-
-    Second return: True when the reset happened inside the window, from
-    either of two signals — the in-window shrink count reaching
-    seasons.RESET_MIN_ACCOUNTS, or a recorded seasons-table boundary
-    falling inside the window. Both are needed: a reset early in the
-    week leaves most accounts' first in-week snapshot already
-    post-reset, which the late-returner rebase absorbs (shrink count
-    stays low), but the boundary row written live by the rank loop still
-    lands inside the week. On a reset week the LP awards are skipped
-    outright — some players' deltas would be old-ladder tail movement
-    and others' new-ladder placement climbs, which isn't a comparable
-    field — and the ceremony swaps in the reset skip line. The
-    match-derived awards (volume, duo, int) are unaffected by a reset:
-    games played are games played.
-    """
-    baseline, first, last = await fetch_lp_snapshot_rows(week_start, week_end)
-    deltas, reset_accounts = net_lp_deltas(baseline, first, last)
-    season_reset = reset_accounts >= seasons.RESET_MIN_ACCOUNTS or await seasons.reset_within(
-        week_start, week_end
-    )
-    results = {
-        LP_LOSS: [] if season_reset else pick_lp_extreme(deltas, gain=False),
-        LP_CHAD: [] if season_reset else pick_lp_extreme(deltas, gain=True),
-        PUSSY: pick_volume_collapse(await fetch_volume_rows(week_start, week_end)),
-        DUO_LEECH: pick_duo_leech(
-            await fetch_duo_rows(week_start, week_end),
-            await fetch_duo_partner_rows(week_start, week_end),
-        ),
-        INT: pick_int(await fetch_int_rows(week_start, week_end)),
-    }
+    """All five awards for [week_start, week_end), no adjustments —
+    empty list = skipped. Kept as the stable public entry point; the
+    ceremony path goes fetch_inputs + fetch_adjustments +
+    compute_results (see the cog). Second return: season reset flag
+    (full semantics on compute_results)."""
+    results, season_reset, _ = compute_results(await fetch_inputs(week_start, week_end))
     return results, season_reset

@@ -230,7 +230,7 @@ async def _run() -> None:
     say("all done. marker cleared. mop-up: python scripts/backfill_match_detail_from_raw.py")
 
 
-async def amain(dry_run: bool) -> int:
+async def amain(dry_run: bool, budget: int) -> int:
     if not config.riot_api_key():
         say(
             "riot_key is not set — pass it via the environment "
@@ -241,10 +241,15 @@ async def amain(dry_run: bool) -> int:
         if dry_run:
             await _dry_run()
         else:
-            riot_client.set_rate_limits(STANDALONE_LIMITS)
+            # --budget caps this process's 2-minute window. When sharing the
+            # bot's own key (puuids are key-scoped, so a spare key can only
+            # walk puuids it resolved itself), a low budget leaves the rest
+            # of the window to the bot's limiter, which knows nothing of us.
+            limits = [(min(18, budget), 1.0), (budget, 120.0)]
+            riot_client.set_rate_limits(limits)
             say(
                 "rate budget for THIS process: "
-                + ", ".join(f"{n}/{int(w)}s" for n, w in STANDALONE_LIMITS)
+                + ", ".join(f"{n}/{int(w)}s" for n, w in limits)
                 + " (the bot's own limiter is a different process — unaffected)"
             )
             await _run()
@@ -262,6 +267,13 @@ def main() -> int:
         action="store_true",
         help="show planned work + request estimate, call nothing, write nothing",
     )
+    parser.add_argument(
+        "--budget",
+        type=int,
+        default=STANDALONE_LIMITS[1][0],
+        help="requests per 2-minute window for this process (default %(default)s; "
+        "use a low value like 40 when running on the bot's own key)",
+    )
     args = parser.parse_args()
 
     # Page/ids-walk INFO lines from utils.match_ingest and budget warnings
@@ -277,7 +289,7 @@ def main() -> int:
         # psycopg's async pool can't run on Windows' default ProactorEventLoop.
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     try:
-        return asyncio.run(amain(args.dry_run))
+        return asyncio.run(amain(args.dry_run, max(1, args.budget)))
     except KeyboardInterrupt:
         print("\n[deep] interrupted — progress is saved; rerun to resume", flush=True)
         return 130

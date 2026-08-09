@@ -1,10 +1,18 @@
 """Weekly awards ceremony: computation core.
 
-Five awards computed over one calendar week (Monday 00:00 -> Monday 00:00,
-Europe/London wall time) from existing tables — match_stats for games,
-league_history for LP — aggregated per Discord user: a person's tracked
-league accounts sum together. Solo queue only (queue_id 420 /
-league_history.queue 'RANKED_SOLO_5x5').
+Five awards computed over one calendar week (Monday 00:00 -> Monday
+00:00, Europe/London wall time) from existing tables — match_stats for
+games, league_history for LP — aggregated per Discord user: a person's
+tracked league accounts sum together.
+
+Queues (2026-08): match-derived awards score EVERY queue by default —
+ARAM, flex, Arena, normals, Clash, the lot (remakes never count; see
+GameRow). The LP awards stay ranked solo by nature: LP only exists
+there. The default is steered by the ``awards_scope`` bot_config key
+("all" | "ranked", default "all"), and each award's measure can be
+re-pointed per week from the dashboard: a queue scope (SCOPES) times a
+metric (METRICS — most deaths, most time dead, lowest winrate, ...).
+Precedence: exclusion > forced winner > chosen metric/scope > defaults.
 
 Layering: pure, deterministic functions do the math and the rendering;
 thin async wrappers own the SQL; cogs/weekly_awards.py owns scheduling,
@@ -13,11 +21,12 @@ week number so consecutive weeks differ without any randomness.
 
 Dashboard controls (2026-08): the ceremony consults AwardAdjustments —
 per-award enable/disable + tagline from bot_config
-(award_<key>_enabled / award_<key>_tagline) and per-week forced winners
-/ exclusions from the award_overrides table, both written by the
-dashboard. The dashboard's live standings (proxmox/dashboard
-app/queries/awards.py) port this module's math and MUST stay in
-lockstep when rules change here.
+(award_<key>_enabled / award_<key>_tagline), the default queue scope
+(awards_scope) and per-week forced winners / exclusions / chosen
+measures from the award_overrides table, all written by the dashboard.
+The dashboard's live standings (proxmox/dashboard app/queries/awards.py)
+port this module's math and MUST stay in lockstep when rules change
+here (dashboard tests/test_award_parity.py enforces it).
 """
 
 from __future__ import annotations
@@ -45,6 +54,200 @@ DUO_LEECH = "duo_leech"
 INT = "int_of_the_week"
 
 AWARD_ORDER = (LP_LOSS, LP_CHAD, PUSSY, DUO_LEECH, INT)
+
+# ------------------------------------------------------ queues + scopes
+
+# match-v5 queueId -> short human name. MUST stay identical to the
+# dashboard's app/queries/live.QUEUE_NAMES (the parity suite checks) —
+# verified against Riot's official queues.json.
+QUEUE_NAMES = {
+    400: "Normal Draft",
+    420: "Ranked Solo/Duo",
+    430: "Normal Blind",
+    440: "Ranked Flex",
+    450: "ARAM",
+    480: "Swiftplay",
+    490: "Quickplay",
+    700: "Clash",
+    720: "ARAM Clash",
+    870: "Co-op vs AI",
+    880: "Co-op vs AI",
+    890: "Co-op vs AI",
+    900: "ARURF",
+    1010: "Snow ARURF",
+    1300: "Nexus Blitz",
+    1400: "Ultimate Spellbook",
+    1700: "Arena",
+    1710: "Arena",
+    1900: "Pick URF",
+    2400: "ARAM: Mayhem",
+}
+
+
+def queue_name(queue_id: int | None) -> str:
+    """Short display name; custom games report id 0 (or none at all)."""
+    if not queue_id:
+        return "Custom game"
+    return QUEUE_NAMES.get(queue_id, "Other mode")
+
+
+# Arena deaths are the game mode (one per round, many rounds), so a
+# mediocre Arena evening structurally outscores a genuinely griefed
+# Rift game. Death-counting metrics drop Arena from the "all" scope;
+# explicitly picking the Arena scope opts back in.
+ARENA_QUEUES = frozenset({1700, 1710})
+
+SCOPE_ALL = "all"
+SCOPE_RANKED = "ranked"
+
+# bot_config key holding the DEFAULT scope for match-derived awards.
+# Registered in the dashboard's app/botconfig.py; anything that isn't a
+# SCOPES key falls back to "all" (parse_scope).
+SCOPE_KEY = "awards_scope"
+
+# scope key -> (label, queue ids; None = every queue). Keys are stored
+# in award_overrides.chosen_scope and in winner detail — stable.
+SCOPES: dict[str, tuple[str, tuple[int, ...] | None]] = {
+    SCOPE_ALL: ("all queues", None),
+    SCOPE_RANKED: ("Ranked Solo/Duo", (RANKED_SOLO_QUEUE_ID,)),
+    "flex": ("Ranked Flex", (440,)),
+    "aram": ("ARAM", (450,)),
+    "arena": ("Arena", (1700, 1710)),
+    "normals": ("Normals", (400, 430, 480, 490)),
+    "clash": ("Clash", (700, 720)),
+}
+
+
+def parse_scope(value: str | None) -> str:
+    """Canonical scope key from a stored value; anything unknown -> all."""
+    value = (value or "").strip().lower()
+    return value if value in SCOPES else SCOPE_ALL
+
+
+def in_scope(queue_id: int | None, scope: str) -> bool:
+    ids = SCOPES[scope][1]
+    return ids is None or queue_id in ids
+
+
+# ------------------------------------------------------ metric registry
+
+
+@dataclass(frozen=True)
+class MetricSpec:
+    """One pickable weekly measure. ``lp_based`` metrics live on the
+    ranked-solo LP ladder only — scope selection doesn't apply."""
+
+    key: str
+    label: str  # lower-case phrase, composes into "measured by ..."
+    description: str
+    lp_based: bool = False
+
+
+# Registry order is dropdown order. Keys are stored in
+# award_overrides.chosen_metric and winner detail — stable, do not
+# rename. MUST stay identical to the dashboard's copy (parity suite).
+METRICS: dict[str, MetricSpec] = {
+    spec.key: spec
+    for spec in (
+        MetricSpec(
+            "lp_loss",
+            "biggest LP loss",
+            "Largest net LP drop across the week (ranked solo — the only place LP exists).",
+            lp_based=True,
+        ),
+        MetricSpec(
+            "lp_gain",
+            "biggest LP gain",
+            "Largest net LP climb across the week (ranked solo — the only place LP exists).",
+            lp_based=True,
+        ),
+        MetricSpec(
+            "games_drop",
+            "sharpest drop in games played",
+            "Biggest collapse vs the player's own 4-week habit (5+ games/week habit required).",
+        ),
+        MetricSpec(
+            "fewest_games",
+            "fewest games played",
+            "Least games this week among people with a 5+ games/week habit.",
+        ),
+        MetricSpec(
+            "duo_share",
+            "highest duo-queue share",
+            "Largest share of games with another tracked player on the team "
+            "(min 5 games, 2 of them duo).",
+        ),
+        MetricSpec(
+            "most_deaths_game",
+            "most deaths in one game",
+            "The single game with the most deaths; worse KDA breaks ties. Arena sits out "
+            "of the all-queues pool — dying there is the game mode.",
+        ),
+        MetricSpec(
+            "lowest_kda_game",
+            "lowest KDA in one game",
+            "The single game with the worst (kills+assists)/deaths. Arena sits out of the "
+            "all-queues pool.",
+        ),
+        MetricSpec(
+            "most_deaths_total",
+            "most deaths across the week",
+            "Deaths summed over every game played. Arena sits out of the all-queues pool.",
+        ),
+        MetricSpec(
+            "most_time_dead",
+            "most time spent dead",
+            "Total time spent watching the gray screen across the week.",
+        ),
+        MetricSpec(
+            "most_missing_pings",
+            "most '?' pings",
+            "Enemy-missing pings fired across the week. The passive-aggression index.",
+        ),
+        MetricSpec(
+            "most_pings",
+            "most pings overall",
+            "Every ping of any kind, summed across the week.",
+        ),
+        MetricSpec(
+            "lowest_kp",
+            "lowest kill participation",
+            "Worst average share of the team's kills (min 3 games with data).",
+        ),
+        MetricSpec(
+            "lowest_winrate",
+            "lowest winrate",
+            "Worst win fraction on the week (min 5 games).",
+        ),
+        MetricSpec(
+            "most_first_bloods",
+            "most first bloods",
+            "First bloods drawn across the week.",
+        ),
+        MetricSpec(
+            "biggest_damage_share",
+            "biggest team-damage share",
+            "The single game carrying the largest share of the team's damage.",
+        ),
+        MetricSpec(
+            "largest_multikill",
+            "largest multikill",
+            "The biggest multikill of the week (double or better).",
+        ),
+    )
+}
+
+# Each award's built-in measure — what runs when nobody picked anything.
+DEFAULT_METRIC: dict[str, str] = {
+    LP_LOSS: "lp_loss",
+    LP_CHAD: "lp_gain",
+    PUSSY: "games_drop",
+    DUO_LEECH: "duo_share",
+    INT: "most_deaths_game",
+}
+
+# Metrics distorted by Arena's round-based dying (see ARENA_QUEUES).
+DEATH_METRICS = frozenset({"most_deaths_game", "lowest_kda_game", "most_deaths_total"})
 
 # Replaces the LP awards' skip lines on a reset week — the normal lines
 # ("Disgustingly competent") would read as a stats claim that's wrong.
@@ -100,7 +303,7 @@ AWARDS: dict[str, AwardMeta] = {
         roasts=(
             "The queue button doesn't bite.",
             "Ranked anxiety remains undefeated.",
-            "Hiding in ARAM doesn't count.",
+            "ARAM counts now. There is nowhere left to hide.",
             "The grind waited. They never came.",
             "Protecting that rank like it's a family heirloom.",
             "Touch grass achieved. Wrong week for it.",
@@ -152,12 +355,15 @@ AWARDS: dict[str, AwardMeta] = {
 # trophy cabinet and registers award_<key>_tagline bot_config keys whose
 # default is exactly this text. A stored tagline EQUAL to the default is
 # treated as "not customized" (the ceremony post stays unchanged).
+# The LP lines carry the ranked-solo note because those two awards never
+# widen to other queues — LP exists nowhere else.
 DEFAULT_TAGLINES: dict[str, str] = {
-    LP_LOSS: "Donated the most LP back to the ladder in a single week.",
-    LP_CHAD: "Climbed hardest. Touched the least grass.",
-    PUSSY: "Sharpest drop in games played. Ranked anxiety is real.",
-    DUO_LEECH: "Physically incapable of pressing the queue button alone.",
-    INT: "The single most disgusting scoreline recorded that week.",
+    LP_LOSS: "Donated the most LP back to the ladder in a single week. Ranked solo — "
+    "the only place LP exists.",
+    LP_CHAD: "Climbed hardest. Touched the least grass. Ranked solo — the only place " "LP exists.",
+    PUSSY: "Sharpest drop in games played — ARAM spam counts. Queue anxiety is real.",
+    DUO_LEECH: "Physically incapable of pressing the queue button alone. Any queue.",
+    INT: "The single most disgusting scoreline recorded that week, in any queue.",
 }
 
 # Rendered next to a forced winner — banter, but also an audit trail.
@@ -175,6 +381,36 @@ class Winner:
 
 
 @dataclass(frozen=True)
+class GameRow:
+    """One tracked player's game inside the award week.
+
+    Produced by fetch_game_rows — remakes (early_surrender) are already
+    excluded there, in every scope: a 3-minute remake is not a game.
+    The rich-detail columns are nullable (rows predating the 2026-08
+    capture pass, or payloads too old to carry challenges/pings) —
+    metric pickers skip rows without the stat they need.
+    """
+
+    user_id: int
+    display_name: str
+    queue_id: int
+    kills: int
+    deaths: int
+    assists: int
+    champion: str
+    win: int
+    match_id: str
+    duo: bool  # another tracked player on the same team of this match
+    time_dead_sec: int | None = None
+    pings_total: int | None = None
+    pings_missing: int | None = None
+    kill_participation: float | None = None
+    team_damage_pct: float | None = None
+    largest_multi_kill: int | None = None
+    first_blood: int | None = None
+
+
+@dataclass(frozen=True)
 class AwardAdjustments:
     """Dashboard-driven controls the ceremony applies before posting.
 
@@ -187,13 +423,24 @@ class AwardAdjustments:
     a no-longer-qualifying forced pick falls back to the computed
     winner(s).
     ``excluded``: award -> user ids recomputed away ("on holiday").
-    Exclusion beats forcing: a user both excluded and forced stays out.
+    ``metrics`` / ``scopes``: award -> per-week chosen measure (METRICS
+    key) and queue scope (SCOPES key) from award_overrides.
+    ``default_scope``: the awards_scope bot_config key — scope applied
+    when no per-week choice exists.
+
+    Precedence: exclusion beats forcing (a user both excluded and forced
+    stays out); forcing beats the metric (it picks WHO wins, the metric
+    still defines what is measured); chosen metric/scope beat the
+    defaults.
     """
 
     disabled: frozenset[str] = frozenset()
     taglines: dict[str, str] | None = None
     forced: dict[str, int] | None = None
     excluded: dict[str, frozenset[int]] | None = None
+    metrics: dict[str, str] | None = None
+    scopes: dict[str, str] | None = None
+    default_scope: str = SCOPE_ALL
 
     def tagline_for(self, award: str) -> str | None:
         return (self.taglines or {}).get(award)
@@ -204,11 +451,23 @@ class AwardAdjustments:
     def excluded_for(self, award: str) -> frozenset[int]:
         return (self.excluded or {}).get(award, frozenset())
 
+    def metric_for(self, award: str) -> str | None:
+        return (self.metrics or {}).get(award)
+
+    def scope_for(self, award: str) -> str | None:
+        return (self.scopes or {}).get(award)
+
 
 @dataclass(frozen=True)
 class AwardInputs:
     """Everything the pure award math needs, fetched in one pass.
 
+    ``window_rows``: (user_id, display_name, queue_id, in_week) per game
+    over the 4 prior weeks + the award week — the games-count metrics
+    derive per-scope prior/week counts from it.
+    ``games``: GameRow per in-week game (all queues, remakes excluded).
+    ``partner_rows``: (user_id, partner_user_id, partner_name, queue_id,
+    games_together) per tracked pair per queue.
     ``boundary_reset`` carries the seasons-table signal so
     compute_results stays synchronous and fixture-testable.
     """
@@ -216,11 +475,21 @@ class AwardInputs:
     baseline: list[tuple]
     first_in_week: list[tuple]
     last_in_week: list[tuple]
-    volume_rows: list[tuple]
-    duo_rows: list[tuple]
-    duo_partner_rows: list[tuple]
-    int_rows: list[tuple]
+    window_rows: list[tuple]
+    games: list[GameRow]
+    partner_rows: list[tuple]
     boundary_reset: bool = False
+
+
+@dataclass(frozen=True)
+class AwardPools:
+    """The per-award input pools, LP already aggregated — the pure-math
+    substrate every metric picker draws from."""
+
+    per_user: dict[int, dict]
+    window_rows: list[tuple]
+    games: list[GameRow]
+    partner_rows: list[tuple]
 
 
 # ----------------------------------------------------------------- weeks
@@ -387,6 +656,75 @@ def pick_lp_extreme(per_user: dict[int, dict], *, gain: bool) -> list[Winner]:
     ]
 
 
+# ------------------------------------------- scope-filtered derivations
+
+
+def games_for_scope(games: list[GameRow], scope: str, metric: str | None = None) -> list[GameRow]:
+    """The games a metric sees under ``scope``.
+
+    Death-counting metrics drop Arena from the "all" pool (dying there
+    is the game mode, see ARENA_QUEUES); the explicit "arena" scope opts
+    back in.
+    """
+    rows = [g for g in games if in_scope(g.queue_id, scope)]
+    if scope == SCOPE_ALL and metric in DEATH_METRICS:
+        rows = [g for g in rows if g.queue_id not in ARENA_QUEUES]
+    return rows
+
+
+def volume_rows_for_scope(window_rows: list[tuple], scope: str) -> list[tuple]:
+    """(user_id, display_name, prior_4w_games, this_week_games) per user
+    under ``scope`` — derived from the raw per-game window rows so every
+    scope shares one fetch."""
+    per_user: dict[int, list] = {}
+    for user_id, display_name, queue_id, in_week in window_rows:
+        if not in_scope(queue_id, scope):
+            continue
+        entry = per_user.setdefault(user_id, [display_name, 0, 0])
+        entry[2 if in_week else 1] += 1
+    return [(uid, name, prior, week) for uid, (name, prior, week) in sorted(per_user.items())]
+
+
+def duo_rows_for_scope(games: list[GameRow], scope: str) -> list[tuple]:
+    """(user_id, display_name, games, duo_games, duo_wins, solo_wins) per
+    user under ``scope``. Duo = another tracked player has a match_stats
+    row for the same match on the same team (match_stats holds only
+    tracked players). In Arena "the same team" is the 8-player half Riot
+    reports as teamId, not the 2-man subteam — close enough to "queued
+    together" for this award's purposes."""
+    per_user: dict[int, list] = {}
+    for g in games:
+        if not in_scope(g.queue_id, scope):
+            continue
+        entry = per_user.setdefault(g.user_id, [g.display_name, 0, 0, 0, 0])
+        entry[1] += 1
+        if g.duo:
+            entry[2] += 1
+            entry[3] += 1 if g.win == 1 else 0
+        else:
+            entry[4] += 1 if g.win == 1 else 0
+    return [
+        (uid, name, games_n, duo_games, duo_wins, solo_wins)
+        for uid, (name, games_n, duo_games, duo_wins, solo_wins) in sorted(per_user.items())
+    ]
+
+
+def partner_rows_for_scope(partner_rows: list[tuple], scope: str) -> list[tuple]:
+    """(user_id, partner_user_id, partner_name, games_together) under
+    ``scope`` — sums the per-queue pair counts fetch_partner_rows
+    returns."""
+    pairs: dict[tuple[int, int], list] = {}
+    for user_id, partner_id, partner_name, queue_id, games_together in partner_rows:
+        if not in_scope(queue_id, scope):
+            continue
+        entry = pairs.setdefault((user_id, partner_id), [partner_name, 0])
+        entry[1] += games_together
+    return [(uid, pid, name, count) for (uid, pid), (name, count) in sorted(pairs.items())]
+
+
+# ------------------------------------------------- games-count pickers
+
+
 def pick_volume_collapse(rows: list[tuple]) -> list[Winner]:
     """Biggest games-played collapse vs the player's own 4-week habit.
 
@@ -425,13 +763,41 @@ def pick_volume_collapse(rows: list[tuple]) -> list[Winner]:
     ]
 
 
+def pick_fewest_games(rows: list[tuple]) -> list[Winner]:
+    """Fewest games this week among people with a real habit.
+
+    Same row shape and habit gate as pick_volume_collapse (prior 4 weeks
+    >= 20 games, i.e. a 5+/week habit) so a lurker who never plays can't
+    win by default. Fewest games wins; ties break toward the bigger
+    habit (the larger addiction going quiet is the story).
+    """
+    candidates = []
+    for user_id, display_name, prior_games, week_games in sorted(rows):
+        if prior_games < 20:
+            continue
+        candidates.append((week_games, -prior_games, user_id, display_name, prior_games))
+    if not candidates:
+        return []
+    best = min((week, neg_prior) for week, neg_prior, *_ in candidates)
+    return [
+        Winner(
+            user_id=user_id,
+            display_name=display_name,
+            value=float(week_games),
+            detail={"baseline": float(Fraction(prior_games, 4)), "this_week": week_games},
+        )
+        for week_games, neg_prior, user_id, display_name, prior_games in candidates
+        if (week_games, neg_prior) == best
+    ]
+
+
 def pick_duo_leech(rows: list[tuple], partner_rows: list[tuple] = ()) -> list[Winner]:
     """Highest duo-game fraction this week; min 5 games, min 2 duo games.
 
     ``rows``: ``(discord_user_id, display_name, games, duo_games,
-    duo_wins, solo_wins)`` per user, duo as defined by fetch_duo_rows.
+    duo_wins, solo_wins)`` per user, duo as defined by duo_rows_for_scope.
     ``partner_rows``: ``(discord_user_id, partner_user_id, partner_name,
-    games_together)`` from fetch_duo_partner_rows. When one partner
+    games_together)`` from partner_rows_for_scope. When one partner
     accounts for at least half of the winner's duo games (and >= 2 of
     them), they're named in the detail — the enabler deserves credit.
     The detail keeps the duo-vs-solo records — the leech evidence.
@@ -477,51 +843,369 @@ def pick_duo_leech(rows: list[tuple], partner_rows: list[tuple] = ()) -> list[Wi
     return winners
 
 
-def pick_int(rows: list[tuple]) -> list[Winner]:
-    """Most deaths in a single game; ties broken by the worse (k+a)/d.
+# ------------------------------------------------- single-game pickers
 
-    ``rows``: ``(discord_user_id, display_name, kills, deaths, assists,
-    champion, win, match_id)`` — one row per game. 0-death games can't
-    win (and an empty week returns [], letting the skip line run). A user
-    tying with two of their own games still gets one trophy.
-    """
-    games = [row for row in rows if row[3] > 0]
-    if not games:
+
+def _game_detail(g: GameRow) -> dict:
+    """The evidence a single-game trophy records — scoreline, champion,
+    result, match link AND the queue, so an ARAM 2/15/3 reads as the
+    ARAM it was."""
+    return {
+        "kills": g.kills,
+        "deaths": g.deaths,
+        "assists": g.assists,
+        "champion": g.champion,
+        "win": int(g.win),
+        "match_id": g.match_id,
+        "queue_id": g.queue_id,
+        "queue": queue_name(g.queue_id),
+    }
+
+
+def _single_game_pick(games: list[GameRow], badness, value_of) -> list[Winner]:
+    """Generic worst-single-game pick: max ``badness`` wins, one trophy
+    per user even when two of their own games tie (deterministic: the
+    lexically-first match_id supplies the detail)."""
+    scored = [(badness(g), g) for g in games]
+    scored = [(b, g) for b, g in scored if b is not None]
+    if not scored:
         return []
-
-    def badness(row: tuple) -> tuple:
-        _, _, kills, deaths, assists, *_ = row
-        return (deaths, -Fraction(kills + assists, deaths))
-
-    worst = max(badness(row) for row in games)
+    worst = max(b for b, _ in scored)
     winners: list[Winner] = []
     seen: set[int] = set()
-    for row in sorted(games):
-        if badness(row) != worst:
+    for b, g in sorted(scored, key=lambda pair: (pair[1].user_id, pair[1].match_id)):
+        if b != worst or g.user_id in seen:
             continue
-        user_id, display_name, kills, deaths, assists, champion, win, match_id = row
-        if user_id in seen:
-            continue
-        seen.add(user_id)
+        seen.add(g.user_id)
         winners.append(
             Winner(
-                user_id=user_id,
-                display_name=display_name,
-                value=float(deaths),
-                detail={
-                    "kills": kills,
-                    "deaths": deaths,
-                    "assists": assists,
-                    "champion": champion,
-                    "win": int(win),
-                    "match_id": match_id,
-                },
+                user_id=g.user_id,
+                display_name=g.display_name,
+                value=float(value_of(g)),
+                detail=_game_detail(g),
             )
         )
     return winners
 
 
+def pick_int(games: list[GameRow]) -> list[Winner]:
+    """Most deaths in a single game; ties broken by the worse (k+a)/d.
+
+    0-death games can't win (and an empty pool returns [], letting the
+    skip line run).
+    """
+
+    def badness(g: GameRow):
+        if g.deaths <= 0:
+            return None
+        return (g.deaths, -Fraction(g.kills + g.assists, g.deaths))
+
+    return _single_game_pick(games, badness, lambda g: g.deaths)
+
+
+def pick_lowest_kda(games: list[GameRow]) -> list[Winner]:
+    """Worst (kills+assists)/deaths in a single game; ties broken by the
+    higher death count. Deathless games can't compete."""
+
+    def badness(g: GameRow):
+        if g.deaths <= 0:
+            return None
+        return (-Fraction(g.kills + g.assists, g.deaths), g.deaths)
+
+    return _single_game_pick(
+        games, badness, lambda g: float(Fraction(g.kills + g.assists, g.deaths))
+    )
+
+
+def pick_damage_share(games: list[GameRow]) -> list[Winner]:
+    """Largest single-game share of the team's damage (challenges-derived
+    column; rows without it can't compete)."""
+
+    def badness(g: GameRow):
+        return None if g.team_damage_pct is None else g.team_damage_pct
+
+    return _single_game_pick(games, badness, lambda g: g.team_damage_pct)
+
+
+def pick_multikill(games: list[GameRow]) -> list[Winner]:
+    """Biggest multikill of the week — double or better, a lone kill is
+    not a multikill."""
+
+    def badness(g: GameRow):
+        if g.largest_multi_kill is None or g.largest_multi_kill < 2:
+            return None
+        return g.largest_multi_kill
+
+    return _single_game_pick(games, badness, lambda g: g.largest_multi_kill)
+
+
+# ----------------------------------------------- week-aggregate pickers
+
+
+def _week_totals(games: list[GameRow], stat) -> dict[int, list]:
+    """user_id -> [display_name, total, games_with_data] for a nullable
+    per-game stat."""
+    per_user: dict[int, list] = {}
+    for g in games:
+        value = stat(g)
+        if value is None:
+            continue
+        entry = per_user.setdefault(g.user_id, [g.display_name, 0, 0])
+        entry[1] += value
+        entry[2] += 1
+    return per_user
+
+
+def pick_week_total(games: list[GameRow], stat, *, min_total: int = 1) -> list[Winner]:
+    """Highest week-total of a per-game stat; joint winners on ties.
+    Totals under ``min_total`` don't compete (zero of something is not
+    an achievement)."""
+    per_user = _week_totals(games, stat)
+    candidates = [
+        (total, uid, name, n)
+        for uid, (name, total, n) in sorted(per_user.items())
+        if total >= min_total
+    ]
+    if not candidates:
+        return []
+    best = max(total for total, *_ in candidates)
+    return [
+        Winner(
+            user_id=uid,
+            display_name=name,
+            value=float(total),
+            detail={"total": total, "games": n},
+        )
+        for total, uid, name, n in candidates
+        if total == best
+    ]
+
+
+def pick_low_kp(games: list[GameRow]) -> list[Winner]:
+    """Lowest average kill participation; min 3 games with the stat.
+
+    The average is over games that HAVE the challenges-derived value —
+    old payloads without it neither help nor hurt.
+    """
+    per_user: dict[int, list] = {}
+    for g in games:
+        if g.kill_participation is None:
+            continue
+        entry = per_user.setdefault(g.user_id, [g.display_name, 0.0, 0])
+        entry[1] += g.kill_participation
+        entry[2] += 1
+    candidates = [
+        (total / n, uid, name, n) for uid, (name, total, n) in sorted(per_user.items()) if n >= 3
+    ]
+    if not candidates:
+        return []
+    best = min(avg for avg, *_ in candidates)
+    return [
+        Winner(
+            user_id=uid,
+            display_name=name,
+            value=float(avg),
+            detail={"avg_kp": round(avg, 4), "games": n},
+        )
+        for avg, uid, name, n in candidates
+        if avg == best
+    ]
+
+
+def pick_low_winrate(games: list[GameRow]) -> list[Winner]:
+    """Lowest win fraction on the week; min 5 games, ties broken by the
+    larger sample (losing more often over more games is worse)."""
+    per_user: dict[int, list] = {}
+    for g in games:
+        entry = per_user.setdefault(g.user_id, [g.display_name, 0, 0])
+        entry[1] += 1 if g.win == 1 else 0
+        entry[2] += 1
+    candidates = []
+    for uid, (name, wins, n) in sorted(per_user.items()):
+        if n < 5:
+            continue
+        candidates.append((-Fraction(wins, n), n, uid, name, wins))
+    if not candidates:
+        return []
+    best = max((neg, n) for neg, n, *_ in candidates)
+    return [
+        Winner(
+            user_id=uid,
+            display_name=name,
+            value=float(-neg),
+            detail={"wins": wins, "losses": n - wins, "games": n},
+        )
+        for neg, n, uid, name, wins in candidates
+        if (neg, n) == best
+    ]
+
+
+# --------------------------------------------------- metric dispatcher
+
+
+def pick_metric(metric: str, pools: AwardPools, scope: str, keep=None) -> list[Winner]:
+    """Winner(s) of one metric over ``pools`` under ``scope``.
+
+    ``keep(user_id)`` filters the pool BEFORE picking (exclusions and
+    forced-winner re-picks) so thresholds recompute over the remaining
+    players. LP metrics ignore the scope — LP lives on the ranked-solo
+    ladder only. Season-reset skipping is the caller's job (it needs the
+    reset flag).
+    """
+    if keep is None:
+
+        def keep(user_id: int) -> bool:
+            return True
+
+    if metric in ("lp_loss", "lp_gain"):
+        pool = {uid: entry for uid, entry in pools.per_user.items() if keep(uid)}
+        return pick_lp_extreme(pool, gain=metric == "lp_gain")
+    if metric in ("games_drop", "fewest_games"):
+        rows = [row for row in volume_rows_for_scope(pools.window_rows, scope) if keep(row[0])]
+        return pick_volume_collapse(rows) if metric == "games_drop" else pick_fewest_games(rows)
+    if metric == "duo_share":
+        return pick_duo_leech(
+            [row for row in duo_rows_for_scope(pools.games, scope) if keep(row[0])],
+            partner_rows_for_scope(pools.partner_rows, scope),
+        )
+    games = [g for g in games_for_scope(pools.games, scope, metric) if keep(g.user_id)]
+    if metric == "most_deaths_game":
+        return pick_int(games)
+    if metric == "lowest_kda_game":
+        return pick_lowest_kda(games)
+    if metric == "most_deaths_total":
+        return pick_week_total(games, lambda g: g.deaths)
+    if metric == "most_time_dead":
+        return pick_week_total(games, lambda g: g.time_dead_sec)
+    if metric == "most_missing_pings":
+        return pick_week_total(games, lambda g: g.pings_missing)
+    if metric == "most_pings":
+        return pick_week_total(games, lambda g: g.pings_total)
+    if metric == "most_first_bloods":
+        return pick_week_total(games, lambda g: g.first_blood)
+    if metric == "lowest_kp":
+        return pick_low_kp(games)
+    if metric == "lowest_winrate":
+        return pick_low_winrate(games)
+    if metric == "biggest_damage_share":
+        return pick_damage_share(games)
+    if metric == "largest_multikill":
+        return pick_multikill(games)
+    raise ValueError(f"unknown metric {metric!r}")
+
+
+def effective_metric(adj: AwardAdjustments, award: str) -> str:
+    """The metric this award measures this week — the per-week choice
+    when it names a real metric, else the award's built-in one."""
+    metric = adj.metric_for(award)
+    return metric if metric in METRICS else DEFAULT_METRIC[award]
+
+
+def effective_scope(adj: AwardAdjustments, award: str) -> str:
+    """The queue scope this award scores this week. LP metrics pin to
+    ranked (LP exists nowhere else); otherwise the per-week choice, else
+    the awards_scope default."""
+    if METRICS[effective_metric(adj, award)].lp_based:
+        return SCOPE_RANKED
+    scope = adj.scope_for(award)
+    if scope in SCOPES:
+        return scope
+    return parse_scope(adj.default_scope)
+
+
+def measure_note(award: str, metric: str, scope: str, default_scope: str) -> str | None:
+    """Human "this week: ..." note for a re-pointed award, or None when
+    the award runs its defaults. Woven into the ceremony block so the
+    banter self-explains."""
+    parts = []
+    if metric != DEFAULT_METRIC[award]:
+        parts.append(f"measured by {METRICS[metric].label}")
+    if not METRICS[metric].lp_based and scope != parse_scope(default_scope):
+        label = SCOPES[scope][0]
+        parts.append("scored across all queues" if scope == SCOPE_ALL else f"{label} games only")
+    if not parts:
+        return None
+    return "this week: " + " · ".join(parts)
+
+
+def measure_notes(adj: AwardAdjustments) -> dict[str, str]:
+    """award -> measure note for every award running a non-default
+    measure this week (build_ceremony_blocks' ``measures``)."""
+    notes = {}
+    for award in AWARD_ORDER:
+        note = measure_note(
+            award, effective_metric(adj, award), effective_scope(adj, award), adj.default_scope
+        )
+        if note:
+            notes[award] = note
+    return notes
+
+
 # ----------------------------------------------------------- rendering
+
+
+def _plural(count: int, noun: str) -> str:
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+def fmt_duration(seconds) -> str:
+    """Seconds -> '34m 12s' (or '1h 05m' past the hour)."""
+    seconds = int(seconds)
+    minutes, secs = divmod(seconds, 60)
+    if minutes >= 60:
+        hours, minutes = divmod(minutes, 60)
+        return f"{hours}h {minutes:02d}m"
+    return f"{minutes}m {secs:02d}s"
+
+
+def multikill_label(count: int) -> str:
+    return {2: "Double kill", 3: "Triple kill", 4: "Quadra kill", 5: "Penta kill"}.get(
+        count, f"{count}-kill"
+    )
+
+
+def metric_value_text(metric: str, value, detail: dict | None) -> str:
+    """Compact value tag for one metric win, e.g. '-187 LP', '2/15/3 ·
+    ARAM', '41m 03s dead'. Shared shape with the dashboard's port —
+    keep identical (the parity suite compares outputs).
+    """
+    detail = detail or {}
+    queue_bit = f" · {detail['queue']}" if detail.get("queue") else ""
+    if metric in ("lp_loss", "lp_gain"):
+        return f"{int(value):+d} LP"
+    if metric == "games_drop":
+        return f"-{detail.get('drop_pct', round(float(value) * 100))}% volume"
+    if metric == "fewest_games":
+        return _plural(int(value), "game")
+    if metric == "duo_share":
+        if "duo_games" in detail and "games" in detail:
+            return f"{detail['duo_games']}/{detail['games']} duo"
+        return f"{float(value):.0%} duo"
+    if metric == "most_deaths_game":
+        if {"kills", "deaths", "assists"} <= detail.keys():
+            return f"{detail['kills']}/{detail['deaths']}/{detail['assists']}{queue_bit}"
+        return f"{int(value)} deaths"
+    if metric == "lowest_kda_game":
+        return f"{float(value):.2f} KDA{queue_bit}"
+    if metric == "most_deaths_total":
+        return _plural(int(value), "death")
+    if metric == "most_time_dead":
+        return f"{fmt_duration(value)} dead"
+    if metric == "most_missing_pings":
+        return _plural(int(value), "? ping")
+    if metric == "most_pings":
+        return _plural(int(value), "ping")
+    if metric == "lowest_kp":
+        return f"{float(value):.0%} avg KP"
+    if metric == "lowest_winrate":
+        return f"{float(value):.0%} winrate"
+    if metric == "most_first_bloods":
+        return _plural(int(value), "first blood")
+    if metric == "biggest_damage_share":
+        return f"{float(value):.0%} team dmg{queue_bit}"
+    if metric == "largest_multikill":
+        return f"{multikill_label(int(value))}{queue_bit}"
+    return str(value)
 
 
 def _special_roast(award: str, detail: dict) -> str | None:
@@ -529,7 +1213,8 @@ def _special_roast(award: str, detail: dict) -> str | None:
 
     Only fires on genuinely notable numbers so the regular pool stays the
     common case. Thresholds are absolute, not relative, so the same feat
-    earns the same line in any week.
+    earns the same line in any week. Keyed on detail fields, so an award
+    re-pointed at a different metric simply never trips them.
     """
     if award == LP_LOSS and detail.get("delta", 0) <= -200:
         return "Two whole divisions, gone. That's a demotion speedrun."
@@ -561,10 +1246,23 @@ def roast_line(award: str, week_start: dt.date, detail: dict | None = None) -> s
     return meta.roasts[int.from_bytes(digest[:4], "big") % len(meta.roasts)]
 
 
+def _single_game_where(detail: dict) -> str:
+    """'on Ahri (ARAM, loss)' — queue included whenever recorded, so the
+    scoreline reads in context (an ARAM 2/15/3 is a different crime)."""
+    result = "win" if detail.get("win") else "loss"
+    queue_bit = f"{detail['queue']}, " if detail.get("queue") else ""
+    return f"on {detail['champion']} ({queue_bit}{result})"
+
+
 def condemn_line(award: str, winner: Winner) -> str:
-    """The one-line number that condemns the winner, from their detail."""
+    """The one-line number that condemns the winner, from their detail.
+
+    Renders whatever metric produced the win — the built-in one, or the
+    per-week choice recorded in detail["metric"].
+    """
     detail = winner.detail
-    if award in (LP_LOSS, LP_CHAD):
+    metric = detail.get("metric") or DEFAULT_METRIC[award]
+    if metric in ("lp_loss", "lp_gain"):
         line = f"Net **{detail['delta']:+d} LP** on the week"
         # Per-account breakdown, but only when it adds information: at
         # least two accounts actually moved (zero-delta accounts stay in
@@ -574,14 +1272,19 @@ def condemn_line(award: str, winner: Winner) -> str:
             parts = " · ".join(f"{name} {delta:+d}" for name, delta in moved.items())
             line += f" ({parts})"
         return line + "."
-    if award == PUSSY:
+    if metric == "games_drop":
         week_games = detail["this_week"]
         games_word = "game" if week_games == 1 else "games"
         return (
             f"**{week_games}** {games_word} vs a {detail['baseline']:g}-game/week habit "
             f"(**-{detail['drop_pct']}%**)."
         )
-    if award == DUO_LEECH:
+    if metric == "fewest_games":
+        return (
+            f"**{_plural(detail['this_week'], 'game')}** all week "
+            f"vs a {detail['baseline']:g}-game/week habit."
+        )
+    if metric == "duo_share":
         partner_bit = ""
         if "partner" in detail:
             partner_bit = f" ({detail['partner_games']} of them with {detail['partner']})"
@@ -590,13 +1293,56 @@ def condemn_line(award: str, winner: Winner) -> str:
             f"duo {detail['duo_wins']}W-{detail['duo_losses']}L "
             f"vs solo {detail['solo_wins']}W-{detail['solo_losses']}L."
         )
-    if award == INT:
-        result = "win" if detail["win"] else "loss"
+    if metric == "most_deaths_game":
         return (
             f"**{detail['kills']}/{detail['deaths']}/{detail['assists']}** "
-            f"on {detail['champion']} ({result})."
+            f"{_single_game_where(detail)}."
         )
-    raise ValueError(f"unknown award {award!r}")
+    if metric == "lowest_kda_game":
+        return (
+            f"**{float(winner.value):.2f} KDA** "
+            f"({detail['kills']}/{detail['deaths']}/{detail['assists']}) "
+            f"{_single_game_where(detail)}."
+        )
+    if metric == "biggest_damage_share":
+        return f"**{float(winner.value):.0%} of the team's damage** {_single_game_where(detail)}."
+    if metric == "largest_multikill":
+        return f"**{multikill_label(int(winner.value))}** {_single_game_where(detail)}."
+    if metric == "most_deaths_total":
+        return (
+            f"**{_plural(int(winner.value), 'death')}** "
+            f"across {_plural(detail['games'], 'game')}."
+        )
+    if metric == "most_time_dead":
+        return (
+            f"**{fmt_duration(winner.value)}** spent dead "
+            f"across {_plural(detail['games'], 'game')}."
+        )
+    if metric == "most_missing_pings":
+        return (
+            f"**{_plural(int(winner.value), '? ping')}** "
+            f"across {_plural(detail['games'], 'game')}."
+        )
+    if metric == "most_pings":
+        return (
+            f"**{_plural(int(winner.value), 'ping')}** across {_plural(detail['games'], 'game')}."
+        )
+    if metric == "most_first_bloods":
+        return (
+            f"**{_plural(int(winner.value), 'first blood')}** "
+            f"in {_plural(detail['games'], 'game')}."
+        )
+    if metric == "lowest_kp":
+        return (
+            f"**{float(winner.value):.0%} average kill participation** "
+            f"over {_plural(detail['games'], 'game')}."
+        )
+    if metric == "lowest_winrate":
+        return (
+            f"**{detail['wins']}W-{detail['losses']}L** — "
+            f"{float(winner.value):.0%} winrate on the week."
+        )
+    raise ValueError(f"unknown metric {metric!r} for award {award!r}")
 
 
 def build_ceremony_blocks(
@@ -608,6 +1354,7 @@ def build_ceremony_blocks(
     disabled: frozenset[str] | set[str] = frozenset(),
     taglines: dict[str, str] | None = None,
     forced: frozenset[str] | set[str] = frozenset(),
+    measures: dict[str, str] | None = None,
 ) -> list[str]:
     """Ceremony post as blocks for leaderboard.chunk_blocks.
 
@@ -622,17 +1369,20 @@ def build_ceremony_blocks(
     Dashboard controls: ``disabled`` awards are omitted entirely,
     ``taglines`` (custom only — see AwardAdjustments) render as an
     italic line under the title, awards in ``forced`` carry the
-    "chosen by management" note. Defaults keep the output byte-identical
-    to the pre-controls format.
+    "chosen by management" note, and ``measures`` (award -> measure_note
+    text) explain a re-pointed measure. Defaults keep the output
+    byte-identical to the pre-controls format.
     """
     if header is None:
         header = f"\U0001f3c6 **Weekly Awards** — week of <t:{week_epoch(week_start)}:d>"
     blocks = [f"{header}\n"]
     taglines = taglines or {}
+    measures = measures or {}
     for award in AWARD_ORDER:
         if award in disabled:
             continue
         meta = AWARDS[award]
+        measure_line = f"\U0001f4cf *{measures[award]}*\n" if measures.get(award) else ""
         tagline_line = f"*{taglines[award]}*\n" if taglines.get(award) else ""
         winners = results.get(award) or []
         if not winners:
@@ -641,7 +1391,10 @@ def build_ceremony_blocks(
                 if season_reset and award in (LP_LOSS, LP_CHAD)
                 else meta.skip_line
             )
-            blocks.append(f"{meta.emoji} **{meta.title}** — no winner\n{tagline_line}{skip}\n")
+            blocks.append(
+                f"{meta.emoji} **{meta.title}** — no winner\n"
+                f"{measure_line}{tagline_line}{skip}\n"
+            )
             continue
         mentions = " & ".join(f"<@{winner.user_id}>" for winner in winners)
         note = f" {MANAGEMENT_NOTE}" if award in forced else ""
@@ -656,7 +1409,7 @@ def build_ceremony_blocks(
         roast_detail = winners[0].detail if len(winners) == 1 else None
         blocks.append(
             f"{meta.emoji} **{meta.title}** — {mentions}{note}\n"
-            f"{tagline_line}{body} {roast_line(award, week_start, roast_detail)}\n"
+            f"{measure_line}{tagline_line}{body} {roast_line(award, week_start, roast_detail)}\n"
         )
     return blocks
 
@@ -665,23 +1418,15 @@ def cabinet_value(award: str, value, detail: dict | None) -> str:
     """Compact value tag for a cabinet last-week line, e.g. '(-187 LP)'.
 
     ``value`` arrives as Decimal from the numeric column; ``detail`` as a
-    dict from jsonb (defensively optional).
+    dict from jsonb (defensively optional). Renders whatever metric won
+    the trophy — historical rows without a metric key use the award's
+    built-in one and keep their exact pre-2026-08 text.
     """
     detail = detail or {}
-    if award in (LP_LOSS, LP_CHAD):
-        return f"{int(value):+d} LP"
-    if award == PUSSY:
-        drop = detail.get("drop_pct", round(float(value) * 100))
-        return f"-{drop}% volume"
-    if award == DUO_LEECH:
-        if "duo_games" in detail and "games" in detail:
-            return f"{detail['duo_games']}/{detail['games']} duo"
-        return f"{float(value):.0%} duo"
-    if award == INT:
-        if {"kills", "deaths", "assists"} <= detail.keys():
-            return f"{detail['kills']}/{detail['deaths']}/{detail['assists']}"
-        return f"{int(value)} deaths"
-    return str(value)
+    metric = detail.get("metric") or DEFAULT_METRIC.get(award)
+    if metric is None:
+        return str(value)
+    return metric_value_text(metric, value, detail)
 
 
 def build_cabinet_blocks(
@@ -761,6 +1506,11 @@ _TRACKED_CTE = """
     )
 """
 
+# Remakes never count as games, in any queue or scope — a 3-minute
+# early-surrender is noise, not volume and not an int. NULL (rows
+# predating the column / un-backfilled) means "not a remake".
+_NO_REMAKES = "COALESCE(ms.early_surrender, 0) = 0"
+
 
 def _snapshot_query(where: str, order: str) -> str:
     return (
@@ -808,90 +1558,76 @@ async def fetch_lp_snapshot_rows(
     return baseline, first, last
 
 
-async def fetch_volume_rows(week_start: dt.datetime, week_end: dt.datetime) -> list[tuple]:
-    """(discord_user_id, display_name, prior_4w_games, this_week_games).
-
-    Prior window = the 4 full weeks before the award week. Users with
-    prior games but zero this week ARE included (that's the award); users
-    who only appeared this week get prior_games=0 and can't qualify.
+async def fetch_window_rows(week_start: dt.datetime, week_end: dt.datetime) -> list[tuple]:
+    """(discord_user_id, display_name, queue_id, in_week) — one row per
+    game over the 4 full weeks before the award week plus the week
+    itself, every queue, remakes excluded. The games-count metrics
+    derive per-scope prior/week counts from this single fetch
+    (volume_rows_for_scope).
     """
     prior_start = week_start - dt.timedelta(days=28)
     return await db.fetchall(
         "WITH "
         + _TRACKED_CTE
-        + """
-        SELECT t.discord_user_id,
-               MIN(t.display_name),
-               COUNT(*) FILTER (WHERE ms.game_start < %(start)s) AS prior_games,
-               COUNT(*) FILTER (WHERE ms.game_start >= %(start)s) AS week_games
+        + f"""
+        SELECT t.discord_user_id, t.display_name, ms.queue_id,
+               (ms.game_start >= %(start)s) AS in_week
         FROM match_stats ms
             JOIN tracked t ON t.puuid = ms.puuid
-        WHERE ms.queue_id = %(queue_id)s
-          AND ms.game_start >= %(prior_start)s AND ms.game_start < %(end)s
-        GROUP BY t.discord_user_id""",
-        {
-            "queue_id": RANKED_SOLO_QUEUE_ID,
-            "prior_start": prior_start,
-            "start": week_start,
-            "end": week_end,
-        },
+        WHERE ms.game_start >= %(prior_start)s AND ms.game_start < %(end)s
+          AND {_NO_REMAKES}""",
+        {"prior_start": prior_start, "start": week_start, "end": week_end},
     )
 
 
-async def fetch_duo_rows(week_start: dt.datetime, week_end: dt.datetime) -> list[tuple]:
-    """(discord_user_id, display_name, games, duo_games, duo_wins, solo_wins).
-
-    Duo = another tracked player has a match_stats row for the same match
-    on the same team (match_stats holds only tracked players) — the same
-    EXISTS pattern as FetchFromRiot.get_last_five_games. NULL team_id
-    (rows predating the column) never counts as duo.
+async def fetch_game_rows(week_start: dt.datetime, week_end: dt.datetime) -> list[GameRow]:
+    """One GameRow per tracked player's game this week — EVERY queue
+    (scope filtering is pure Python so per-award scopes share one
+    fetch), remakes excluded. ``duo`` uses the same EXISTS pattern as
+    FetchFromRiot.get_last_five_games; NULL team_id (rows predating the
+    column) never counts as duo.
     """
-    return await db.fetchall(
+    rows = await db.fetchall(
         "WITH "
         + _TRACKED_CTE
-        + """,
-        games AS (
-            SELECT ms.puuid, ms.win,
-                   EXISTS (
-                       SELECT 1 FROM match_stats o
-                       WHERE o.match_id = ms.match_id
-                         AND o.team_id = ms.team_id
-                         AND o.puuid <> ms.puuid
-                   ) AS duo
-            FROM match_stats ms
-            WHERE ms.queue_id = %(queue_id)s
-              AND ms.game_start >= %(start)s AND ms.game_start < %(end)s
-        )
-        SELECT t.discord_user_id,
-               MIN(t.display_name),
-               COUNT(*) AS games,
-               COUNT(*) FILTER (WHERE g.duo) AS duo_games,
-               COUNT(*) FILTER (WHERE g.duo AND g.win = 1) AS duo_wins,
-               COUNT(*) FILTER (WHERE NOT g.duo AND g.win = 1) AS solo_wins
-        FROM games g
-            JOIN tracked t ON t.puuid = g.puuid
-        GROUP BY t.discord_user_id""",
-        {"queue_id": RANKED_SOLO_QUEUE_ID, "start": week_start, "end": week_end},
+        + f"""
+        SELECT t.discord_user_id, t.display_name, ms.queue_id,
+               ms.kills, ms.deaths, ms.assists, ms.champion, ms.win, ms.match_id,
+               EXISTS (
+                   SELECT 1 FROM match_stats o
+                   WHERE o.match_id = ms.match_id
+                     AND o.team_id = ms.team_id
+                     AND o.puuid <> ms.puuid
+               ) AS duo,
+               ms.time_dead_sec, ms.pings_total, ms.pings_missing,
+               ms.kill_participation, ms.team_damage_pct,
+               ms.largest_multi_kill, ms.first_blood
+        FROM match_stats ms
+            JOIN tracked t ON t.puuid = ms.puuid
+        WHERE ms.game_start >= %(start)s AND ms.game_start < %(end)s
+          AND {_NO_REMAKES}
+        ORDER BY ms.game_start, ms.match_id""",
+        {"start": week_start, "end": week_end},
     )
+    return [GameRow(*row) for row in rows]
 
 
-async def fetch_duo_partner_rows(week_start: dt.datetime, week_end: dt.datetime) -> list[tuple]:
-    """(discord_user_id, partner_user_id, partner_name, games_together).
-
-    One row per (user, tracked partner) pair with how many of this week's
-    solo-queue games they shared a team in — feeds the "N of them with X"
-    naming in the Duo Leech line. Same-user pairs are excluded so a
-    player's alt can never be their own "partner" (impossible in one
-    match anyway, but cheap to make structural). Partner accounts
+async def fetch_partner_rows(week_start: dt.datetime, week_end: dt.datetime) -> list[tuple]:
+    """(discord_user_id, partner_user_id, partner_name, queue_id,
+    games_together) — per tracked pair per queue this week, feeding the
+    "N of them with X" naming in the Duo Leech line after per-scope
+    aggregation (partner_rows_for_scope). Same-user pairs are excluded
+    so a player's alt can never be their own "partner". Partner accounts
     aggregate to the partner's Discord user like everything else.
     """
     return await db.fetchall(
         "WITH "
         + _TRACKED_CTE
-        + """
+        + f"""
         SELECT t.discord_user_id,
                pt.discord_user_id AS partner_user_id,
                MIN(pt.display_name) AS partner_name,
+               ms.queue_id,
                COUNT(*) AS games_together
         FROM match_stats ms
             JOIN match_stats o
@@ -900,30 +1636,11 @@ async def fetch_duo_partner_rows(week_start: dt.datetime, week_end: dt.datetime)
                AND o.puuid <> ms.puuid
             JOIN tracked t ON t.puuid = ms.puuid
             JOIN tracked pt ON pt.puuid = o.puuid
-        WHERE ms.queue_id = %(queue_id)s
-          AND ms.game_start >= %(start)s AND ms.game_start < %(end)s
+        WHERE ms.game_start >= %(start)s AND ms.game_start < %(end)s
+          AND {_NO_REMAKES}
           AND t.discord_user_id <> pt.discord_user_id
-        GROUP BY t.discord_user_id, pt.discord_user_id""",
-        {"queue_id": RANKED_SOLO_QUEUE_ID, "start": week_start, "end": week_end},
-    )
-
-
-async def fetch_int_rows(week_start: dt.datetime, week_end: dt.datetime) -> list[tuple]:
-    """(discord_user_id, display_name, kills, deaths, assists, champion,
-    win, match_id) — one row per solo game this week with >= 1 death."""
-    return await db.fetchall(
-        "WITH "
-        + _TRACKED_CTE
-        + """
-        SELECT t.discord_user_id, t.display_name,
-               ms.kills, ms.deaths, ms.assists, ms.champion, ms.win, ms.match_id
-        FROM match_stats ms
-            JOIN tracked t ON t.puuid = ms.puuid
-        WHERE ms.queue_id = %(queue_id)s
-          AND ms.game_start >= %(start)s AND ms.game_start < %(end)s
-          AND ms.deaths > 0
-        ORDER BY ms.deaths DESC""",
-        {"queue_id": RANKED_SOLO_QUEUE_ID, "start": week_start, "end": week_end},
+        GROUP BY t.discord_user_id, pt.discord_user_id, ms.queue_id""",
+        {"start": week_start, "end": week_end},
     )
 
 
@@ -934,18 +1651,19 @@ async def fetch_inputs(week_start: dt.datetime, week_end: dt.datetime) -> AwardI
         baseline=baseline,
         first_in_week=first,
         last_in_week=last,
-        volume_rows=await fetch_volume_rows(week_start, week_end),
-        duo_rows=await fetch_duo_rows(week_start, week_end),
-        duo_partner_rows=await fetch_duo_partner_rows(week_start, week_end),
-        int_rows=await fetch_int_rows(week_start, week_end),
+        window_rows=await fetch_window_rows(week_start, week_end),
+        games=await fetch_game_rows(week_start, week_end),
+        partner_rows=await fetch_partner_rows(week_start, week_end),
         boundary_reset=await seasons.reset_within(week_start, week_end),
     )
 
 
 async def fetch_adjustments(week_start: dt.date) -> AwardAdjustments:
-    """Dashboard controls for the week: bot_config toggles/taglines plus
-    the award_overrides row set. Tolerates award_overrides not existing
-    yet (first boot after this deploy creates it via the schema)."""
+    """Dashboard controls for the week: bot_config toggles/taglines and
+    the awards_scope default, plus the award_overrides row set (forced
+    winner, exclusions, chosen metric + scope). Tolerates
+    award_overrides not existing yet (first boot after this deploy
+    creates it via the schema)."""
     disabled: set[str] = set()
     taglines: dict[str, str] = {}
     config_rows = await db.fetchall("SELECT key, value FROM bot_config WHERE key LIKE 'award\\_%'")
@@ -962,28 +1680,39 @@ async def fetch_adjustments(week_start: dt.date) -> AwardAdjustments:
         tagline = (by_key.get(f"award_{award}_tagline") or "").strip()
         if tagline and tagline != DEFAULT_TAGLINES[award]:
             taglines[award] = tagline
+    scope_row = await db.fetchone("SELECT value FROM bot_config WHERE key = %s", (SCOPE_KEY,))
+    default_scope = parse_scope(scope_row[0] if scope_row else None)
     forced: dict[str, int] = {}
     excluded: dict[str, frozenset[int]] = {}
+    metrics: dict[str, str] = {}
+    scopes: dict[str, str] = {}
     try:
         override_rows = await db.fetchall(
-            "SELECT award_key, forced_winner, excluded_user_ids "
+            "SELECT award_key, forced_winner, excluded_user_ids, chosen_metric, chosen_scope "
             "FROM award_overrides WHERE week_start = %s",
             (week_start,),
         )
     except Exception:  # table not created yet — no overrides to honor
         override_rows = []
-    for award_key, forced_winner, excluded_ids in override_rows:
+    for award_key, forced_winner, excluded_ids, chosen_metric, chosen_scope in override_rows:
         if award_key not in AWARDS:
             continue
         if forced_winner is not None:
             forced[award_key] = forced_winner
         if excluded_ids:
             excluded[award_key] = frozenset(excluded_ids)
+        if chosen_metric in METRICS:
+            metrics[award_key] = chosen_metric
+        if chosen_scope in SCOPES:
+            scopes[award_key] = chosen_scope
     return AwardAdjustments(
         disabled=frozenset(disabled),
         taglines=taglines,
         forced=forced,
         excluded=excluded,
+        metrics=metrics,
+        scopes=scopes,
+        default_scope=default_scope,
     )
 
 
@@ -998,16 +1727,20 @@ def compute_results(
     - season_reset is True when the reset happened inside the window,
       from either of two signals — the in-window shrink count reaching
       seasons.RESET_MIN_ACCOUNTS, or a recorded seasons-table boundary
-      (inputs.boundary_reset). On a reset week the LP awards are skipped
-      outright — cross-reset deltas aren't a comparable field — and the
-      ceremony swaps in the reset skip line. Match-derived awards are
-      unaffected: games played are games played.
+      (inputs.boundary_reset). On a reset week LP-based metrics are
+      skipped outright — cross-reset deltas aren't a comparable field —
+      and the ceremony swaps in the reset skip line. Match-derived
+      metrics are unaffected: games played are games played.
+    - Each award measures its effective metric over its effective scope
+      (per-week choices from the dashboard, else DEFAULT_METRIC and the
+      awards_scope default). Non-default choices are stamped into the
+      winner detail ("metric"/"scope") so history renders correctly.
     - Exclusions recompute an award over the remaining players only.
     - A forced winner is re-picked over their own rows alone, so their
       value/detail are exactly what they earned — and if they no longer
       qualify (dashboard offered candidates, data moved by Monday) the
       computed winner(s) stand and the award is absent from
-      forced_applied.
+      forced_applied. Precedence: exclusion > forced > chosen measure.
     - ``disabled`` is deliberately NOT applied here: results stay
       complete so previews can show what a disabled award would have
       said; posting and persistence do the skipping.
@@ -1017,26 +1750,32 @@ def compute_results(
         inputs.baseline, inputs.first_in_week, inputs.last_in_week
     )
     season_reset = reset_accounts >= seasons.RESET_MIN_ACCOUNTS or inputs.boundary_reset
+    pools = AwardPools(
+        per_user=per_user,
+        window_rows=inputs.window_rows,
+        games=inputs.games,
+        partner_rows=inputs.partner_rows,
+    )
 
     def compute(award: str, only: int | None = None) -> list[Winner]:
+        metric = effective_metric(adj, award)
+        scope = effective_scope(adj, award)
+        if METRICS[metric].lp_based and season_reset:
+            return []
         excluded = adj.excluded_for(award)
 
         def keep(user_id: int) -> bool:
             return user_id not in excluded and (only is None or user_id == only)
 
-        if award in (LP_LOSS, LP_CHAD):
-            if season_reset:
-                return []
-            pool = {uid: entry for uid, entry in per_user.items() if keep(uid)}
-            return pick_lp_extreme(pool, gain=award == LP_CHAD)
-        if award == PUSSY:
-            return pick_volume_collapse([row for row in inputs.volume_rows if keep(row[0])])
-        if award == DUO_LEECH:
-            return pick_duo_leech(
-                [row for row in inputs.duo_rows if keep(row[0])],
-                inputs.duo_partner_rows,
-            )
-        return pick_int([row for row in inputs.int_rows if keep(row[0])])
+        winners = pick_metric(metric, pools, scope, keep)
+        extra: dict = {}
+        if metric != DEFAULT_METRIC[award]:
+            extra["metric"] = metric
+        if not METRICS[metric].lp_based and scope != SCOPE_ALL:
+            extra["scope"] = scope
+        if not extra:
+            return winners
+        return [Winner(w.user_id, w.display_name, w.value, {**w.detail, **extra}) for w in winners]
 
     results: dict[str, list[Winner]] = {}
     forced_applied: set[str] = set()
@@ -1057,10 +1796,11 @@ def compute_results(
 async def compute_all_awards(
     week_start: dt.datetime, week_end: dt.datetime
 ) -> tuple[dict[str, list[Winner]], bool]:
-    """All five awards for [week_start, week_end), no adjustments —
-    empty list = skipped. Kept as the stable public entry point; the
-    ceremony path goes fetch_inputs + fetch_adjustments +
-    compute_results (see the cog). Second return: season reset flag
-    (full semantics on compute_results)."""
+    """All five awards for [week_start, week_end), no adjustments (so
+    the all-queues default scope and built-in metrics) — empty list =
+    skipped. Kept as the stable public entry point; the ceremony path
+    goes fetch_inputs + fetch_adjustments + compute_results (see the
+    cog). Second return: season reset flag (full semantics on
+    compute_results)."""
     results, season_reset, _ = compute_results(await fetch_inputs(week_start, week_end))
     return results, season_reset

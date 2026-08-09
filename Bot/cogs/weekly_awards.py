@@ -153,12 +153,22 @@ class WeeklyAwards(commands.Cog):
             # Nothing recorded — the next tick retries the whole ceremony.
             return
 
-        # Dashboard controls: enable/disable + taglines (bot_config),
-        # forced winners + exclusions (award_overrides) — see
-        # utils/awards.AwardAdjustments.
+        # Dashboard controls: enable/disable + taglines + default scope
+        # (bot_config), forced winners + exclusions + per-week measures
+        # (award_overrides) — see utils/awards.AwardAdjustments.
         adjustments = await awards.fetch_adjustments(week_start.date())
         inputs = await awards.fetch_inputs(week_start, week_end)
         results, season_reset, forced_applied = awards.compute_results(inputs, adjustments)
+        measures = awards.measure_notes(adjustments)
+        if adjustments.default_scope != awards.SCOPE_ALL or measures:
+            self.bot.logging.info(
+                f"Award measures: default scope {adjustments.default_scope!r}"
+                + (
+                    "; " + ", ".join(f"{a}: {m}" for a, m in sorted(measures.items()))
+                    if measures
+                    else ""
+                )
+            )
         if season_reset:
             self.bot.logging.info(
                 "Season reset detected in awarded week — cross-reset LP deltas excluded"
@@ -186,6 +196,7 @@ class WeeklyAwards(commands.Cog):
             disabled=adjustments.disabled,
             taglines=adjustments.taglines,
             forced=forced_applied,
+            measures=measures,
         )
 
         self.bot.logging.info(
@@ -347,6 +358,7 @@ class WeeklyAwards(commands.Cog):
             disabled=adjustments.disabled,
             taglines=adjustments.taglines,
             forced=forced_applied,
+            measures=awards.measure_notes(adjustments),
         )
         if adjustments.disabled:
             blocks.append(

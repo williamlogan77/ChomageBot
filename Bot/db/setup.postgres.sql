@@ -257,7 +257,15 @@ create table if not exists weekly_awards (
 --                     a candidate, posted with a "chosen by management"
 --                     note;
 --   excluded_user_ids recomputes the award as if those users didn't
---                     play that week ("on holiday").
+--                     play that week ("on holiday");
+--   chosen_metric     re-points the award at a different weekly measure
+--                     for that week (utils/awards.METRICS key — most
+--                     deaths, most time dead, lowest winrate, ...);
+--   chosen_scope      picks which queues count that week
+--                     (utils/awards.SCOPES key — all/ranked/aram/...).
+-- NULL metric/scope fall back to the award's built-in metric and the
+-- awards_scope bot_config default. Precedence at ceremony time:
+-- exclusion > forced_winner > chosen metric/scope > defaults.
 -- One row per (week, award); week_start is the Monday (Europe/London)
 -- the awarded week began, same convention as weekly_awards. Per-award
 -- enable/disable and taglines live in bot_config
@@ -267,8 +275,13 @@ create table if not exists award_overrides (
     award_key TEXT not null,
     forced_winner BIGINT,
     excluded_user_ids BIGINT[],
+    chosen_metric TEXT,
+    chosen_scope TEXT,
     primary key (week_start, award_key)
 );
+-- Existing installs predate the measure columns (2026-08 picker).
+alter table award_overrides add column if not exists chosen_metric TEXT;
+alter table award_overrides add column if not exists chosen_scope TEXT;
 
 -- Dashboard-managed display aliases. users.nickname is re-upserted from
 -- the guild on every boot (main.py member sync), so a user-chosen name

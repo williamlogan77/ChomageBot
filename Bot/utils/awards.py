@@ -24,6 +24,10 @@ per-award enable/disable + tagline from bot_config
 (award_<key>_enabled / award_<key>_tagline), the default queue scope
 (awards_scope) and per-week forced winners / exclusions / chosen
 measures from the award_overrides table, all written by the dashboard.
+Qualification bars (award_<key>_min bot_config keys) auto-skip an award
+whose winning number is too small to be interesting — the LP awards
+default to "more than 10 LP" — and a deterministic commentary line per
+award ("closely followed by ...") is generated from the same standings.
 The dashboard's live standings (proxmox/dashboard app/queries/awards.py)
 port this module's math and MUST stay in lockstep when rules change
 here (dashboard tests/test_award_parity.py enforces it).
@@ -173,9 +177,9 @@ METRICS: dict[str, MetricSpec] = {
         ),
         MetricSpec(
             "duo_share",
-            "highest duo-queue share",
-            "Largest share of games with another tracked player on the team "
-            "(min 5 games, 2 of them duo).",
+            "highest premade share",
+            "Largest share of games queued with other tracked players on the team — "
+            "duos and full stacks alike (min 5 games, 2 of them premade).",
         ),
         MetricSpec(
             "most_deaths_game",
@@ -248,6 +252,60 @@ DEFAULT_METRIC: dict[str, str] = {
 
 # Metrics distorted by Arena's round-based dying (see ARENA_QUEUES).
 DEATH_METRICS = frozenset({"most_deaths_game", "lowest_kda_game", "most_deaths_total"})
+
+# ---------------------------------------------- qualification thresholds
+# A per-award minimum bar the winning number must BEAT (strictly — the
+# user's spec: "10 LP and below should be excluded") or the award skips
+# the week with a "nobody earned it" note. Configured via the
+# award_<key>_min bot_config keys (registered in the dashboard's
+# botconfig.py, editable inline on the cabinet); these are the defaults
+# when the key is absent. The bar is expressed in the award's DEFAULT
+# metric's unit (MIN_UNITS) and therefore applies ONLY while the award
+# runs its default metric: re-pointing the measure at e.g. "most time
+# spent dead" would make a 10-LP bar silently compare LP against
+# seconds, so a per-week metric pick — itself an explicit admin decision
+# — pauses the automatic bar. Forced winners bypass it outright;
+# exclusions apply before it (the bar judges whoever is left).
+
+MIN_DEFAULTS: dict[str, float] = {
+    LP_LOSS: 10.0,
+    LP_CHAD: 10.0,
+    PUSSY: 0.0,
+    DUO_LEECH: 0.0,
+    INT: 0.0,
+}
+
+# Human unit for each award's bar — UI labels and skip lines.
+MIN_UNITS: dict[str, str] = {
+    LP_LOSS: "LP lost",
+    LP_CHAD: "LP gained",
+    PUSSY: "% drop",
+    DUO_LEECH: "% of games premade",
+    INT: "deaths",
+}
+
+
+def qualifying_magnitude(award: str, value: float) -> float:
+    """The winning value on the award's threshold scale (MIN_UNITS):
+    LP magnitude for the LP awards (lp_loss values are negative),
+    percent for the share/drop awards, deaths for the int."""
+    if award == LP_LOSS:
+        return -float(value)
+    if award in (PUSSY, DUO_LEECH):
+        return float(value) * 100
+    return float(value)
+
+
+def parse_minimum(value: str | None, default: float) -> float:
+    """Threshold from a bot_config string; unparseable/negative -> default."""
+    if value is None:
+        return default
+    try:
+        parsed = float(value.strip())
+    except ValueError:
+        return default
+    return parsed if parsed >= 0 else default
+
 
 # Replaces the LP awards' skip lines on a reset week — the normal lines
 # ("Disgustingly competent") would read as a stats claim that's wrong.
@@ -400,7 +458,11 @@ class GameRow:
     champion: str
     win: int
     match_id: str
-    duo: bool  # another tracked player on the same team of this match
+    # How many OTHER tracked players shared this player's team in this
+    # match: 0 = solo, 1 = duo, 2+ = a stack. The group runs full
+    # premades, so this distinguishes "duo'd" from "queued with the
+    # whole friend group" in the Duo Leech evidence.
+    allies: int
     time_dead_sec: int | None = None
     pings_total: int | None = None
     pings_missing: int | None = None
@@ -427,11 +489,14 @@ class AwardAdjustments:
     key) and queue scope (SCOPES key) from award_overrides.
     ``default_scope``: the awards_scope bot_config key — scope applied
     when no per-week choice exists.
+    ``minimums``: award -> qualification bar from the award_<key>_min
+    bot_config keys; absent awards use MIN_DEFAULTS (LP awards: 10).
 
     Precedence: exclusion beats forcing (a user both excluded and forced
     stays out); forcing beats the metric (it picks WHO wins, the metric
-    still defines what is measured); chosen metric/scope beat the
-    defaults.
+    still defines what is measured) and BYPASSES the qualification bar;
+    chosen metric/scope beat the defaults and pause the bar (it is
+    denominated in the default metric's unit — see MIN_DEFAULTS).
     """
 
     disabled: frozenset[str] = frozenset()
@@ -441,6 +506,7 @@ class AwardAdjustments:
     metrics: dict[str, str] | None = None
     scopes: dict[str, str] | None = None
     default_scope: str = SCOPE_ALL
+    minimums: dict[str, float] | None = None
 
     def tagline_for(self, award: str) -> str | None:
         return (self.taglines or {}).get(award)
@@ -456,6 +522,9 @@ class AwardAdjustments:
 
     def scope_for(self, award: str) -> str | None:
         return (self.scopes or {}).get(award)
+
+    def minimum_for(self, award: str) -> float:
+        return (self.minimums or {}).get(award, MIN_DEFAULTS[award])
 
 
 @dataclass(frozen=True)
@@ -686,26 +755,39 @@ def volume_rows_for_scope(window_rows: list[tuple], scope: str) -> list[tuple]:
 
 
 def duo_rows_for_scope(games: list[GameRow], scope: str) -> list[tuple]:
-    """(user_id, display_name, games, duo_games, duo_wins, solo_wins) per
-    user under ``scope``. Duo = another tracked player has a match_stats
-    row for the same match on the same team (match_stats holds only
-    tracked players). In Arena "the same team" is the 8-player half Riot
-    reports as teamId, not the 2-man subteam — close enough to "queued
-    together" for this award's purposes."""
+    """(user_id, display_name, games, duo_games, duo_wins, solo_wins,
+    stack_games) per user under ``scope``. A premade ("duo") game =
+    another tracked player has a match_stats row for the same match on
+    the same team (match_stats holds only tracked players);
+    ``stack_games`` counts the subset with THREE OR MORE tracked players
+    on that team (allies >= 2) — the group runs full stacks, and the
+    evidence phrasing distinguishes duos from convoys. In Arena "the
+    same team" is the 8-player half Riot reports as teamId, not the
+    2-man subteam — close enough to "queued together" for this award's
+    purposes."""
     per_user: dict[int, list] = {}
     for g in games:
         if not in_scope(g.queue_id, scope):
             continue
-        entry = per_user.setdefault(g.user_id, [g.display_name, 0, 0, 0, 0])
+        entry = per_user.setdefault(g.user_id, [g.display_name, 0, 0, 0, 0, 0])
         entry[1] += 1
-        if g.duo:
+        if g.allies:
             entry[2] += 1
             entry[3] += 1 if g.win == 1 else 0
+            if g.allies >= 2:
+                entry[5] += 1
         else:
             entry[4] += 1 if g.win == 1 else 0
     return [
-        (uid, name, games_n, duo_games, duo_wins, solo_wins)
-        for uid, (name, games_n, duo_games, duo_wins, solo_wins) in sorted(per_user.items())
+        (uid, name, games_n, duo_games, duo_wins, solo_wins, stack_games)
+        for uid, (
+            name,
+            games_n,
+            duo_games,
+            duo_wins,
+            solo_wins,
+            stack_games,
+        ) in sorted(per_user.items())
     ]
 
 
@@ -792,31 +874,50 @@ def pick_fewest_games(rows: list[tuple]) -> list[Winner]:
 
 
 def pick_duo_leech(rows: list[tuple], partner_rows: list[tuple] = ()) -> list[Winner]:
-    """Highest duo-game fraction this week; min 5 games, min 2 duo games.
+    """Highest premade-game fraction this week; min 5 games, min 2 of
+    them premade.
 
     ``rows``: ``(discord_user_id, display_name, games, duo_games,
-    duo_wins, solo_wins)`` per user, duo as defined by duo_rows_for_scope.
-    ``partner_rows``: ``(discord_user_id, partner_user_id, partner_name,
-    games_together)`` from partner_rows_for_scope. When one partner
-    accounts for at least half of the winner's duo games (and >= 2 of
-    them), they're named in the detail — the enabler deserves credit.
-    The detail keeps the duo-vs-solo records — the leech evidence.
+    duo_wins, solo_wins, stack_games)`` per user from
+    duo_rows_for_scope. ``partner_rows``: ``(discord_user_id,
+    partner_user_id, partner_name, games_together)`` from
+    partner_rows_for_scope.
+
+    The detail names EVERY partner with per-pair counts ("partners",
+    best-first) rather than a single top partner: the group runs 3+
+    stacks, so one game can count toward several pairs and per-pair
+    numbers legitimately sum past duo_games — Jack can be 15/15 with
+    Gabes while Samuel is 5/5 with Jack, and naming only one partner
+    made those true numbers read as a contradiction. ``stack_games``
+    (3+ tracked on the team) is kept so the rendering can say "stacked"
+    instead of "duo'd" when that's what actually happened.
     """
     partners: dict[int, list[tuple[int, str]]] = {}
     for user_id, _partner_id, partner_name, games_together in partner_rows:
         partners.setdefault(user_id, []).append((games_together, partner_name))
 
     candidates = []
-    for user_id, display_name, games, duo_games, duo_wins, solo_wins in sorted(rows):
+    for user_id, display_name, games, duo_games, duo_wins, solo_wins, stack_games in sorted(rows):
         if games < 5 or duo_games < 2:
             continue
         fraction = Fraction(duo_games, games)
-        candidates.append((fraction, user_id, display_name, games, duo_games, duo_wins, solo_wins))
+        candidates.append(
+            (fraction, user_id, display_name, games, duo_games, duo_wins, solo_wins, stack_games)
+        )
     if not candidates:
         return []
     best = max(fraction for fraction, *_ in candidates)
     winners = []
-    for fraction, user_id, display_name, games, duo_games, duo_wins, solo_wins in candidates:
+    for (
+        fraction,
+        user_id,
+        display_name,
+        games,
+        duo_games,
+        duo_wins,
+        solo_wins,
+        stack_games,
+    ) in candidates:
         if fraction != best:
             continue
         solo_games = games - duo_games
@@ -828,10 +929,11 @@ def pick_duo_leech(rows: list[tuple], partner_rows: list[tuple] = ()) -> list[Wi
             "solo_wins": solo_wins,
             "solo_losses": solo_games - solo_wins,
         }
-        top = max(partners.get(user_id, []), default=None)  # (games, name): ties by name
-        if top is not None and top[0] >= 2 and top[0] * 2 >= duo_games:
-            detail["partner"] = top[1]
-            detail["partner_games"] = top[0]
+        if stack_games:
+            detail["stack_games"] = stack_games
+        mates = sorted(partners.get(user_id, []), key=lambda pair: (-pair[0], pair[1]))
+        if mates:
+            detail["partners"] = [[name, games_together] for games_together, name in mates]
         winners.append(
             Winner(
                 user_id=user_id,
@@ -1141,6 +1243,221 @@ def measure_notes(adj: AwardAdjustments) -> dict[str, str]:
     return notes
 
 
+# ---------------------------------------------------------- commentary
+# One deterministic, data-driven line per award, rendered in both the
+# Monday ceremony block and on the live cabinet card. Situation-keyed
+# template banks; the variant is picked by hashing (award, week,
+# situation) — NOT random — so the bot and the dashboard render the
+# identical line and a re-posted ceremony repeats itself exactly.
+# Pure code, no LLM: an opt-in LLM flavor tier can layer on later.
+
+COMMENTARY_VARIANTS: dict[str, tuple[str, ...]] = {
+    "tie": (
+        "A dead heat — {n} names, one trophy, zero dignity.",
+        "Tied. The engraver is furious.",
+        "Joint winners. Misery loves company.",
+    ),
+    "stack_week": (
+        "Not even duos — {stacks} of those were three-plus stacks. A family reunion in queue.",
+        "{stacks} games stacked three deep or more. That's not a duo, that's a convoy.",
+        "The queue was a group chat: {stacks} full-stack games.",
+    ),
+    "close_race": (
+        "Closely followed by {runner} ({gap} behind) — heartbreak.",
+        "{runner} finished just {gap} short. So close to glory. Or shame.",
+        "Photo finish: {runner} was {gap} away.",
+    ),
+    "streak": (
+        "That's {n} weeks running. A dynasty.",
+        "{n} consecutive weeks now. At this point it's a residency.",
+        "Week {n} of this. Somebody check on him.",
+    ),
+    "landslide": (
+        "Nobody else was close — {runner} trailed by {gap}.",
+        "A landslide. Second place ({runner}) needed a telescope.",
+        "Daylight in second: {runner} finished {gap} back.",
+    ),
+    "first_win": (
+        "Their first “{title}” this season. They grow up so fast.",
+        "A new name on this trophy — first time this season.",
+        "First “{title}” of the season. The taste of it changes you.",
+    ),
+    "thin_sample": (
+        "Only {n} games between them this week — small sample, big feelings.",
+        "Barely {n} games of evidence. The court convicts anyway.",
+    ),
+    "near_miss": (
+        "No one qualified — {closest} came closest at {value}; the bar is more than {min} {unit}.",
+        "The bar sits above {min} {unit}. {closest} walked under it at {value}.",
+    ),
+}
+
+# A close race: runner within 15% of the winner's number. A landslide:
+# the winner leads by half the field's larger number or more.
+CLOSE_GAP = 0.15
+LANDSLIDE_GAP = 0.5
+
+
+def _variant(situation: str, award: str, week_start: dt.date) -> str:
+    """Deterministic phrasing pick — same digest recipe as roast_line so
+    both codebases and any rerun agree."""
+    pool = COMMENTARY_VARIANTS[situation]
+    digest = hashlib.md5(f"{award}:{week_start.isoformat()}:{situation}".encode()).digest()
+    return pool[int.from_bytes(digest[:4], "big") % len(pool)]
+
+
+def gap_text(metric: str, gap: float) -> str:
+    """A value DIFFERENCE in the metric's unit, e.g. '6 LP', '2 deaths',
+    '4m 10s', '8%'. Companion to metric_value_text (which formats whole
+    values)."""
+    if metric in ("lp_loss", "lp_gain"):
+        return f"{round(gap)} LP"
+    if metric in ("games_drop", "duo_share", "lowest_kp", "lowest_winrate", "biggest_damage_share"):
+        return f"{gap:.0%}"
+    if metric == "most_time_dead":
+        return fmt_duration(gap)
+    if metric == "lowest_kda_game":
+        return f"{gap:.2f} KDA"
+    if metric == "fewest_games":
+        return _plural(round(gap), "game")
+    if metric in ("most_deaths_game", "most_deaths_total"):
+        return _plural(round(gap), "death")
+    if metric == "most_missing_pings":
+        return _plural(round(gap), "? ping")
+    if metric == "most_pings":
+        return _plural(round(gap), "ping")
+    if metric == "most_first_bloods":
+        return _plural(round(gap), "first blood")
+    if metric == "largest_multikill":
+        return _plural(round(gap), "kill")
+    return f"{gap:g}"
+
+
+def _streak_length(
+    week_start: dt.date, winner_ids: set[int], history: list[tuple[dt.date, frozenset[int]]]
+) -> int:
+    """Consecutive weeks (current one included) a current winner has held
+    this award — strictly week-on-week, a skipped week breaks the run.
+    ``history`` is (week_start, winner id set) most-recent-first."""
+    streak = 1
+    expected = week_start - dt.timedelta(days=7)
+    for week, ids in history:
+        if week != expected or not (winner_ids & ids):
+            break
+        streak += 1
+        expected -= dt.timedelta(days=7)
+    return streak
+
+
+def _games_played(detail: dict) -> int | None:
+    """This-week game count from a winner detail, when it carries one."""
+    for key in ("games", "this_week"):
+        if isinstance(detail.get(key), int):
+            return detail[key]
+    return None
+
+
+def commentary_line(
+    award: str,
+    metric: str,
+    week_start: dt.date,
+    winners: list[Winner],
+    runners_up: list[Winner],
+    history: list[tuple[dt.date, frozenset[int]]],
+) -> str | None:
+    """ONE data-driven line for the award, or None when nothing is worth
+    saying. Priority (first hit wins): tie > stack-heavy premade week
+    (Duo Leech flavor) > close race > win streak > landslide >
+    first win this season > thin sample. Forced awards get no line —
+    the management note is the story (callers skip them); below-the-bar
+    weeks use below_min_line instead.
+    """
+    if not winners:
+        return None
+    if len(winners) > 1:
+        return _variant("tie", award, week_start).format(n=len(winners))
+    winner = winners[0]
+    detail = winner.detail or {}
+    if metric == "duo_share":
+        stacks = detail.get("stack_games", 0)
+        if stacks >= 2 and stacks * 2 >= detail.get("duo_games", 0):
+            return _variant("stack_week", award, week_start).format(stacks=stacks)
+    runner = runners_up[0] if runners_up else None
+    relative = None
+    if runner is not None:
+        gap = abs(winner.value - runner.value)
+        largest = max(abs(winner.value), abs(runner.value))
+        relative = gap / largest if largest else 0.0
+        if relative <= CLOSE_GAP:
+            return _variant("close_race", award, week_start).format(
+                runner=runner.display_name, gap=gap_text(metric, gap)
+            )
+    streak = _streak_length(week_start, {winner.user_id}, history)
+    if streak >= 2:
+        return _variant("streak", award, week_start).format(n=streak)
+    if runner is not None and relative >= LANDSLIDE_GAP:
+        return _variant("landslide", award, week_start).format(
+            runner=runner.display_name, gap=gap_text(metric, abs(winner.value - runner.value))
+        )
+    prior_winners: set[int] = set()
+    for _week, ids in history:
+        prior_winners |= ids
+    if winner.user_id not in prior_winners:
+        return _variant("first_win", award, week_start).format(title=AWARDS[award].title)
+    if runner is not None:
+        winner_games = _games_played(detail)
+        runner_games = _games_played(runner.detail or {})
+        if winner_games is not None and runner_games is not None:
+            total = winner_games + runner_games
+            if total < 10:
+                return _variant("thin_sample", award, week_start).format(n=total)
+    return None
+
+
+def build_commentaries(
+    week_start: dt.date,
+    results: dict[str, list[Winner]],
+    runners_up: dict[str, list[Winner]],
+    history: dict[str, list[tuple[dt.date, frozenset[int]]]],
+    forced: frozenset[str] | set[str],
+    adj: AwardAdjustments,
+) -> dict[str, str]:
+    """award -> commentary line for every award with something to say
+    (build_ceremony_blocks' ``commentary``). Forced awards are skipped —
+    comparing a hand-picked winner to the field would be nonsense."""
+    lines = {}
+    for award in AWARD_ORDER:
+        if award in forced:
+            continue
+        line = commentary_line(
+            award,
+            effective_metric(adj, award),
+            week_start,
+            results.get(award) or [],
+            runners_up.get(award) or [],
+            history.get(award) or [],
+        )
+        if line:
+            lines[award] = line
+    return lines
+
+
+def below_min_line(award: str, week_start: dt.date, info: dict) -> str:
+    """The 'nobody earned it' ceremony line for an award whose winning
+    number didn't beat the qualification bar — names the near-miss so
+    the almost-shame is public. Distinct from an admin-disabled award
+    (those post nothing at all)."""
+    closest = " & ".join(w.display_name for w in info["winners"])
+    first = info["winners"][0]
+    value = metric_value_text(DEFAULT_METRIC[award], first.value, first.detail)
+    return _variant("near_miss", award, week_start).format(
+        closest=closest,
+        value=value,
+        min=f"{info['min']:g}",
+        unit=MIN_UNITS[award],
+    )
+
+
 # ----------------------------------------------------------- rendering
 
 
@@ -1254,6 +1571,30 @@ def _single_game_where(detail: dict) -> str:
     return f"on {detail['champion']} ({queue_bit}{result})"
 
 
+def partner_list_text(detail: dict, cap: int = 3) -> str:
+    """'Gabes 15, Sanders 7, Zak 5' (capped, '…' when more) from the
+    plural "partners" detail; falls back to the legacy single
+    partner/partner_games keys on pre-2026-08 rows. Per-pair counts may
+    legitimately sum past duo_games — one 3-stack game counts toward
+    every pair in it."""
+    partners = detail.get("partners")
+    if partners:
+        shown = ", ".join(f"{name} {games}" for name, games in partners[:cap])
+        return shown + ("…" if len(partners) > cap else "")
+    if "partner" in detail:
+        return f"{detail['partner']} {detail.get('partner_games', '?')}"
+    return ""
+
+
+def _premade_phrase(detail: dict) -> str:
+    """ "stacked with the group"/"duo'd" + the partner names — honest
+    about whether the games were duos or full 3+ stacks."""
+    partner_text = partner_list_text(detail)
+    partner_bit = f" ({partner_text})" if partner_text else ""
+    verb = "stacked with the group" if detail.get("stack_games") else "duo'd"
+    return f"{verb}{partner_bit}"
+
+
 def condemn_line(award: str, winner: Winner) -> str:
     """The one-line number that condemns the winner, from their detail.
 
@@ -1285,12 +1626,9 @@ def condemn_line(award: str, winner: Winner) -> str:
             f"vs a {detail['baseline']:g}-game/week habit."
         )
     if metric == "duo_share":
-        partner_bit = ""
-        if "partner" in detail:
-            partner_bit = f" ({detail['partner_games']} of them with {detail['partner']})"
         return (
-            f"**{detail['duo_games']} of {detail['games']}** games duo'd{partner_bit} — "
-            f"duo {detail['duo_wins']}W-{detail['duo_losses']}L "
+            f"**{detail['duo_games']} of {detail['games']}** games {_premade_phrase(detail)} — "
+            f"premade {detail['duo_wins']}W-{detail['duo_losses']}L "
             f"vs solo {detail['solo_wins']}W-{detail['solo_losses']}L."
         )
     if metric == "most_deaths_game":
@@ -1355,13 +1693,16 @@ def build_ceremony_blocks(
     taglines: dict[str, str] | None = None,
     forced: frozenset[str] | set[str] = frozenset(),
     measures: dict[str, str] | None = None,
+    below_min: dict[str, dict] | None = None,
+    commentary: dict[str, str] | None = None,
 ) -> list[str]:
     """Ceremony post as blocks for leaderboard.chunk_blocks.
 
     One block per award: emoji + name, winner mention(s), the condemning
-    number, one roast. Joint winners share a block, one detail line each.
-    Every block ends with a newline so chunked messages get a blank line
-    between awards.
+    number, one roast, and (when the data says something) a commentary
+    line. Joint winners share a block, one detail line each. Every block
+    ends with a newline so chunked messages get a blank line between
+    awards.
 
     ``season_reset``: swaps the LP awards' skip lines for the reset line
     — their normal skip lines claim nobody moved, which would be false.
@@ -1369,8 +1710,11 @@ def build_ceremony_blocks(
     Dashboard controls: ``disabled`` awards are omitted entirely,
     ``taglines`` (custom only — see AwardAdjustments) render as an
     italic line under the title, awards in ``forced`` carry the
-    "chosen by management" note, and ``measures`` (award -> measure_note
-    text) explain a re-pointed measure. Defaults keep the output
+    "chosen by management" note, ``measures`` (award -> measure_note
+    text) explain a re-pointed measure, ``below_min`` (from
+    compute_results) swaps the skip line for the "nobody earned it"
+    near-miss line, and ``commentary`` (award -> build_commentaries
+    text) adds the data-driven line. Defaults keep the output
     byte-identical to the pre-controls format.
     """
     if header is None:
@@ -1378,6 +1722,8 @@ def build_ceremony_blocks(
     blocks = [f"{header}\n"]
     taglines = taglines or {}
     measures = measures or {}
+    below_min = below_min or {}
+    commentary = commentary or {}
     for award in AWARD_ORDER:
         if award in disabled:
             continue
@@ -1386,11 +1732,12 @@ def build_ceremony_blocks(
         tagline_line = f"*{taglines[award]}*\n" if taglines.get(award) else ""
         winners = results.get(award) or []
         if not winners:
-            skip = (
-                RESET_LP_SKIP_LINE
-                if season_reset and award in (LP_LOSS, LP_CHAD)
-                else meta.skip_line
-            )
+            if season_reset and award in (LP_LOSS, LP_CHAD):
+                skip = RESET_LP_SKIP_LINE
+            elif award in below_min:
+                skip = below_min_line(award, week_start, below_min[award])
+            else:
+                skip = meta.skip_line
             blocks.append(
                 f"{meta.emoji} **{meta.title}** — no winner\n"
                 f"{measure_line}{tagline_line}{skip}\n"
@@ -1407,9 +1754,13 @@ def build_ceremony_blocks(
         # Severity overrides only make sense for a lone winner — joint
         # winners' details differ, so they get the weekly pool line.
         roast_detail = winners[0].detail if len(winners) == 1 else None
+        commentary_line_text = (
+            f"\U0001f4ac *{commentary[award]}*\n" if commentary.get(award) else ""
+        )
         blocks.append(
             f"{meta.emoji} **{meta.title}** — {mentions}{note}\n"
             f"{measure_line}{tagline_line}{body} {roast_line(award, week_start, roast_detail)}\n"
+            f"{commentary_line_text}"
         )
     return blocks
 
@@ -1583,9 +1934,10 @@ async def fetch_window_rows(week_start: dt.datetime, week_end: dt.datetime) -> l
 async def fetch_game_rows(week_start: dt.datetime, week_end: dt.datetime) -> list[GameRow]:
     """One GameRow per tracked player's game this week — EVERY queue
     (scope filtering is pure Python so per-award scopes share one
-    fetch), remakes excluded. ``duo`` uses the same EXISTS pattern as
-    FetchFromRiot.get_last_five_games; NULL team_id (rows predating the
-    column) never counts as duo.
+    fetch), remakes excluded. ``allies`` counts the OTHER tracked
+    players on the same team (the COUNT flavor of the EXISTS pattern in
+    FetchFromRiot.get_last_five_games — 2+ marks a stack); NULL team_id
+    (rows predating the column) never matches, so it counts as solo.
     """
     rows = await db.fetchall(
         "WITH "
@@ -1593,12 +1945,12 @@ async def fetch_game_rows(week_start: dt.datetime, week_end: dt.datetime) -> lis
         + f"""
         SELECT t.discord_user_id, t.display_name, ms.queue_id,
                ms.kills, ms.deaths, ms.assists, ms.champion, ms.win, ms.match_id,
-               EXISTS (
-                   SELECT 1 FROM match_stats o
+               (
+                   SELECT COUNT(*) FROM match_stats o
                    WHERE o.match_id = ms.match_id
                      AND o.team_id = ms.team_id
                      AND o.puuid <> ms.puuid
-               ) AS duo,
+               ) AS allies,
                ms.time_dead_sec, ms.pings_total, ms.pings_missing,
                ms.kill_participation, ms.team_damage_pct,
                ms.largest_multi_kill, ms.first_blood
@@ -1680,6 +2032,11 @@ async def fetch_adjustments(week_start: dt.date) -> AwardAdjustments:
         tagline = (by_key.get(f"award_{award}_tagline") or "").strip()
         if tagline and tagline != DEFAULT_TAGLINES[award]:
             taglines[award] = tagline
+    minimums: dict[str, float] = {}
+    for award in AWARD_ORDER:
+        raw = by_key.get(f"award_{award}_min")
+        if raw is not None:
+            minimums[award] = parse_minimum(raw, MIN_DEFAULTS[award])
     scope_row = await db.fetchone("SELECT value FROM bot_config WHERE key = %s", (SCOPE_KEY,))
     default_scope = parse_scope(scope_row[0] if scope_row else None)
     forced: dict[str, int] = {}
@@ -1713,16 +2070,40 @@ async def fetch_adjustments(week_start: dt.date) -> AwardAdjustments:
         metrics=metrics,
         scopes=scopes,
         default_scope=default_scope,
+        minimums=minimums,
     )
+
+
+async def fetch_prior_winner_history(
+    week_start: dt.date,
+) -> dict[str, list[tuple[dt.date, frozenset[int]]]]:
+    """award -> [(week_start, winner ids)] most-recent-first for weeks
+    BEFORE ``week_start``, scoped to the current season (all recorded
+    history when the seasons table is empty). Feeds the streak and
+    first-win commentary situations."""
+    rows = await db.fetchall(
+        "SELECT wa.award, wa.week_start, wa.discord_user_id FROM weekly_awards wa "
+        "WHERE wa.week_start < %s AND wa.week_start >= COALESCE("
+        "(SELECT MAX(started_at)::date FROM seasons), DATE '1970-01-01') "
+        "ORDER BY wa.week_start DESC",
+        (week_start,),
+    )
+    grouped: dict[str, dict[dt.date, set[int]]] = {}
+    for award, week, user_id in rows:
+        grouped.setdefault(award, {}).setdefault(week, set()).add(user_id)
+    return {
+        award: [(week, frozenset(ids)) for week, ids in sorted(weeks.items(), reverse=True)]
+        for award, weeks in grouped.items()
+    }
 
 
 def compute_results(
     inputs: AwardInputs, adjustments: AwardAdjustments | None = None
-) -> tuple[dict[str, list[Winner]], bool, frozenset[str]]:
+) -> tuple[dict[str, list[Winner]], bool, frozenset[str], dict[str, dict], dict[str, list[Winner]]]:
     """All five awards from ``inputs``, honoring dashboard adjustments.
 
     Pure — the fixture tests drive this directly. Returns (results,
-    season_reset, forced_applied):
+    season_reset, forced_applied, below_min, runners_up):
 
     - season_reset is True when the reset happened inside the window,
       from either of two signals — the in-window shrink count reaching
@@ -1740,7 +2121,16 @@ def compute_results(
       value/detail are exactly what they earned — and if they no longer
       qualify (dashboard offered candidates, data moved by Monday) the
       computed winner(s) stand and the award is absent from
-      forced_applied. Precedence: exclusion > forced > chosen measure.
+      forced_applied.
+    - Qualification bars: a computed winner whose number doesn't BEAT
+      the award's minimum (strictly — "10 LP and below is excluded")
+      moves to ``below_min`` (award -> {"min", "winners"}) and the award
+      records no winner. The bar lives in the DEFAULT metric's unit, so
+      it only judges weeks running the default metric; forced winners
+      bypass it. Full precedence: exclusion > forced > chosen measure >
+      qualification bar > defaults.
+    - ``runners_up``: the next-best group behind the computed leaders
+      (threshold-free, forced awards get []) — commentary fuel.
     - ``disabled`` is deliberately NOT applied here: results stay
       complete so previews can show what a disabled award would have
       said; posting and persistence do the skipping.
@@ -1757,7 +2147,9 @@ def compute_results(
         partner_rows=inputs.partner_rows,
     )
 
-    def compute(award: str, only: int | None = None) -> list[Winner]:
+    def compute(
+        award: str, only: int | None = None, also_excluded: frozenset[int] = frozenset()
+    ) -> list[Winner]:
         metric = effective_metric(adj, award)
         scope = effective_scope(adj, award)
         if METRICS[metric].lp_based and season_reset:
@@ -1765,7 +2157,11 @@ def compute_results(
         excluded = adj.excluded_for(award)
 
         def keep(user_id: int) -> bool:
-            return user_id not in excluded and (only is None or user_id == only)
+            return (
+                user_id not in excluded
+                and user_id not in also_excluded
+                and (only is None or user_id == only)
+            )
 
         winners = pick_metric(metric, pools, scope, keep)
         extra: dict = {}
@@ -1779,6 +2175,8 @@ def compute_results(
 
     results: dict[str, list[Winner]] = {}
     forced_applied: set[str] = set()
+    below_min: dict[str, dict] = {}
+    runners_up: dict[str, list[Winner]] = {}
     for award in AWARD_ORDER:
         winners: list[Winner] | None = None
         forced = adj.forced_for(award)
@@ -1787,20 +2185,36 @@ def compute_results(
             if forced_winners:
                 winners = forced_winners
                 forced_applied.add(award)
+        computed: list[Winner] | None = None
         if winners is None:
-            winners = compute(award)
+            computed = compute(award)
+            winners = computed
+            minimum = adj.minimum_for(award)
+            if (
+                winners
+                and minimum > 0
+                and effective_metric(adj, award) == DEFAULT_METRIC[award]
+                and qualifying_magnitude(award, winners[0].value) <= minimum
+            ):
+                below_min[award] = {"min": minimum, "winners": winners}
+                winners = []
         results[award] = winners
-    return results, season_reset, frozenset(forced_applied)
+        if award in forced_applied:
+            runners_up[award] = []  # no commentary for managed wins
+        else:
+            leaders = frozenset(w.user_id for w in (computed or []))
+            runners_up[award] = compute(award, also_excluded=leaders) if leaders else []
+    return results, season_reset, frozenset(forced_applied), below_min, runners_up
 
 
 async def compute_all_awards(
     week_start: dt.datetime, week_end: dt.datetime
 ) -> tuple[dict[str, list[Winner]], bool]:
-    """All five awards for [week_start, week_end), no adjustments (so
-    the all-queues default scope and built-in metrics) — empty list =
-    skipped. Kept as the stable public entry point; the ceremony path
-    goes fetch_inputs + fetch_adjustments + compute_results (see the
-    cog). Second return: season reset flag (full semantics on
-    compute_results)."""
-    results, season_reset, _ = compute_results(await fetch_inputs(week_start, week_end))
+    """All five awards for [week_start, week_end), no adjustments beyond
+    the built-in defaults (all-queues scope, default metrics, MIN_DEFAULTS
+    bars) — empty list = skipped. Kept as the stable public entry point;
+    the ceremony path goes fetch_inputs + fetch_adjustments +
+    compute_results (see the cog). Second return: season reset flag
+    (full semantics on compute_results)."""
+    results, season_reset, _, _, _ = compute_results(await fetch_inputs(week_start, week_end))
     return results, season_reset

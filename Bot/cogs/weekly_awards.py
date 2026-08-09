@@ -158,8 +158,23 @@ class WeeklyAwards(commands.Cog):
         # (award_overrides) — see utils/awards.AwardAdjustments.
         adjustments = await awards.fetch_adjustments(week_start.date())
         inputs = await awards.fetch_inputs(week_start, week_end)
-        results, season_reset, forced_applied = awards.compute_results(inputs, adjustments)
+        results, season_reset, forced_applied, below_min, runners_up = awards.compute_results(
+            inputs, adjustments
+        )
+        history = await awards.fetch_prior_winner_history(week_start.date())
+        commentary = awards.build_commentaries(
+            week_start.date(), results, runners_up, history, forced_applied, adjustments
+        )
         measures = awards.measure_notes(adjustments)
+        if below_min:
+            self.bot.logging.info(
+                "Below the qualification bar, skipped: "
+                + ", ".join(
+                    f"{award} (min {info['min']:g}, best "
+                    f"{awards.qualifying_magnitude(award, info['winners'][0].value):g})"
+                    for award, info in sorted(below_min.items())
+                )
+            )
         if adjustments.default_scope != awards.SCOPE_ALL or measures:
             self.bot.logging.info(
                 f"Award measures: default scope {adjustments.default_scope!r}"
@@ -197,6 +212,8 @@ class WeeklyAwards(commands.Cog):
             taglines=adjustments.taglines,
             forced=forced_applied,
             measures=measures,
+            below_min=below_min,
+            commentary=commentary,
         )
 
         self.bot.logging.info(
@@ -345,7 +362,10 @@ class WeeklyAwards(commands.Cog):
         # exclusions and disabled awards included).
         adjustments = await awards.fetch_adjustments(week_start.date())
         inputs = await awards.fetch_inputs(week_start, now_london)
-        results, season_reset, forced_applied = awards.compute_results(inputs, adjustments)
+        results, season_reset, forced_applied, below_min, runners_up = awards.compute_results(
+            inputs, adjustments
+        )
+        history = await awards.fetch_prior_winner_history(week_start.date())
         header = (
             f"\U0001f3c6 **Weekly Awards — preview** — week of "
             f"<t:{awards.week_epoch(week_start.date())}:d> so far (nothing recorded)"
@@ -359,6 +379,10 @@ class WeeklyAwards(commands.Cog):
             taglines=adjustments.taglines,
             forced=forced_applied,
             measures=awards.measure_notes(adjustments),
+            below_min=below_min,
+            commentary=awards.build_commentaries(
+                week_start.date(), results, runners_up, history, forced_applied, adjustments
+            ),
         )
         if adjustments.disabled:
             blocks.append(

@@ -155,6 +155,15 @@ class LiveGames(commands.Cog):
                 # Already in the NEXT game — the previous one ended.
                 await self._record_live(puuid, game)
                 ended.append(puuid)
+            else:
+                # Still in the same game: bump seen_at so freshness is a
+                # ~1-minute signal. This lets the dashboard use a tight
+                # display window (minutes, not poll-cycles) — a row that
+                # stops getting bumped is a game Riot no longer reports.
+                await db.execute(
+                    "UPDATE live_games SET seen_at = now() WHERE puuid = %s",
+                    (puuid,),
+                )
         if ended:
             self.bot.logging.info(
                 f"Live: {len(ended)} game(s) just ended — refreshing the board now"

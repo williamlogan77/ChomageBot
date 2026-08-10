@@ -1,6 +1,6 @@
 """Weekly awards ceremony + all-time trophy cabinet.
 
-Every Monday from 06:00 Europe/London the bot posts five awards into
+From Monday 06:00 Europe/London onward the bot posts five awards into
 #general covering the calendar week that just ended (Monday 00:00 ->
 Monday 00:00 London wall time), aggregated per Discord user across all
 of their tracked league accounts. Winners land in the weekly_awards
@@ -15,8 +15,12 @@ Discord's 2000-char cap via leaderboard.chunk_blocks.
 Scheduling is a 15-min @tasks.loop, idempotent across restarts and hot
 reloads: a tick only posts when the awarded week has no weekly_awards
 rows yet AND the bot_config marker hasn't seen it (the marker covers the
-pathological zero-winner week, which records no rows). Computation lives
-in utils/awards.py; this cog owns scheduling, posting and persistence.
+pathological zero-winner week, which records no rows). Idempotency is
+what gates a repost, NOT the calendar — the tick will happily post on a
+Tuesday if Monday's attempt never landed, so a bot that was down (or an
+exception mid-ceremony) costs a late post rather than the whole week.
+Computation lives in utils/awards.py; this cog owns scheduling, posting
+and persistence.
 """
 
 import datetime as dt
@@ -316,7 +320,16 @@ class WeeklyAwards(commands.Cog):
         self.awards_tick_last_fired = dt.datetime.now()
 
         now_london = dt.datetime.now(awards.LONDON)
-        if not (now_london.weekday() == 0 and now_london.hour >= CEREMONY_HOUR):
+        # "Not before Monday CEREMONY_HOUR of the current week" — deliberately
+        # a time-ordering check, not `weekday() == 0`. Under the weekday gate a
+        # ceremony that failed for its Monday (bot down, or an exception inside
+        # _run_ceremony) could never be retried: Tuesday's ticks bailed here,
+        # and by the next Monday previous_week_bounds had moved on, so the week
+        # was lost silently. Now a late tick any day of the week still posts
+        # the week that ended, and idempotency comes from _already_posted
+        # (rows + bot_config marker) rather than from the calendar.
+        this_monday, _ = awards.week_bounds(now_london)
+        if now_london < this_monday + dt.timedelta(hours=CEREMONY_HOUR):
             return
         week_start, week_end = awards.previous_week_bounds(now_london)
         if await self._already_posted(week_start.date()):

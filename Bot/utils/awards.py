@@ -2018,7 +2018,14 @@ async def fetch_adjustments(week_start: dt.date) -> AwardAdjustments:
     creates it via the schema)."""
     disabled: set[str] = set()
     taglines: dict[str, str] = {}
-    config_rows = await db.fetchall("SELECT key, value FROM bot_config WHERE key LIKE 'award\\_%'")
+    # The LIKE pattern goes in as a parameter, never as SQL text: db.fetchall
+    # passes a (possibly empty) params tuple to psycopg, whose placeholder
+    # scanner then rejects any literal '%' it can't read as %s/%b/%t — the
+    # trailing "%'" here raised ProgrammingError and killed every ceremony.
+    # Same convention as cogs/match_analysis.py's command_usage LIKE query.
+    config_rows = await db.fetchall(
+        "SELECT key, value FROM bot_config WHERE key LIKE %s", ("award\\_%",)
+    )
     by_key = {key: value for key, value in config_rows}
     for award in AWARD_ORDER:
         enabled_value = by_key.get(f"award_{award}_enabled")
